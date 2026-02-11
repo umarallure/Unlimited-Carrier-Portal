@@ -392,14 +392,19 @@ export default function UploadPage() {
             const BATCH_SIZE = 500
             const isPolicyTable = targetTable === 'aetna_policies' || targetTable === 'amam_policies' || targetTable === 'transamerica_policies'
 
+            const now = new Date().toISOString()
             for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-                const chunk = rows.slice(i, i + BATCH_SIZE)
+                const chunk = rows.slice(i, i + BATCH_SIZE).map(row => ({
+                    ...row,
+                    updated_at: now,
+                }))
 
                 const query = supabase.from(targetTable)
 
                 const { error } = isPolicyTable
                     ? await query.upsert(chunk, {
                         onConflict: 'agency_carrier_id,policy_number',
+                        ignoreDuplicates: false, // Must UPDATE on conflict, not skip
                     })
                     : await query.insert(chunk) // commissions: allow multiple rows per policy
 
