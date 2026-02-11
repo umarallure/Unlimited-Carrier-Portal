@@ -1,0 +1,130 @@
+@import "tailwindcss";
+
+@theme {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+:root {
+  /* Muted, professional dark palette */
+  --background: 222 47% 7%;          /* bg-slate-950 */
+  --foreground: 210 40% 98%;
+  --card: 222 36% 10%;               /* bg-slate-900 */
+  --card-foreground: 210 40% 96%;
+  --popover: 222 36% 10%;
+  --popover-foreground: 210 40% 96%;
+  --primary: 221 83% 53%;            /* blue-600 */
+  --primary-foreground: 210 40% 98%;
+  --secondary: 215 20% 20%;          /* subtle slate */
+  --secondary-foreground: 210 40% 96%;
+  --muted: 215 16% 17%;
+  --muted-foreground: 217 15% 65%;
+  --accent: 222 47% 11%;
+  --accent-foreground: 210 40% 96%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 215 19% 24%;
+  --input: 215 19% 24%;
+  --ring: 221 83% 53%;
+  --radius: 0.75rem;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+/* Muted surfaces & helpers */
+.gradient-bg,
+.gradient-bg-alt,
+.gradient-bg-blue,
+.gradient-bg-purple {
+  background: radial-gradient(circle at top left, rgba(148, 163, 184, 0.25), transparent 55%),
+    radial-gradient(circle at bottom right, rgba(30, 64, 175, 0.25), transparent 55%),
+    rgb(15 23 42);
+}
+
+.glass {
+  background-color: rgb(15 23 42);
+  border: 1px solid rgba(51, 65, 85, 0.9);
+}
+
+.glass-card {
+  background-color: rgb(15 23 42);
+  border: 1px solid rgba(51, 65, 85, 0.9);
+}
+
+.gradient-text {
+  background: linear-gradient(90deg, #e5e7eb, #cbd5f5);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.transition-all {
+  transition: all 0.2s ease-in-out;
+}
+
+.hover-lift {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.45);
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.shimmer {
+  animation: shimmer 1.5s infinite linear;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(148, 163, 184, 0.12) 50%,
+    transparent 100%
+  );
+  background-size: 1000px 100%;
+}
