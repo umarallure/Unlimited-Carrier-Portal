@@ -481,7 +481,7 @@ export default function UploadPage() {
 
                     <div className="space-y-3">
                         <Label className="text-gray-300">File Type</Label>
-                        <RadioGroup defaultValue="Policy" value={fileType} onValueChange={setFileType} className="grid grid-cols-2 gap-4">
+                        <RadioGroup defaultValue="Policy" value={fileType} onValueChange={(value) => setFileType(value as FileKind)} className="grid grid-cols-2 gap-4">
                             <div className="relative">
                                 <RadioGroupItem value="Policy" id="r1" className="peer sr-only" />
                                 <Label
