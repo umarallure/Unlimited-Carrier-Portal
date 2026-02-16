@@ -13,6 +13,8 @@ export interface TreeNode {
   onClick?: () => void
   badge?: string | number
   isActive?: boolean
+  /** Used by UploadTree for carrier-level nodes (agency_carriers.id). */
+  agencyCarrierId?: string
 }
 
 interface TreeProps {

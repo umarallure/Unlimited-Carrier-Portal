@@ -319,7 +319,7 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     }
     const query = supabase.from(targetTable)
     const { error } = isPolicyTable
-      ? await query.upsert(chunk, { onConflict: ['agency_carrier_id', 'policy_number'], ignoreDuplicates: false })
+      ? await query.upsert(chunk, { onConflict: 'agency_carrier_id,policy_number', ignoreDuplicates: false })
       : await query.insert(chunk)
     if (error) {
       console.error('Chunk write error:', error)

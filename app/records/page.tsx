@@ -570,7 +570,7 @@ export default function RecordsPage() {
                                             {Object.entries(currentFlat).slice(0, 14).map(([key, val]) => (
                                                 <span key={key} className="flex gap-2">
                                                     <dt className="text-slate-500 shrink-0">{key.replace(/_/g, ' ')}:</dt>
-                                                    <dd className="text-slate-200 truncate min-w-0">{val}</dd>
+                                                    <dd className="text-slate-200 truncate min-w-0">{String(val)}</dd>
                                                 </span>
                                             ))}
                                         </dl>
@@ -607,7 +607,7 @@ export default function RecordsPage() {
                                                         {Object.entries(thisFlat).slice(0, 14).map(([key, val]) => (
                                                             <span key={key} className="flex gap-2">
                                                                 <dt className="text-slate-500 shrink-0">{key.replace(/_/g, ' ')}:</dt>
-                                                                <dd className="text-slate-300 truncate min-w-0">{val}</dd>
+                                                                <dd className="text-slate-300 truncate min-w-0">{String(val)}</dd>
                                                             </span>
                                                         ))}
                                                     </dl>
