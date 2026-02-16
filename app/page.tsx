@@ -1,6 +1,6 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Users, FileText, Briefcase, Upload, TrendingUp, Activity, Network } from "lucide-react";
+import { Users, FileText, Briefcase, Upload, Activity } from "lucide-react";
 import Link from "next/link";
 
 export default function Home() {
@@ -76,19 +76,6 @@ export default function Home() {
           </div>
         </Link>
 
-        <Link href="/tree" className="group">
-          <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 hover:bg-slate-900/80 transition-colors">
-            <div className="flex items-center justify-between mb-3">
-              <div className="w-10 h-10 rounded-md bg-slate-800 flex items-center justify-center">
-                <Network className="h-5 w-5 text-slate-100" />
-              </div>
-            </div>
-            <div className="space-y-1">
-              <h3 className="text-lg font-medium text-slate-50">Organization Tree</h3>
-              <p className="text-xs text-slate-400">Visual hierarchy view of your data.</p>
-            </div>
-          </div>
-        </Link>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -110,10 +97,6 @@ export default function Home() {
             <Link href="/upload-tree" className="px-4 py-3 rounded-md border border-slate-800 hover:bg-slate-800/80 transition-colors">
               <p className="text-sm font-medium text-slate-50">Upload file</p>
               <p className="text-xs text-slate-400 mt-1">Upload from the organization tree.</p>
-            </Link>
-            <Link href="/tree" className="px-4 py-3 rounded-md border border-slate-800 hover:bg-slate-800/80 transition-colors">
-              <p className="text-sm font-medium text-slate-50">View tree</p>
-              <p className="text-xs text-slate-400 mt-1">Browse organization hierarchy.</p>
             </Link>
           </div>
         </div>

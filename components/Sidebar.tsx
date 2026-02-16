@@ -1,6 +1,6 @@
 
 import Link from 'next/link';
-import { Home, Briefcase, FileText, Upload, Users, Shield, Network } from 'lucide-react';
+import { Home, Briefcase, FileText, Upload, Users, Shield } from 'lucide-react';
 
 const Sidebar = () => {
     return (
@@ -66,16 +66,6 @@ const Sidebar = () => {
                         <FileText size={18} className="text-slate-200" />
                     </div>
                     <span className="text-sm font-medium text-slate-100">Records</span>
-                </Link>
-
-                <Link
-                    href="/tree"
-                    className="group flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-900 transition-colors"
-                >
-                    <div className="w-8 h-8 rounded-md bg-slate-900 flex items-center justify-center">
-                        <Network size={18} className="text-slate-200" />
-                    </div>
-                    <span className="text-sm font-medium text-slate-100">Organization Tree</span>
                 </Link>
 
                 <Link
