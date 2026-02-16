@@ -9,20 +9,37 @@ function nextDay(ymd: string): string {
 }
 
 /**
+ * Get start/end of a calendar day in local timezone as ISO strings (for Supabase query).
+ * Use this so "today" means the user's current day, not UTC day.
+ */
+export function getLocalDayRange(dateYmd: string): { start: string; end: string } {
+  // dateYmd is YYYY-MM-DD; interpret as local date
+  const startLocal = new Date(dateYmd + 'T00:00:00')
+  const endLocal = new Date(startLocal.getTime() + 24 * 60 * 60 * 1000)
+  return {
+    start: startLocal.toISOString(),
+    end: endLocal.toISOString(),
+  }
+}
+
+/**
  * Fetch status for (upload_date, agency_carrier_ids).
  * "uploaded" = BOTH Policy and Commission files exist for that date.
  * "no_update" = from daily_carrier_upload_status when user explicitly marked it.
+ * Uses local calendar day (start/end) so uploads "today" in user's timezone count.
  */
 export async function fetchDailyStatus(
   uploadDate: string,
-  agencyCarrierIds: string[]
+  agencyCarrierIds: string[],
+  options?: { startISO?: string; endISO?: string }
 ): Promise<Record<string, DailyStatus>> {
   if (agencyCarrierIds.length === 0) return {}
   const map: Record<string, DailyStatus> = {}
 
+  const start = options?.startISO ?? `${uploadDate}T00:00:00.000Z`
+  const end = options?.endISO ?? `${nextDay(uploadDate)}T00:00:00.000Z`
+
   // 1. Derive "uploaded" from files table: both Policy and Commission uploaded on this date
-  const start = `${uploadDate}T00:00:00.000Z`
-  const end = `${nextDay(uploadDate)}T00:00:00.000Z`
   const { data: filesData, error: filesError } = await supabase
     .from('files')
     .select('agency_carrier_id, file_type')
@@ -61,14 +78,15 @@ export async function fetchDailyStatus(
   return map
 }
 
-/** Map: agency_carrier_id -> Set of file_type that have been uploaded for this date (Policy, Commission). */
+/** Map: agency_carrier_id -> Set of file_type that have been uploaded for this date (Policy, Commission). Uses local day range when startISO/endISO provided. */
 export async function fetchDailyFileTypes(
   uploadDate: string,
-  agencyCarrierIds: string[]
+  agencyCarrierIds: string[],
+  options?: { startISO?: string; endISO?: string }
 ): Promise<Record<string, Set<string>>> {
   if (agencyCarrierIds.length === 0) return {}
-  const start = `${uploadDate}T00:00:00.000Z`
-  const end = `${nextDay(uploadDate)}T00:00:00.000Z`
+  const start = options?.startISO ?? `${uploadDate}T00:00:00.000Z`
+  const end = options?.endISO ?? `${nextDay(uploadDate)}T00:00:00.000Z`
   const { data: filesData, error } = await supabase
     .from('files')
     .select('agency_carrier_id, file_type')

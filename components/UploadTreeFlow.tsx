@@ -23,7 +23,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
-import { fetchDailyStatus, fetchDailyFileTypes, setDailyStatus, type DailyStatus } from '@/lib/dailyUploadStatus'
+import { fetchDailyStatus, fetchDailyFileTypes, setDailyStatus, getLocalDayRange, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { cn } from '@/lib/utils'
 
 // Custom Node Components - Professional and Simple
@@ -499,7 +499,8 @@ export function UploadTreeFlow() {
         if (agencyCarriers && agencyCarriers.length > 0) {
           childrenMap.set(agencyNodeId, [])
           const acIds = agencyCarriers.map((ac: any) => ac.id)
-          const fileTypesByAc = await fetchDailyFileTypes(uploadDate, acIds)
+          const dayRange = getLocalDayRange(uploadDate)
+          const fileTypesByAc = await fetchDailyFileTypes(uploadDate, acIds, { startISO: dayRange.start, endISO: dayRange.end })
 
           agencyCarriers.forEach((ac: any) => {
             const carrier = ac.carriers
@@ -545,7 +546,7 @@ export function UploadTreeFlow() {
                   })
 
                   if (result.success) {
-                    await loadDailyStatuses() // Refetch – carrier shows green only when both Policy and Commission uploaded
+                    await loadDailyStatuses() // Refetch – carrier and Policy/Commission nodes update (uses local day range)
                     const count = (result as { count?: number }).count ?? 0
                     onUploadMessage?.('success', `${fileType} file uploaded successfully. ${count} record(s) processed.`)
                     return result
@@ -667,7 +668,8 @@ export function UploadTreeFlow() {
 
     if (agencyCarriers && agencyCarriers.length > 0) {
       const ids = agencyCarriers.map(ac => ac.id)
-      const statusMap = await fetchDailyStatus(uploadDate, ids)
+      const dayRange = getLocalDayRange(uploadDate)
+      const statusMap = await fetchDailyStatus(uploadDate, ids, { startISO: dayRange.start, endISO: dayRange.end })
       setDailyStatusMap(statusMap)
     }
   }, [uploadDate])
