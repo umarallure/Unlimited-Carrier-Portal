@@ -16,11 +16,12 @@ import ReactFlow, {
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 import { supabase } from '@/lib/supabaseClient'
-import { Building2, FileText, Loader2, RefreshCw, CheckCircle, AlertCircle, Calendar, ChevronRight, ChevronDown, MinusCircle } from 'lucide-react'
+import { Building2, FileText, Loader2, RefreshCw, CheckCircle, AlertCircle, Calendar, ChevronRight, ChevronDown, MinusCircle, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
 import { fetchDailyStatus, fetchDailyFileTypes, setDailyStatus, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { cn } from '@/lib/utils'
@@ -140,12 +141,22 @@ function CarrierNode({ data }: { data: any }) {
 function UploadNode({ data }: { data: any }) {
   const [uploading, setUploading] = useState(false)
   const [localStatus, setLocalStatus] = useState<'idle' | 'success' | 'error'>('idle')
+  const [pendingFile, setPendingFile] = useState<File | null>(null)
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false)
   const carrierFullyUploaded = data.carrierFullyUploaded === true
   const carrierNoUpdate = data.carrierNoUpdate === true
   const thisFileTypeUploaded = data.thisFileTypeUploaded === true
 
   const label = data.fileType === 'Policy' ? 'P' : 'C'
   const title = carrierNoUpdate ? `${data.fileType} – no update today` : `${data.fileType} file – click to upload`
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return '0 Bytes'
+    const k = 1024
+    const sizes = ['Bytes', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
+  }
 
   const handleClick = () => {
     if (uploading || carrierNoUpdate) return
@@ -154,20 +165,35 @@ function UploadNode({ data }: { data: any }) {
     input?.click()
   }
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file || !data.onUpload) return
+    if (!file) return
+    // Store file and show confirmation dialog instead of uploading immediately
+    setPendingFile(file)
+    setShowConfirmDialog(true)
+    // Reset input so same file can be selected again if cancelled
+    e.target.value = ''
+  }
+
+  const handleConfirmUpload = async () => {
+    if (!pendingFile || !data.onUpload) return
+    setShowConfirmDialog(false)
     setUploading(true)
     setLocalStatus('idle')
     try {
-      await data.onUpload(file)
+      await data.onUpload(pendingFile)
       setLocalStatus('success')
     } catch {
       setLocalStatus('error')
     } finally {
       setUploading(false)
-      e.target.value = ''
+      setPendingFile(null)
     }
+  }
+
+  const handleCancelUpload = () => {
+    setShowConfirmDialog(false)
+    setPendingFile(null)
   }
 
   const showGreen = localStatus === 'success' || carrierFullyUploaded || thisFileTypeUploaded
@@ -175,7 +201,7 @@ function UploadNode({ data }: { data: any }) {
   const showError = localStatus === 'error'
 
   return (
-    <div className="relative inline-flex">
+    <>
       <input
         id={`file-input-${data.id}`}
         type="file"
@@ -210,7 +236,72 @@ function UploadNode({ data }: { data: any }) {
           <span className="text-sm font-bold text-orange-200">{label}</span>
         )}
       </div>
-    </div>
+
+      {/* Confirmation Dialog */}
+      <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+        <DialogContent className="bg-slate-900 border-slate-700 max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-white flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-orange-400" />
+              Confirm File Upload
+            </DialogTitle>
+            <DialogDescription className="text-slate-400">
+              Please verify the file details before uploading.
+            </DialogDescription>
+          </DialogHeader>
+          {pendingFile && (
+            <div className="space-y-4 py-4">
+              <div className="bg-slate-800/50 rounded-lg p-4 space-y-3 border border-slate-700">
+                <div>
+                  <div className="text-xs text-slate-500 mb-1">File Name</div>
+                  <div className="text-sm font-medium text-slate-200 break-all">{pendingFile.name}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500 mb-1">File Size</div>
+                  <div className="text-sm text-slate-300">{formatFileSize(pendingFile.size)}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500 mb-1">File Type</div>
+                  <div className="text-sm text-slate-300">{pendingFile.type || 'Not specified'}</div>
+                </div>
+                <div className="pt-2 border-t border-slate-700">
+                  <div className="text-xs text-slate-500 mb-1">Upload Location</div>
+                  <div className="text-sm text-slate-300">
+                    <div className="font-medium">{data.fileType}</div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      {data.agencyName} → {data.carrierName}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-amber-900/20 border border-amber-800/50 rounded-lg p-3">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="text-xs text-amber-300">
+                    Make sure this is the correct file. Uploading the wrong file may overwrite existing records.
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={handleCancelUpload}
+              className="bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleConfirmUpload}
+              className="bg-orange-500 hover:bg-orange-600 text-white"
+            >
+              Confirm & Upload
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
@@ -483,6 +574,8 @@ export function UploadTreeFlow() {
                   carrierFullyUploaded: status === 'uploaded', // both P and C done → show both green
                   carrierNoUpdate: status === 'no_update',    // carrier marked no update → show P/C gray
                   thisFileTypeUploaded: fileTypesByAc[ac.id]?.has(fileType) ?? false, // this P or C already uploaded today
+                  agencyName: agency.name, // For confirmation dialog
+                  carrierName: carrier.name, // For confirmation dialog
                 },
               }
               allNodes.push(uploadNode)

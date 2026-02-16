@@ -1,8 +1,30 @@
+'use client'
 
 import Link from 'next/link';
-import { Home, Briefcase, FileText, Upload, Users, Shield } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { Home, Briefcase, FileText, Upload, Users, Shield, LogOut } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
+import { Button } from '@/components/ui/button';
+import type { User, AuthChangeEvent, Session } from '@supabase/supabase-js';
 
 const Sidebar = () => {
+    const router = useRouter();
+    const [user, setUser] = useState<User | null>(null);
+    const supabase = createClient();
+
+    useEffect(() => {
+        supabase.auth.getUser().then((res: { data: { user: User | null } }) => setUser(res.data.user ?? null));
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: AuthChangeEvent, session: Session | null) => setUser(session?.user ?? null));
+        return () => subscription.unsubscribe();
+    }, []);
+
+    const handleSignOut = async () => {
+        await supabase.auth.signOut();
+        router.push('/login');
+        router.refresh();
+    };
+
     return (
         <div className="h-screen w-72 bg-slate-950 border-r border-slate-800 text-white flex flex-col">
             <div className="p-6 border-b border-slate-800">
@@ -79,7 +101,14 @@ const Sidebar = () => {
                 </Link>
             </nav>
 
-            <div className="p-4 border-t border-slate-800">
+            <div className="p-4 border-t border-slate-800 space-y-2">
+                {user?.email && (
+                    <p className="text-xs text-slate-400 truncate px-1" title={user.email}>{user.email}</p>
+                )}
+                <Button variant="ghost" size="sm" className="w-full justify-start text-slate-300 hover:text-slate-100" onClick={handleSignOut}>
+                    <LogOut className="w-4 h-4 mr-2" />
+                    Sign out
+                </Button>
                 <div className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2">
                     <p className="text-xs text-slate-500">Unlimited Insurance Admin</p>
                     <p className="text-sm font-medium text-slate-200 mt-1">v2.0</p>

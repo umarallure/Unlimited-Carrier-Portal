@@ -16,7 +16,7 @@ export default function RecordsPage() {
     const [loading, setLoading] = useState(true)
     const [searchTerm, setSearchTerm] = useState('')
     const [selectedCarrier, setSelectedCarrier] = useState<string>('all')
-    const [selectedType, setSelectedType] = useState<string>('all')
+    const [selectedType, setSelectedType] = useState<string>('Policy')
     const [changedOnDate, setChangedOnDate] = useState<string>('') // YYYY-MM-DD or '' for no filter
     const [currentPage, setCurrentPage] = useState(1)
     const [pageSize, setPageSize] = useState(25)
@@ -81,6 +81,14 @@ export default function RecordsPage() {
                 { name: 'amam_commissions', type: 'Commission', carrierCode: 'AMAM' },
                 { name: 'transamerica_policies', type: 'Policy', carrierCode: 'TRANSAMERICA' },
                 { name: 'transamerica_commissions', type: 'Commission', carrierCode: 'TRANSAMERICA' },
+                { name: 'moh_policies', type: 'Policy', carrierCode: 'MOH' },
+                { name: 'moh_commissions', type: 'Commission', carrierCode: 'MOH' },
+                { name: 'corebridge_policies', type: 'Policy', carrierCode: 'COREBRIDGE' },
+                { name: 'corebridge_commissions', type: 'Commission', carrierCode: 'COREBRIDGE' },
+                { name: 'liberty_policies', type: 'Policy', carrierCode: 'LIBERTY' },
+                { name: 'liberty_commissions', type: 'Commission', carrierCode: 'LIBERTY' },
+                { name: 'rna_policies', type: 'Policy', carrierCode: 'RNA' },
+                { name: 'rna_commissions', type: 'Commission', carrierCode: 'RNA' },
             ]
 
             for (const table of tables) {
@@ -174,8 +182,7 @@ export default function RecordsPage() {
                 keyCount[key] = (keyCount[key] || 0) + 1
             })
         })
-        // When viewing one type, show columns by order of frequency (most common first), more columns. When "All", top 10 by frequency.
-        const maxCols = selectedType === 'all' ? 10 : 14
+        const maxCols = 14
         return Object.entries(keyCount)
             .sort((a, b) => b[1] - a[1])
             .slice(0, maxCols)
@@ -183,8 +190,8 @@ export default function RecordsPage() {
     }
 
     const filteredRecords = records.filter(record => {
-        // Apply type filter: only show Policy or Commission when one is selected
-        if (selectedType !== 'all' && record.file_type !== selectedType) return false
+        // Apply type filter
+        if (record.file_type !== selectedType) return false
         // Apply carrier filter
         if (selectedCarrier !== 'all' && record.agency_carriers?.carriers?.id !== selectedCarrier) return false
         // Apply "changed on date" filter: only records updated or created on the selected date
@@ -233,8 +240,8 @@ export default function RecordsPage() {
                     <FileText className="w-6 h-6 text-orange-400" />
                 </div>
                 <div>
-                    <h1 className="text-3xl font-bold text-white">All Records</h1>
-                    <p className="text-gray-400">View all uploaded policy and commission records</p>
+                    <h1 className="text-3xl font-bold text-white">Records</h1>
+                    <p className="text-gray-400">View uploaded policy and commission records by type</p>
                 </div>
             </div>
 
@@ -287,20 +294,20 @@ export default function RecordsPage() {
                 </div>
             </div>
 
-            {/* Type tabs: each view shows its own columns (Policy vs Commission have different headers) */}
+            {/* Type tabs: Policy or Commission (each shows its own columns) */}
             <div className="flex gap-1 p-1 bg-slate-900 rounded-xl border border-slate-800 w-fit">
-                {(['all', 'Policy', 'Commission'] as const).map((type) => (
+                {(['Policy', 'Commission'] as const).map((type) => (
                     <button
                         key={type}
                         type="button"
-                        onClick={() => setSelectedType(type === 'all' ? 'all' : type)}
+                        onClick={() => setSelectedType(type)}
                         className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                             selectedType === type
                                 ? 'bg-slate-700 text-white'
                                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
                         }`}
                     >
-                        {type === 'all' ? 'All records' : type}
+                        {type}
                     </button>
                 ))}
             </div>
@@ -385,7 +392,7 @@ export default function RecordsPage() {
                     </div>
                 ) : filteredRecords.length === 0 ? (
                     <div className="text-center py-8 text-slate-400">
-                        {searchTerm || selectedCarrier !== 'all' || selectedType !== 'all' || changedOnDate
+                        {searchTerm || selectedCarrier !== 'all' || changedOnDate
                             ? 'No records match your filters'
                             : 'No records found. Upload files to see data here.'}
                     </div>

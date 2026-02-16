@@ -242,6 +242,92 @@ export async function parseExcel(file: File): Promise<ParseResult> {
 }
 
 /**
+ * RNA (Royal Neighbors of America) Excel: "Certificates By Agent" layout.
+ * File has repeated blocks: [Agent row] -> [Header row] -> [Data rows] -> next agent...
+ * Agent row looks like "DTX6 - AHMAD ALI KHAN". Headers: Insured Name, Owner Name, Certificate Number, etc.
+ */
+export async function parseRNAExcel(file: File): Promise<ParseResult> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = e.target?.result;
+                const workbook = XLSX.read(data, { type: 'binary' });
+                const firstSheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[firstSheetName];
+                const rows = XLSX.utils.sheet_to_json(worksheet, {
+                    header: 1,
+                    defval: '',
+                    raw: false,
+                }) as any[][];
+
+                if (!rows?.length) {
+                    reject(new Error('The RNA Excel file appears to be empty'));
+                    return;
+                }
+
+                const records: ParsedRecord[] = [];
+                const agentRowPattern = /^([A-Z0-9]+)\s*-\s*(.+)$/i;
+
+                let i = 0;
+                while (i < rows.length) {
+                    const row = rows[i] as any[];
+                    if (!Array.isArray(row)) { i++; continue; }
+                    const cells = row.map(c => String(c ?? '').trim());
+
+                    const agentCell = cells.find(c => agentRowPattern.test(c));
+                    if (agentCell) {
+                        const match = agentCell.match(agentRowPattern);
+                        const agentId = match ? match[1].trim() : '';
+                        const agentName = match ? match[2].trim() : agentCell;
+                        i++;
+                        if (i >= rows.length) break;
+                        const headerRow = rows[i] as any[];
+                        if (!Array.isArray(headerRow)) { i++; continue; }
+                        const headers = headerRow.map((h: any) => String(h ?? '').trim());
+                        const certNumIdx = headers.findIndex((h: string) => /certificate\s*number/i.test(h));
+                        if (certNumIdx === -1) {
+                            i++;
+                            continue;
+                        }
+                        i++;
+                        while (i < rows.length) {
+                            const dataRow = rows[i] as any[];
+                            if (!Array.isArray(dataRow)) { i++; break; }
+                            const certNum = String(dataRow[certNumIdx] ?? '').trim();
+                            const firstCell = String(dataRow[0] ?? '').trim();
+                            if (firstCell && agentRowPattern.test(firstCell)) break;
+                            if (!certNum) { i++; continue; }
+                            const rowData: Record<string, any> = {
+                                Agent_ID: agentId,
+                                Agent_Name: agentName,
+                            };
+                            headers.forEach((header: string, idx: number) => {
+                                if (header && idx < dataRow.length) rowData[header] = dataRow[idx];
+                            });
+                            records.push({ policyNumber: certNum, data: rowData });
+                            i++;
+                        }
+                        continue;
+                    }
+                    i++;
+                }
+
+                resolve({
+                    records,
+                    totalRecords: records.length,
+                    detectedPolicyColumn: 'Certificate Number',
+                });
+            } catch (err) {
+                reject(err);
+            }
+        };
+        reader.onerror = () => reject(new Error('Failed to read the RNA Excel file'));
+        reader.readAsBinaryString(file);
+    });
+}
+
+/**
  * Parse any supported file type (CSV or Excel)
  */
 export async function parseFile(file: File): Promise<ParseResult> {
