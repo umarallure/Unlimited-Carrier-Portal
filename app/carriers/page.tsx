@@ -16,6 +16,7 @@ export default function CarriersPage() {
     const [agencies, setAgencies] = useState<any[]>([])
     const [loading, setLoading] = useState(true)
     const [newCarrierName, setNewCarrierName] = useState('')
+    const [newCarrierCode, setNewCarrierCode] = useState('')
     const [selectedAgencyIds, setSelectedAgencyIds] = useState<string[]>([])
     const [editingCarrier, setEditingCarrier] = useState<any>(null)
     const [isDialogOpen, setIsDialogOpen] = useState(false)
@@ -53,12 +54,13 @@ export default function CarriersPage() {
     }
 
     const handleAddCarrier = async () => {
-        if (!newCarrierName.trim() || selectedAgencyIds.length === 0) return
+        const code = newCarrierCode.trim()
+        if (!newCarrierName.trim() || !code || selectedAgencyIds.length === 0) return
 
-        // First create the carrier
+        // First create the carrier (code is required by DB)
         const { data: carrier, error: carrierError } = await supabase
             .from('carriers')
-            .insert([{ name: newCarrierName }])
+            .insert([{ name: newCarrierName.trim(), code }])
             .select()
             .single()
 
@@ -81,6 +83,7 @@ export default function CarriersPage() {
             alert('Error linking carrier to agencies: ' + linkError.message)
         } else {
             setNewCarrierName('')
+            setNewCarrierCode('')
             setSelectedAgencyIds([])
             setIsDialogOpen(false)
             fetchCarriers()
@@ -88,12 +91,13 @@ export default function CarriersPage() {
     }
 
     const handleUpdateCarrier = async () => {
-        if (!editingCarrier || !newCarrierName.trim() || selectedAgencyIds.length === 0) return
+        const code = newCarrierCode.trim()
+        if (!editingCarrier || !newCarrierName.trim() || !code || selectedAgencyIds.length === 0) return
 
-        // Update carrier name
+        // Update carrier name and code
         const { error: updateError } = await supabase
             .from('carriers')
-            .update({ name: newCarrierName })
+            .update({ name: newCarrierName.trim(), code })
             .eq('id', editingCarrier.id)
 
         if (updateError) {
@@ -122,6 +126,7 @@ export default function CarriersPage() {
         } else {
             setEditingCarrier(null)
             setNewCarrierName('')
+            setNewCarrierCode('')
             setSelectedAgencyIds([])
             setIsDialogOpen(false)
             fetchCarriers()
@@ -147,11 +152,13 @@ export default function CarriersPage() {
         if (carrier) {
             setEditingCarrier(carrier)
             setNewCarrierName(carrier.name)
+            setNewCarrierCode(carrier.code ?? '')
             const agencyIds = carrier.agency_carriers.map((ac: any) => ac.agencies.id)
             setSelectedAgencyIds(agencyIds)
         } else {
             setEditingCarrier(null)
             setNewCarrierName('')
+            setNewCarrierCode('')
             setSelectedAgencyIds([])
         }
         setIsDialogOpen(true)
@@ -209,9 +216,19 @@ export default function CarriersPage() {
                                 <Input
                                     value={newCarrierName}
                                     onChange={(e) => setNewCarrierName(e.target.value)}
-                                    placeholder="Enter carrier name"
+                                    placeholder="e.g. Transamerica"
                                     className="bg-slate-800 border-slate-700 text-white placeholder:text-gray-500"
                                 />
+                            </div>
+                            <div className="space-y-2">
+                                <Label className="text-gray-300">Carrier Code (required)</Label>
+                                <Input
+                                    value={newCarrierCode}
+                                    onChange={(e) => setNewCarrierCode(e.target.value)}
+                                    placeholder="e.g. TRANSAMERICA"
+                                    className="bg-slate-800 border-slate-700 text-white placeholder:text-gray-500"
+                                />
+                                <p className="text-xs text-slate-500">Short code used in uploads (e.g. TRANSAMERICA, AETNA).</p>
                             </div>
                             <div className="space-y-2">
                                 <Label className="text-gray-300">Select Agencies (can select multiple)</Label>
@@ -243,7 +260,7 @@ export default function CarriersPage() {
                             <Button
                                 onClick={editingCarrier ? handleUpdateCarrier : handleAddCarrier}
                                 className="w-full bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-600 hover:to-cyan-700"
-                                disabled={!newCarrierName.trim() || selectedAgencyIds.length === 0}
+                                disabled={!newCarrierName.trim() || !newCarrierCode.trim() || selectedAgencyIds.length === 0}
                             >
                                 {editingCarrier ? 'Update Carrier' : 'Create Carrier'}
                             </Button>
