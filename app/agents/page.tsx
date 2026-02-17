@@ -38,8 +38,11 @@ export default function AgentsPage() {
             .select('*, agencies(name)')
             .order('name')
 
-        if (error) console.error('Error fetching agents:', error)
-        else setAgents(data || [])
+        if (error) {
+            console.error('Error fetching agents:', error.message, error.code, error.details)
+        } else {
+            setAgents(data || [])
+        }
         setLoading(false)
     }
 
