@@ -1,0 +1,140 @@
+Carrier,Policy Status in Carrier Portal,Stage Monday
+Aetna,Auto-decline,Declined
+Aetna,Approved; EFT payment pending,Issued Not Paid
+Aetna,New Business - in process,Pending
+Aetna,Active - Premium paying,Issued Paid
+Aetna,Over Issue Limits-Life,Declined
+Aetna,Case Mang. Review,Pending
+Aetna,Policy Lapsed,Charge Back
+Aetna,Requested Termination,Charge Back
+Aetna,Decline,Declined
+Aetna,Closed / Incomplete,Closed as Incomplete
+Aetna,Application not taken,Charge Back
+Aetna,Application Withdrawn,Withdrawn
+Aetna,Underwriting Decline,Declined
+Aflac,New Business - in process,Pending
+Aflac,Auto-decline,Declined
+Aflac,Approved; EFT payment pending,Issued Not Paid
+Aflac,Over Issue Limits-Life,Declined
+Aflac,Application Withdrawn,Withdrawn
+Aflac,Closed / Incomplete,Closed as Incomplete
+Americo,Carrier declined to issue,Declined
+Americo,Cancelled,Charge Back
+Americo,Pending Outstanding Requirements,Pending
+Americo,"Issued, not paid",Issued Not Paid
+Americo,Active (inforce),Issued Paid
+Americo,Incomplete,Closed as Incomplete
+Americo,Applied for,Pending
+Americo,No Premium - Incomplete,Closed as Incomplete
+Americo,Free Look,Issued Paid
+ANAM,Pending,Pending
+ANAM,Declined,Declined
+ANAM,Incomplete,Closed as Incomplete
+ANAM,NotTaken,Charge Back
+ANAM,Act-Pastdue,Pending Lapse
+ANAM,IssNotPaid,Issued Not Paid
+ANAM,Active,Issued Paid
+ANAM,Withdrawn,Declined
+ANAM,InfNotTaken,Charge Back
+ANAM,Act-Ret Item,Issued Paid
+ANAM,Terminated,Charge Back
+ANAM,NeedReqmnt,Pending
+CHUB,In-Force,Issued Paid
+CHUB,Terminated,Charge Back
+CHUB,Non-Take,Charge Back
+CHUB,Issued,Issued Not Paid
+CHUB,Lapse-Pending,Pending Lapse
+CICA,Hold Application,Issued Not Paid
+CICA,Pending Appointment,Pending
+CICA,Issued,Issued Paid
+CICA,"Denied, Rejected Payment",Issued Not Paid
+CICA,In Underwriting,Pending
+CICA,Submitted,Pending
+CICA,Failed to Appoint,Pending
+CICA,"Submitted, Waiting Payment",Issued Not Paid
+CICA,"Withdrawn, No Payment",Withdrawn
+CICA,SUB/PD,Pending
+CICA,INCOMP,Closed as Incomplete
+CICA,LAPSE,Pending Lapse
+CICA,SURR,Charge Back
+CICA,DECL,Declined
+CICA,WITHDR,Withdrawn
+Corebridge,Placed in Force,Issued Not Paid
+Corebridge,Withdrawn,Do nothing
+Corebridge,Incomplete,Closed as Incomplete
+Corebridge,Approved,Pending
+Corebridge,Not Taken,Charge Back
+Corebridge,Active- Free Look Period,Issued Paid
+Corebridge,Pending Issue,Issued Not Paid
+Corebridge,Active,Issued Paid
+Corebridge,Conditionally Issued,Pending
+Corebridge,Cancelled-FreeLook,Charge Back
+Corebridge,Lapse Pending,Pending Lapse
+Corebridge,Conservation Pending,Pending Lapse
+Corebridge,Surrendered,Charge Back
+Corebridge,Declined,Declined
+Corebridge,Pending Awaiting Funds,Issued Not Paid
+Corebridge,Lapsed,Charge Back
+Corebridge,Pending,Pending
+GTL,Active,Issued Not Paid
+GTL,Pending,Pending
+GTL,Declined,Declined
+GTL,Incomplete,Closed as Incomplete
+GTL,NotTaken/PaidFor,Charge Back
+GTL,Issued Not Taken,Charge Back
+Liberty,Pending,Pending
+Liberty,"Issued, Unpaid",Issued Not Paid
+Liberty,Not Taken,Charge Back
+Liberty,Premium Paying (Active),Issued Paid
+Liberty,Cancelled (Not Issued),Charge Back
+Liberty,Premium Due,Issued Not Paid
+Liberty,3rd Notice,Issued Not Paid
+Liberty,Lapsed,Charge Back
+MOH,Pending,Pending
+MOH,Placed,Issued Paid
+MOH,Incomplete,Closed as Incomplete
+MOH,Declined,Declined
+MOH,Not Taken,Charge Back
+MOH,Issued,Issued Not Paid
+MOH,Withdrawn,Charge Back
+MOH,Inactive,Closed as Incomplete
+MOH,Inforce,Issued Paid
+MOH,Lapsed - Non payment,Charge Back
+MOH,Terminated,Charge Back
+Royal Neighbors,CONTRACT ACTIVE,Issued Paid
+Royal Neighbors,CON TERM NOT ISSUED,Charge Back
+Royal Neighbors,CON SUS HOME OFFICE,Issued Not Paid
+Royal Neighbors,CON TERM NT NO PAY,Charge Back
+Royal Neighbors,CON TERM WITHDRAWN,Withdrawn
+Royal Neighbors,CON SUS RETURNED EFT,Issued Not Paid
+Royal Neighbors,CON TERM INCOMPLETE,Closed as Incomplete
+Royal Neighbors,CON TERM DECLINED,Declined
+Royal Neighbors,CON TERM LAPSED,Charge Back
+Royal Neighbors,CON TERM SURRENDERED,Charge Back
+Royal Neighbors,CON PEND SUBMITTED,Pending
+Royal Neighbors,CON SUS DEATH PENDING,Issued Not Paid
+Royal Neighbors,CON SUS RETURNED CHK,Issued Not Paid
+Royal Neighbors,CON PEND INCOMPLETE,Pending
+SBLI,Issued and Not Paid,Issued Not Paid
+SBLI,Lapsed,Charge Back
+SBLI,Not Taken,Charge Back
+SBLI,Rejected,Declined
+SBLI,Issued and Paid,Issued Paid
+SBLI,Surrender,Charge Back
+SBLI,Issued Paid,Issued Paid
+SBLI,Death,Charge Back
+Transamerica,Declined,Declined
+Transamerica,Issued,Issued Not Paid
+Transamerica,Pending,Pending
+Transamerica,Initial Premium Not Paid,Issued Not Paid
+Transamerica,Active,Issued Paid
+Transamerica,Cancelled,Charge Back
+Transamerica,Lapsed,Charge Back
+Transamerica,Incomplete,Pending
+Transamerica,Active - Premium Due,Issued Not Paid
+Transamerica,Free Look Surrender,Charge Back
+Transamerica,Surrendered,Charge Back
+Aflac,Active - Premium paying,Issued Paid
+Sentinel,Declined,Declined
+Sentinel,Pending,Pending
+Sentinel,Active,Issued Paid

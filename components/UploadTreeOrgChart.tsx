@@ -5,6 +5,8 @@ import { OrgChart } from 'd3-org-chart'
 import { zoomIdentity } from 'd3-zoom'
 import { supabase } from '@/lib/supabaseClient'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
+import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
 import { fetchDailyStatus, fetchDailyFileTypes, getLocalDayRange, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { Building2, Calendar, Loader2, RefreshCw, CheckCircle, AlertCircle, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -13,6 +15,10 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+
+const MAX_FILE_SIZE_MB = 10
+const ACCEPT_TYPES = '.xlsx,.xls,.csv'
+const ACCEPT_LABEL = 'CSV, XLSX, XLS'
 
 type ChartNode = {
   id: string
@@ -76,6 +82,7 @@ function getNodeHtml(d: ChartNode): string {
 type SavedTransform = { x: number; y: number; k: number }
 
 export function UploadTreeOrgChart() {
+  const dealTracker = useDealTrackerUpload()
   const containerRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef = useRef<InstanceType<typeof OrgChart> | null>(null)
   const savedTransformRef = useRef<SavedTransform | null>(null)
@@ -98,6 +105,8 @@ export function UploadTreeOrgChart() {
   } | null>(null)
   const [uploadingFile, setUploadingFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const loadAgencies = useCallback(async () => {
     const { data } = await supabase.from('agencies').select('id, name').order('name')
@@ -214,6 +223,9 @@ export function UploadTreeOrgChart() {
 
   useLayoutEffect(() => {
     if (!chartData.length || !containerRef.current) return
+    
+    // Don't restore transform - always center the chart after re-render
+    // This prevents the chart from jumping to corners or off-screen
     const chart = new OrgChart()
     chartInstanceRef.current = chart
     chart
@@ -238,30 +250,54 @@ export function UploadTreeOrgChart() {
       .nodeContent((node: any) => getNodeHtml((node?.data || {}) as ChartNode))
       .render()
 
-    // Restore previous zoom/pan so the chart doesn't jump back after upload
-    const prev = savedTransformRef.current
-    if (prev && chart.getChartState) {
+    // Always center the chart after render to keep it visible
+    setTimeout(() => {
       try {
-        const state = chart.getChartState()
-        const { svg, zoomBehavior } = state
-        if (svg && zoomBehavior) {
-          const identity = zoomIdentity.translate(prev.x, prev.y).scale(prev.k)
-          svg.call(zoomBehavior.transform, identity)
-        }
-      } catch (_) {}
-      savedTransformRef.current = null
-    }
-
-    return () => {
-      try {
-        if (chartInstanceRef.current && chartInstanceRef.current.getChartState) {
-          const state = chartInstanceRef.current.getChartState()
-          const t = state.lastTransform
-          if (t && typeof t.x === 'number' && typeof t.y === 'number' && typeof t.k === 'number') {
-            savedTransformRef.current = { x: t.x, y: t.y, k: t.k }
+        // Try to use centerOnNode if available (d3-org-chart method)
+        if ((chart as any).centerOnNode && chartData.length > 0) {
+          const rootNode = chartData.find(n => n.type === 'Agency')
+          if (rootNode) {
+            (chart as any).centerOnNode(rootNode.id, true)
+            return
           }
         }
       } catch (_) {}
+      
+      // Fallback: manually center the chart
+      try {
+        const state = chart.getChartState?.()
+        if (state?.svg && containerRef.current) {
+          const svg = state.svg as any
+          const container = containerRef.current
+          const containerWidth = container.clientWidth || container.offsetWidth || 1200
+          const containerHeight = container.clientHeight || container.offsetHeight || 800
+          
+          // Get SVG dimensions
+          const svgElement = svg.node?.() || container.querySelector('svg')
+          if (svgElement) {
+            const bbox = svgElement.getBBox()
+            const svgWidth = bbox.width || svgElement.viewBox?.baseVal?.width || 1000
+            const svgHeight = bbox.height || svgElement.viewBox?.baseVal?.height || 600
+            
+            // Calculate center position
+            const scale = Math.min(1, Math.min(containerWidth / svgWidth, containerHeight / svgHeight) * 0.9)
+            const x = (containerWidth - svgWidth * scale) / 2 - bbox.x * scale
+            const y = (containerHeight - svgHeight * scale) / 2 - bbox.y * scale
+            
+            // Apply transform
+            if (state.zoomBehavior) {
+              const identity = zoomIdentity.translate(x, y).scale(scale)
+              svg.call(state.zoomBehavior.transform, identity)
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[UploadTreeOrgChart] Failed to center chart:', err)
+      }
+    }, 150)
+
+    return () => {
+      // Don't save transform - we'll always center on re-render
       chartInstanceRef.current = null
       if (containerRef.current?.firstChild) containerRef.current.innerHTML = ''
     }
@@ -280,10 +316,32 @@ export function UploadTreeOrgChart() {
         fileType: uploadDialog.fileType,
       })
       if (result.success) {
-        setUploadMessage({ type: 'success', text: `${uploadDialog.fileType} uploaded. ${(result as { count: number }).count ?? 0} record(s) processed.` })
+        const count = (result as { count?: number }).count ?? 0
+        setUploadMessage({ type: 'success', text: `${uploadDialog.fileType} uploaded. ${count} record(s) processed.` })
         setTimeout(() => setUploadMessage(null), 6000)
+        
+        // Process deal tracker if Aetna Policy file
+        console.log('[UploadTreeOrgChart] Upload successful, checking deal tracker processing...', {
+          carrierCode: uploadDialog.carrierCode,
+          fileType: uploadDialog.fileType,
+          hasFileId: 'fileId' in result,
+          fileId: 'fileId' in result ? result.fileId : 'N/A',
+        })
+        
+        if (uploadDialog.carrierCode === 'AETNA' && (uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
+          console.log('[UploadTreeOrgChart] Triggering deal tracker processing for', uploadDialog.fileType, 'file...')
+          await dealTracker.processAfterUpload(
+            uploadDialog.agencyCarrierId,
+            result.fileId,
+            uploadDialog.carrierCode,
+            uploadDialog.fileType
+          )
+        }
+        
         setUploadDialog(null)
         setUploadingFile(null)
+        // Reset saved transform so chart centers properly after reload
+        savedTransformRef.current = null
         await loadDailyStatuses()
         await loadTreeData()
       } else {
@@ -294,7 +352,7 @@ export function UploadTreeOrgChart() {
     } finally {
       setUploading(false)
     }
-  }, [uploadDialog, uploadingFile, loadDailyStatuses, loadTreeData])
+  }, [uploadDialog, uploadingFile, loadDailyStatuses, loadTreeData, dealTracker])
 
   return (
     <div className="space-y-6">
@@ -358,12 +416,18 @@ export function UploadTreeOrgChart() {
       )}
 
       {selectedAgencyId && !loading && chartData.length > 0 && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl overflow-hidden min-h-[600px]" style={{ minHeight: '700px' }}>
-          <div ref={containerRef} className="w-full min-h-[600px] [&>svg]:!max-w-full [&>svg]:!h-auto" />
+        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl overflow-hidden min-h-[600px]" style={{ minHeight: '700px', width: '100%' }}>
+          <div ref={containerRef} className="w-full h-full min-h-[600px] [&>svg]:max-w-full [&>svg]:h-auto [&>svg]:mx-auto [&>svg]:block" style={{ overflow: 'auto' }} />
         </div>
       )}
 
-      <Dialog open={!!uploadDialog} onOpenChange={(open) => !open && setUploadDialog(null)}>
+      <Dialog open={!!uploadDialog} onOpenChange={(open) => {
+        if (!open) {
+          setUploadDialog(null)
+          setUploadingFile(null)
+          setDragActive(false)
+        }
+      }}>
         <DialogContent className="bg-slate-900 border-slate-700">
           <DialogHeader>
             <DialogTitle className="text-white flex items-center gap-2">
@@ -372,16 +436,54 @@ export function UploadTreeOrgChart() {
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label className="text-slate-300">File</Label>
-              <Input
-                type="file"
-                accept=".xlsx,.xls,.csv"
-                className="bg-slate-950 border-slate-700 text-white"
-                onChange={e => setUploadingFile(e.target.files?.[0] ?? null)}
-              />
-              {uploadingFile && <p className="text-xs text-slate-400">{uploadingFile.name}</p>}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ACCEPT_TYPES}
+              className="sr-only"
+              onChange={e => setUploadingFile(e.target.files?.[0] ?? null)}
+            />
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => fileInputRef.current?.click()}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click(); } }}
+              onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragActive(true); }}
+              onDragLeave={() => setDragActive(false)}
+              onDrop={e => {
+                e.preventDefault();
+                setDragActive(false);
+                const file = e.dataTransfer.files?.[0];
+                if (file) setUploadingFile(file);
+              }}
+              className={cn(
+                'flex items-center gap-4 rounded-xl border-2 border-dashed p-6 cursor-pointer transition-colors',
+                'bg-slate-700/80 border-slate-600 hover:border-orange-500 hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900',
+                dragActive && 'border-orange-500 bg-slate-700'
+              )}
+            >
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-600 text-slate-300">
+                <Upload className="h-6 w-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold text-slate-200">Drag and drop files</p>
+                <p className="mt-0.5 text-sm text-slate-400">
+                  Up to {MAX_FILE_SIZE_MB}MB per file in {ACCEPT_LABEL}.
+                </p>
+                <button
+                  type="button"
+                  onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                  className="mt-1 text-sm font-medium text-orange-400 underline hover:text-orange-300"
+                >
+                  Browse files
+                </button>
+              </div>
             </div>
+            {uploadingFile && (
+              <p className="text-sm text-slate-400">
+                Selected: <span className="font-medium text-slate-200">{uploadingFile.name}</span>
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setUploadDialog(null)} className="border-slate-600 text-slate-300">Cancel</Button>
@@ -391,6 +493,15 @@ export function UploadTreeOrgChart() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Deal Tracker Verification Dialog */}
+      <DealTrackerVerificationDialog
+        open={dealTracker.showVerification}
+        onOpenChange={dealTracker.setShowVerification}
+        entries={dealTracker.verificationEntries}
+        onConfirm={dealTracker.confirmAndSave}
+        onCancel={dealTracker.cancelVerification}
+      />
     </div>
   )
 }

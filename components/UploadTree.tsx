@@ -8,10 +8,13 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
+import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
 import { fetchDailyStatus, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { cn } from '@/lib/utils'
 
 export function UploadTree() {
+  const dealTracker = useDealTrackerUpload()
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -170,6 +173,24 @@ export function UploadTree() {
       })
 
       if (result.success) {
+        // Process deal tracker if Aetna Policy file
+        console.log('[UploadTree] Upload successful, checking deal tracker processing...', {
+          carrierCode,
+          fileType,
+          hasFileId: 'fileId' in result,
+          fileId: 'fileId' in result ? result.fileId : 'N/A',
+        })
+        
+        if (carrierCode === 'AETNA' && (fileType === 'Policy' || fileType === 'Commission') && 'fileId' in result) {
+          console.log('[UploadTree] Triggering deal tracker processing for', fileType, 'file...')
+          await dealTracker.processAfterUpload(
+            agencyCarrierId,
+            result.fileId,
+            carrierCode,
+            fileType
+          )
+        }
+        
         await loadDailyStatuses() // Refresh – carrier shows green only when both Policy and Commission uploaded
         setUploadingStates(prev => ({
           ...prev,
@@ -271,6 +292,15 @@ export function UploadTree() {
         uploadingStates={uploadingStates}
         dailyStatusMap={dailyStatusMap}
         onFileUpload={handleFileUpload}
+      />
+
+      {/* Deal Tracker Verification Dialog */}
+      <DealTrackerVerificationDialog
+        open={dealTracker.showVerification}
+        onOpenChange={dealTracker.setShowVerification}
+        entries={dealTracker.verificationEntries}
+        onConfirm={dealTracker.confirmAndSave}
+        onCancel={dealTracker.cancelVerification}
       />
     </div>
   )

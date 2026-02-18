@@ -24,6 +24,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
 import { fetchDailyStatus, fetchDailyFileTypes, setDailyStatus, getLocalDayRange, type DailyStatus } from '@/lib/dailyUploadStatus'
+import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
 import { cn } from '@/lib/utils'
 
 // Custom Node Components - Professional and Simple
@@ -407,6 +409,7 @@ function calculateLayout(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: 
 type AgencyOption = { id: string; name: string }
 
 export function UploadTreeFlow() {
+  const dealTracker = useDealTrackerUpload()
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [loading, setLoading] = useState(true)
@@ -548,6 +551,33 @@ export function UploadTreeFlow() {
                   if (result.success) {
                     await loadDailyStatuses() // Refetch – carrier and Policy/Commission nodes update (uses local day range)
                     const count = (result as { count?: number }).count ?? 0
+                    
+                    // Process deal tracker if Aetna Policy file
+                    console.log('[UploadTreeFlow] Upload successful, checking deal tracker processing...', {
+                      carrierCode: carrier.code,
+                      fileType,
+                      hasFileId: 'fileId' in result,
+                      fileId: 'fileId' in result ? result.fileId : 'N/A',
+                    })
+                    
+                    if (carrier.code === 'AETNA' && (fileType === 'Policy' || fileType === 'Commission') && 'fileId' in result) {
+                      console.log('[UploadTreeFlow] Triggering deal tracker processing for', fileType, 'file...')
+                      const dealTrackerResult = await dealTracker.processAfterUpload(
+                        ac.id,
+                        result.fileId,
+                        carrier.code,
+                        fileType
+                      )
+                      console.log('[UploadTreeFlow] Deal tracker processing result:', dealTrackerResult)
+                    } else {
+                      console.log('[UploadTreeFlow] Deal tracker processing skipped:', {
+                        isAetna: carrier.code === 'AETNA',
+                        fileType,
+                        hasFileId: 'fileId' in result,
+                        shouldProcess: carrier.code === 'AETNA' && (fileType === 'Policy' || fileType === 'Commission'),
+                      })
+                    }
+                    
                     onUploadMessage?.('success', `${fileType} file uploaded successfully. ${count} record(s) processed.`)
                     return result
                   } else {
@@ -881,6 +911,15 @@ export function UploadTreeFlow() {
       </div>
       </>
       )}
+
+      {/* Deal Tracker Verification Dialog */}
+      <DealTrackerVerificationDialog
+        open={dealTracker.showVerification}
+        onOpenChange={dealTracker.setShowVerification}
+        entries={dealTracker.verificationEntries}
+        onConfirm={dealTracker.confirmAndSave}
+        onCancel={dealTracker.cancelVerification}
+      />
     </div>
   )
 }

@@ -6,8 +6,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import Link from 'next/link'
 import { FileText, Search, Loader2, History, Calendar } from 'lucide-react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 export default function RecordsPage() {
     const [records, setRecords] = useState<any[]>([])
@@ -20,7 +20,6 @@ export default function RecordsPage() {
     const [changedOnDate, setChangedOnDate] = useState<string>('') // YYYY-MM-DD or '' for no filter
     const [currentPage, setCurrentPage] = useState(1)
     const [pageSize, setPageSize] = useState(25)
-    const [recordForHistory, setRecordForHistory] = useState<any>(null)
 
     const isRecordChangedOnDate = (record: any, dateStr: string) => {
         if (!dateStr) return true
@@ -137,6 +136,7 @@ export default function RecordsPage() {
                     // Transform to unified format for display
                     const transformed = filtered.map((r: any) => ({
                         ...r,
+                        table: table.name,
                         file_type: table.type,
                         carrier_code: table.carrierCode,
                         // Build a "raw_data" object from all columns for backward compatibility
@@ -441,16 +441,14 @@ export default function RecordsPage() {
                                                         {record.updated_at ? new Date(record.updated_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '–'}
                                                     </TableCell>
                                                     <TableCell>
-                                                        <Button
-                                                            variant="ghost"
-                                                            size="sm"
-                                                            className="text-orange-400 hover:text-orange-300 hover:bg-slate-800"
-                                                            onClick={(e) => { e.stopPropagation(); setRecordForHistory(record); }}
+                                                        <Link
+                                                            href={`/records/history?table=${encodeURIComponent(record.table)}&id=${encodeURIComponent(record.id)}`}
+                                                            className="inline-flex items-center px-2 py-1.5 rounded-md text-orange-400 hover:text-orange-300 hover:bg-slate-800 text-sm transition-colors"
                                                             title="View version history"
                                                         >
                                                             <History className="w-4 h-4 mr-1" />
                                                             {record.version_history?.length ?? 0}
-                                                        </Button>
+                                                        </Link>
                                                     </TableCell>
                                                 </TableRow>
                                             ))}
@@ -510,127 +508,6 @@ export default function RecordsPage() {
                 )}
             </div>
 
-            {/* Version history dialog */}
-            <Dialog open={!!recordForHistory} onOpenChange={(open) => !open && setRecordForHistory(null)}>
-                <DialogContent className="bg-slate-900 border-slate-700 max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
-                    <DialogHeader>
-                        <DialogTitle className="text-white flex items-center gap-2">
-                            <History className="w-5 h-5 text-orange-400" />
-                            Version history — {recordForHistory?.policy_number}
-                        </DialogTitle>
-                    </DialogHeader>
-                    <div className="overflow-y-auto space-y-4 pr-2">
-                        {recordForHistory && (() => {
-                            const excludeKeys = ['id', 'agency_carrier_id', 'file_id', 'row_number', 'source_file', 'source_format', 'agency_carriers', 'version_history', 'raw_data', 'file_type', 'carrier_code']
-                            const toFlat = (obj: any): Record<string, string> => {
-                                if (!obj || typeof obj !== 'object') return {}
-                                return Object.fromEntries(
-                                    Object.entries(obj)
-                                        .filter(([k, v]) => !excludeKeys.includes(k) && v != null && typeof v !== 'object')
-                                        .map(([k, v]) => [k, String(v)])
-                                )
-                            }
-                            const diff = (oldMap: Record<string, string>, newMap: Record<string, string>) => {
-                                const added: [string, string][] = []
-                                const removed: [string, string][] = []
-                                const changed: [string, string, string][] = []
-                                const allKeys = new Set([...Object.keys(oldMap), ...Object.keys(newMap)])
-                                allKeys.forEach(key => {
-                                    const o = oldMap[key]
-                                    const n = newMap[key]
-                                    if (o === undefined && n !== undefined) added.push([key, n])
-                                    else if (o !== undefined && n === undefined) removed.push([key, o])
-                                    else if (o !== undefined && n !== undefined && o !== n) changed.push([key, o, n])
-                                })
-                                return { added, removed, changed }
-                            }
-                            const currentFlat = toFlat(recordForHistory)
-                            const historyReversed = (recordForHistory.version_history || []).slice().reverse()
-                            const prevFlats = historyReversed.map((e: any) => toFlat(e?.snapshot))
-
-                            return (
-                                <>
-                                    {/* Current version */}
-                                    <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4">
-                                        <div className="text-xs font-semibold text-orange-400 uppercase tracking-wide mb-2">Current</div>
-                                        {prevFlats.length > 0 && (() => {
-                                            const d = diff(prevFlats[0], currentFlat)
-                                            const hasChanges = d.added.length + d.removed.length + d.changed.length > 0
-                                            return hasChanges ? (
-                                                <div className="mb-3 rounded bg-slate-900/80 border border-slate-600 p-2 text-xs">
-                                                    <span className="font-medium text-slate-300">What changed from previous:</span>
-                                                    <ul className="mt-1 space-y-0.5 text-slate-200">
-                                                        {d.changed.map(([key, oldVal, newVal]) => (
-                                                            <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="line-through text-red-400/90">{oldVal}</span> → <span className="text-emerald-400">{newVal}</span></li>
-                                                        ))}
-                                                        {d.added.map(([key, val]) => (
-                                                            <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-emerald-400">added: {val}</span></li>
-                                                        ))}
-                                                        {d.removed.map(([key, val]) => (
-                                                            <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-red-400/90">removed (was: {val})</span></li>
-                                                        ))}
-                                                    </ul>
-                                                </div>
-                                            ) : null
-                                        })()}
-                                        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-                                            {Object.entries(currentFlat).slice(0, 14).map(([key, val]) => (
-                                                <span key={key} className="flex gap-2">
-                                                    <dt className="text-slate-500 shrink-0">{key.replace(/_/g, ' ')}:</dt>
-                                                    <dd className="text-slate-200 truncate min-w-0">{String(val)}</dd>
-                                                </span>
-                                            ))}
-                                        </dl>
-                                    </div>
-                                    {/* Previous versions (newest first) */}
-                                    {historyReversed.map((entry: any, idx: number) => {
-                                        const thisFlat = prevFlats[idx] || {}
-                                        const nextFlat = idx === 0 ? currentFlat : prevFlats[idx - 1]
-                                        const d = diff(thisFlat, nextFlat)
-                                        const hasChanges = d.added.length + d.removed.length + d.changed.length > 0
-                                        return (
-                                            <div key={idx} className="rounded-lg border border-slate-700 bg-slate-800/30 p-4">
-                                                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
-                                                    Previous — {entry.at ? new Date(entry.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '–'}
-                                                </div>
-                                                {hasChanges && (
-                                                    <div className="mb-3 rounded bg-slate-900/80 border border-slate-600 p-2 text-xs">
-                                                        <span className="font-medium text-slate-300">What changed in next version:</span>
-                                                        <ul className="mt-1 space-y-0.5 text-slate-200">
-                                                            {d.changed.map(([key, oldVal, newVal]) => (
-                                                                <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="line-through text-red-400/90">{oldVal}</span> → <span className="text-emerald-400">{newVal}</span></li>
-                                                            ))}
-                                                            {d.added.map(([key, val]) => (
-                                                                <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-emerald-400">added: {val}</span></li>
-                                                            ))}
-                                                            {d.removed.map(([key, val]) => (
-                                                                <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-red-400/90">removed (was: {val})</span></li>
-                                                            ))}
-                                                        </ul>
-                                                    </div>
-                                                )}
-                                                {entry.snapshot && Object.keys(thisFlat).length > 0 && (
-                                                    <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-                                                        {Object.entries(thisFlat).slice(0, 14).map(([key, val]) => (
-                                                            <span key={key} className="flex gap-2">
-                                                                <dt className="text-slate-500 shrink-0">{key.replace(/_/g, ' ')}:</dt>
-                                                                <dd className="text-slate-300 truncate min-w-0">{String(val)}</dd>
-                                                            </span>
-                                                        ))}
-                                                    </dl>
-                                                )}
-                                            </div>
-                                        )
-                                    })}
-                                    {(!recordForHistory.version_history || recordForHistory.version_history.length === 0) && (
-                                        <p className="text-slate-500 text-sm">No previous versions (record has not been updated since creation).</p>
-                                    )}
-                                </>
-                            )
-                        })()}
-                    </div>
-                </DialogContent>
-            </Dialog>
         </div>
     )
 }

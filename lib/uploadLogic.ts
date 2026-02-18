@@ -20,6 +20,13 @@ export function parseNumber(value: any): number | null {
   return Number.isNaN(n) ? null : n
 }
 
+/** Parse date value: convert empty strings to null for PostgreSQL date columns. */
+function parseDate(value: any): string | null {
+  if (value === null || value === undefined) return null
+  const s = String(value).trim()
+  return s === '' ? null : s
+}
+
 /** Normalize policy number so same policy from different files/days matches for upsert (no date/time used). */
 function normalizePolicyNumber(value: any): string {
   if (value == null) return ''
@@ -112,19 +119,19 @@ export function buildAetnaPolicyRows(records: ParsedRecord[], agencyCarrierId: s
       statusdisplaytext: d['STATUSDISPLAYTEXT'] ?? null,
       product: d['PRODUCT'] ?? null,
       app_type: d['APP TYPE'] ?? null,
-      apprecddate: d['APPRECDDATE'] ?? null,
-      appsignaturedate: d['APPSIGNATUREDATE'] ?? null,
-      origeffdate: d['ORIGEFFDATE'] ?? null,
-      paidtodate: d['PAIDTODATE'] ?? null,
-      issuedate: d['ISSUEDATE'] ?? null,
-      termdate: d['TERMDATE'] ?? null,
+      apprecddate: parseDate(d['APPRECDDATE']),
+      appsignaturedate: parseDate(d['APPSIGNATUREDATE']),
+      origeffdate: parseDate(d['ORIGEFFDATE']),
+      paidtodate: parseDate(d['PAIDTODATE']),
+      issuedate: parseDate(d['ISSUEDATE']),
+      termdate: parseDate(d['TERMDATE']),
       issuedpremium: parseNumber(d['ISSUEDPREMIUM']),
       currentannualpremium: parseNumber(d['CURRENTANNUALPREMIUM']),
       currentmodalpremium: parseNumber(d['CURRENTMODALPREMIUM']),
       draftday: d['DRAFTDAY'] ?? null,
       paymentmodedisplaytext: d['PAYMENTMODEDISPLAYTEXT'] ?? null,
       paymentmethoddisplaytext: d['PAYMENTMETHODDISPLAYTEXT'] ?? null,
-      lastpaymentdate: d['LASTPAYMENTDATE'] ?? null,
+      lastpaymentdate: parseDate(d['LASTPAYMENTDATE']),
       lastpayamt: parseNumber(d['LASTPAYAMT']),
       issuezip: d['ISSUEZIP'] ?? null,
       replacementind: d['REPLACEMENTIND'] ?? null,
@@ -138,7 +145,7 @@ export function buildAetnaPolicyRows(records: ParsedRecord[], agencyCarrierId: s
       insuredname: d['INSUREDNAME'] ?? null,
       suffixtitle: d['SUFFIXTITLE'] ?? null,
       sex: d['SEX'] ?? null,
-      birthdate: d['BIRTHDATE'] ?? null,
+      birthdate: parseDate(d['BIRTHDATE']),
       addressline1: d['ADDRESSLINE1'] ?? null,
       addressline2: d['ADDRESSLINE2'] ?? null,
       addressline3: d['ADDRESSLINE3'] ?? null,
@@ -174,19 +181,19 @@ export function buildAetnaCommissionRows(records: ParsedRecord[], agencyCarrierI
       client: d['CLIENT'] ?? null,
       policy_number: normalizePolicyNumber(d['POLICYNUMBER'] ?? r.policyNumber),
       commissioncategory: d['COMMISSIONCATEGORY'] ?? null,
-      appdate: d['APPDATE'] ?? null,
+      appdate: parseDate(d['APPDATE']),
       state: d['STATE'] ?? null,
       product: d['PRODUCT'] ?? null,
-      effectivedate: d['EFFECTIVEDATE'] ?? null,
-      premiumduedate: d['PREMIUMDUEDATE'] ?? null,
+      effectivedate: parseDate(d['EFFECTIVEDATE']),
+      premiumduedate: parseDate(d['PREMIUMDUEDATE']),
       commissionablepremium: parseNumber(d['COMMISSIONABLEPREMIUM']),
       split_pct: d['SPLIT%'] ?? null,
       rate_pct: d['RATE%'] ?? null,
       monthsadvanced: d['MONTHSADVANCED'] ?? null,
       commissionamount: parseNumber(d['COMMISSIONAMOUNT']),
       mode: d['MODE'] ?? null,
-      replpoleffdate: d['REPLPOLEFFDATE'] ?? null,
-      commissionpaiddate: d['COMMISSIONPAIDDATE'] ?? null,
+      replpoleffdate: parseDate(d['REPLPOLEFFDATE']),
+      commissionpaiddate: parseDate(d['COMMISSIONPAIDDATE']),
       longdescription: d['LONGDESCRIPTION'] ?? null,
       statement_date: null,
       transaction_type: null,
@@ -476,7 +483,7 @@ export interface UploadParams {
   fileType: FileKind
 }
 
-export async function executeUpload(params: UploadParams): Promise<{ success: true; count: number } | { success: false; error: string }> {
+export async function executeUpload(params: UploadParams): Promise<{ success: true; count: number; fileId: string; carrierCode: string; fileType: FileKind } | { success: false; error: string }> {
   const { agencyCarrierId, agencyName, carrierName, carrierCode, file, fileType } = params
 
   if (carrierCode === 'TRANSAMERICA' && fileType === 'Commission') {
@@ -508,9 +515,23 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
 
   const fileNameLower = file.name.toLowerCase()
   const isRNAPolicyExcel = carrierCode === 'RNA' && fileType === 'Policy' && (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls'))
+  
+  console.log('[Upload Logic] Parsing file:', {
+    fileName: file.name,
+    carrierCode,
+    fileType,
+    isRNAPolicyExcel,
+  })
+  
   const parseResult = isRNAPolicyExcel
     ? (await parseRNAExcel(file) as { records: ParsedRecord[]; totalRecords: number })
     : (await parseFile(file) as { records: ParsedRecord[]; totalRecords: number })
+  
+  console.log('[Upload Logic] Parse result:', {
+    recordCount: parseResult.records.length,
+    totalRecords: parseResult.totalRecords,
+  })
+  
   if (!parseResult.records.length) return { success: false, error: 'No records found in the file.' }
 
   const targetTable = resolveTargetTable(carrierCode, fileType)
@@ -530,25 +551,154 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
 
   const BATCH_SIZE = 500
   const isPolicyTable = targetTable === 'aetna_policies' || targetTable === 'amam_policies' || targetTable === 'transamerica_policies' || targetTable === 'moh_policies' || targetTable === 'corebridge_policies' || targetTable === 'liberty_policies' || targetTable === 'rna_policies'
+  const isCommissionTable = targetTable === 'aetna_commissions' || targetTable === 'amam_commissions' || targetTable === 'transamerica_commissions' || targetTable === 'moh_commissions' || targetTable === 'corebridge_commissions' || targetTable === 'liberty_commissions' || targetTable === 'rna_commissions'
   const now = new Date().toISOString()
 
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     let chunk = rows.slice(i, i + BATCH_SIZE).map(row => ({ ...row, updated_at: now }))
-    if (isPolicyTable) {
-      // Upsert matches only on (agency_carrier_id, policy_number) — NOT on date/time. Same policy re-uploaded any day must update the existing row.
-      // Never send id or created_at so we don't overwrite "first added" and conflict is on the unique (agency_carrier_id, policy_number).
+    
+    // For both policy and commission tables, use upsert to update existing records
+    if (isPolicyTable || isCommissionTable) {
+      // Upsert matches on (agency_carrier_id, policy_number) — Same policy/commission re-uploaded updates existing row.
+      // Never send id or created_at so we don't overwrite "first added" and conflict is on the unique constraint.
       chunk.forEach(row => {
         delete (row as any).id
         delete (row as any).created_at
       })
+      
+      // CRITICAL: Deduplicate chunk by (agency_carrier_id, policy_number) to prevent "cannot affect row a second time" error
+      // If multiple rows have the same unique key, keep the last one (most recent data)
+      const seen = new Map<string, any>()
+      const deduplicatedChunk: any[] = []
+      
+      for (const row of chunk) {
+        const key = `${row.agency_carrier_id}::${row.policy_number}`
+        if (seen.has(key)) {
+          // Replace with newer row (keep the latest occurrence)
+          const existingIndex = deduplicatedChunk.findIndex(r => `${r.agency_carrier_id}::${r.policy_number}` === key)
+          if (existingIndex >= 0) {
+            deduplicatedChunk[existingIndex] = row
+          }
+        } else {
+          seen.set(key, row)
+          deduplicatedChunk.push(row)
+        }
+      }
+      
+      if (deduplicatedChunk.length !== chunk.length) {
+        console.log(`[Upload Logic] Deduplicated chunk ${i / BATCH_SIZE + 1}: ${chunk.length} -> ${deduplicatedChunk.length} rows (removed ${chunk.length - deduplicatedChunk.length} duplicates)`)
+      }
+      
+      chunk = deduplicatedChunk
     }
+    
     const query = supabase.from(targetTable)
-    const { error } = isPolicyTable
-      ? await query.upsert(chunk, { onConflict: 'agency_carrier_id,policy_number', ignoreDuplicates: false })
-      : await query.insert(chunk)
+    let error: any = null
+    let result: any = null
+    
+    try {
+      if (isPolicyTable) {
+        // Policy tables: upsert on (agency_carrier_id, policy_number)
+        const response = await query.upsert(chunk, { 
+          onConflict: 'agency_carrier_id,policy_number', 
+          ignoreDuplicates: false 
+        })
+        error = response.error
+        result = response
+      } else if (isCommissionTable) {
+        // Commission tables: upsert on (agency_carrier_id, policy_number)
+        // ONE commission record per policy - updates existing record with version history when same policy appears in new files
+        const response = await query.upsert(chunk, { 
+          onConflict: 'agency_carrier_id,policy_number', 
+          ignoreDuplicates: false 
+        })
+        error = response.error
+        result = response
+      } else {
+        // Other tables: insert (no unique constraint)
+        const response = await query.insert(chunk)
+        error = response.error
+        result = response
+      }
+    } catch (err: any) {
+      console.error('[Upload Logic] Exception during database write:', err)
+      error = err
+    }
+    
     if (error) {
-      console.error('Chunk write error:', error)
-      return { success: false, error: error.message }
+      // Extract error message from various possible formats
+      let errorMessage = 'Unknown database error'
+      
+      // Handle Supabase PostgREST error codes
+      if (error?.code === '23505') {
+        errorMessage = `Unique constraint violation: A record with this policy number already exists. ${error?.details || ''} ${error?.hint ? `Hint: ${error.hint}` : ''}`
+      } else if (error?.code === 'PGRST204') {
+        errorMessage = `Column not found: ${error?.message || 'The specified column does not exist in the table schema'}`
+      } else if (error?.code === 'PGRST116') {
+        errorMessage = 'No rows found'
+      } else if (error?.code === '23503') {
+        errorMessage = `Foreign key violation: ${error?.details || 'Referenced record does not exist'}`
+      } else if (error?.code === '42P01') {
+        errorMessage = `Table not found: ${targetTable}. Please ensure the table exists.`
+      } else if (error?.code === '42703') {
+        errorMessage = `Column not found: ${error?.message || 'One or more columns specified do not exist'}`
+      } else if (typeof error === 'string') {
+        errorMessage = error
+      } else if (error?.message) {
+        errorMessage = error.message
+      } else if (error?.details) {
+        errorMessage = error.details
+      } else if (error?.hint) {
+        errorMessage = `Database error: ${error.hint}`
+      } else if (error?.code) {
+        errorMessage = `Database error (code: ${error.code})`
+      } else {
+        // Try to stringify the error object with all properties
+        try {
+          // Get all enumerable properties
+          const errorProps: Record<string, any> = {}
+          for (const key in error) {
+            if (error.hasOwnProperty(key)) {
+              errorProps[key] = (error as any)[key]
+            }
+          }
+          
+          const errorStr = Object.keys(errorProps).length > 0 
+            ? JSON.stringify(errorProps, null, 2)
+            : String(error)
+          
+          if (errorStr && errorStr !== '{}' && errorStr !== '[object Object]') {
+            errorMessage = `Database error: ${errorStr}`
+          } else {
+            errorMessage = `Database write failed. Table: ${targetTable}, Operation: ${isPolicyTable ? 'upsert (policy)' : isCommissionTable ? 'upsert (commission)' : 'insert'}. Check browser console for full error details.`
+          }
+        } catch (_) {
+          errorMessage = `Database write failed. Table: ${targetTable}. Check browser console for details.`
+        }
+      }
+      
+      console.error('[Upload Logic] Chunk write error:', {
+        error,
+        errorObject: error,
+        errorType: typeof error,
+        errorKeys: error && typeof error === 'object' ? Object.keys(error) : [],
+        errorMessage,
+        targetTable,
+        chunkSize: chunk.length,
+        chunkIndex: i,
+        totalChunks: Math.ceil(rows.length / BATCH_SIZE),
+        isPolicyTable,
+        isCommissionTable,
+        onConflict: isPolicyTable || isCommissionTable ? 'agency_carrier_id,policy_number' : 'none',
+        firstRowSample: chunk[0] ? {
+          agency_carrier_id: chunk[0].agency_carrier_id,
+          policy_number: chunk[0].policy_number,
+          hasId: 'id' in chunk[0],
+          hasCreatedAt: 'created_at' in chunk[0],
+        } : null,
+      })
+      
+      return { success: false, error: errorMessage }
     }
   }
 
@@ -557,5 +707,18 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     .update({ records_processed: parseResult.records.length, updated_at: new Date().toISOString() })
     .eq('id', fileRow.id)
 
-  return { success: true, count: parseResult.records.length }
+  console.log('[Upload Logic] Upload complete:', {
+    fileId: fileRow.id,
+    recordCount: parseResult.records.length,
+    carrierCode,
+    fileType,
+  })
+
+  return { 
+    success: true, 
+    count: parseResult.records.length,
+    fileId: fileRow.id, // Return file ID for deal tracker processing
+    carrierCode,
+    fileType,
+  }
 }
