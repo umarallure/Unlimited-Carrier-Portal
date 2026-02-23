@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { Home, Briefcase, FileText, Upload, Users, Shield, LogOut, TrendingUp } from 'lucide-react';
+import { Home, Briefcase, FileText, Upload, Users, Shield, LogOut, TrendingUp, History } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import type { User, AuthChangeEvent, Session } from '@supabase/supabase-js';
@@ -108,6 +108,26 @@ const Sidebar = () => {
                         <Upload size={18} className="text-slate-200" />
                     </div>
                     <span className="text-sm font-medium text-slate-100">Organization Tree (Upload)</span>
+                </Link>
+
+                <Link
+                    href="/upload-history"
+                    className="group flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-900 transition-colors"
+                >
+                    <div className="w-8 h-8 rounded-md bg-slate-900 flex items-center justify-center">
+                        <History size={18} className="text-slate-200" />
+                    </div>
+                    <span className="text-sm font-medium text-slate-100">Upload History</span>
+                </Link>
+
+                <Link
+                    href="/org-chart"
+                    className="group flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-900 transition-colors"
+                >
+                    <div className="w-8 h-8 rounded-md bg-slate-900 flex items-center justify-center">
+                        <Users size={18} className="text-slate-200" />
+                    </div>
+                    <span className="text-sm font-medium text-slate-100">Organization Chart</span>
                 </Link>
             </nav>
 

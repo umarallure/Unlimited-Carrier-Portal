@@ -7,12 +7,11 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import Link from 'next/link'
-import { FileText, Search, Loader2, History, Calendar } from 'lucide-react'
+import { FileText, Search, Loader2, Calendar, History } from 'lucide-react'
 
 export default function RecordsPage() {
     const [records, setRecords] = useState<any[]>([])
     const [carriers, setCarriers] = useState<any[]>([])
-    const [uploadHistory, setUploadHistory] = useState<any[]>([])
     const [loading, setLoading] = useState(true)
     const [searchTerm, setSearchTerm] = useState('')
     const [selectedCarrier, setSelectedCarrier] = useState<string>('all')
@@ -33,7 +32,6 @@ export default function RecordsPage() {
     useEffect(() => {
         fetchCarriers()
         fetchRecords()
-        fetchUploadHistory()
     }, [])
 
     useEffect(() => {
@@ -46,25 +44,6 @@ export default function RecordsPage() {
             .select('id, name')
             .order('name')
         setCarriers(data || [])
-    }
-
-    const fetchUploadHistory = async () => {
-        const { data } = await supabase
-            .from('files')
-            .select(`
-                id,
-                original_filename,
-                file_type,
-                created_at,
-                records_processed,
-                agency_carriers (
-                    carriers (name),
-                    agencies (name)
-                )
-            `)
-            .order('created_at', { ascending: false })
-            .limit(30)
-        setUploadHistory(data || [])
     }
 
     const fetchRecords = async () => {
@@ -242,55 +221,6 @@ export default function RecordsPage() {
                 <div>
                     <h1 className="text-3xl font-bold text-white">Records</h1>
                     <p className="text-gray-400">View uploaded policy and commission records by type</p>
-                </div>
-            </div>
-
-            {/* Upload history (version history) */}
-            <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
-                <div className="px-3 py-2 border-b border-slate-800 flex items-center gap-2">
-                    <History className="w-4 h-4 text-orange-400 shrink-0" />
-                    <h2 className="text-sm font-semibold text-white">Upload history</h2>
-                    <span className="text-slate-500 text-xs">— when files were loaded (last 30)</span>
-                </div>
-                <div className="max-h-40 overflow-y-auto">
-                    {uploadHistory.length === 0 ? (
-                        <p className="px-3 py-2 text-slate-500 text-sm">No file uploads yet.</p>
-                    ) : (
-                        <Table>
-                            <TableHeader>
-                                <TableRow className="border-b border-slate-800 hover:bg-transparent">
-                                    <TableHead className="text-slate-400 font-medium">Date</TableHead>
-                                    <TableHead className="text-slate-400 font-medium">File</TableHead>
-                                    <TableHead className="text-slate-400 font-medium">Type</TableHead>
-                                    <TableHead className="text-slate-400 font-medium">Carrier</TableHead>
-                                    <TableHead className="text-slate-400 font-medium">Records</TableHead>
-                                </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                                {uploadHistory.map((f: any) => (
-                                    <TableRow key={f.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
-                                        <TableCell className="text-slate-300 text-sm whitespace-nowrap">
-                                            {f.created_at ? new Date(f.created_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '–'}
-                                        </TableCell>
-                                        <TableCell className="text-slate-200 text-sm font-mono truncate max-w-[200px]" title={f.original_filename}>
-                                            {f.original_filename || '–'}
-                                        </TableCell>
-                                        <TableCell>
-                                            <span className="px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-200">
-                                                {f.file_type || '–'}
-                                            </span>
-                                        </TableCell>
-                                        <TableCell className="text-slate-400 text-sm">
-                                            {f.agency_carriers?.carriers?.name || '–'}
-                                        </TableCell>
-                                        <TableCell className="text-slate-400 text-sm">
-                                            {f.records_processed != null ? f.records_processed : '–'}
-                                        </TableCell>
-                                    </TableRow>
-                                ))}
-                            </TableBody>
-                        </Table>
-                    )}
                 </div>
             </div>
 

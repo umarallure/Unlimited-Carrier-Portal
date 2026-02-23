@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ArrowLeft, Upload, CheckCircle, AlertCircle, Loader2, FileText, CloudUpload } from 'lucide-react'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 export default function CarrierDetailPage() {
     const params = useParams()
@@ -28,6 +29,8 @@ export default function CarrierDetailPage() {
     const [policyRecords, setPolicyRecords] = useState<any[]>([])
     const [recordsLoading, setRecordsLoading] = useState(false)
     const [selectedFileType, setSelectedFileType] = useState<'Policy' | 'Commission' | 'All'>('All')
+    const [currentPage, setCurrentPage] = useState(1)
+    const [pageSize, setPageSize] = useState(25)
 
     useEffect(() => {
         fetchCarrierDetails()
@@ -36,6 +39,10 @@ export default function CarrierDetailPage() {
 
     useEffect(() => {
         fetchRecords()
+    }, [selectedFileType])
+
+    useEffect(() => {
+        setCurrentPage(1) // Reset to page 1 when filter changes
     }, [selectedFileType])
 
     const fetchCarrierDetails = async () => {
@@ -206,6 +213,12 @@ export default function CarrierDetailPage() {
 
     const columns = getColumnNames()
 
+    // Pagination
+    const totalPages = Math.ceil(policyRecords.length / pageSize)
+    const startIndex = (currentPage - 1) * pageSize
+    const endIndex = startIndex + pageSize
+    const paginatedRecords = policyRecords.slice(startIndex, endIndex)
+
     return (
         <div className="space-y-6 animate-in fade-in duration-500">
             {/* Header with back button */}
@@ -370,40 +383,106 @@ export default function CarrierDetailPage() {
                             No records found. Upload a file to get started.
                         </div>
                     ) : (
-                        <div className="overflow-x-auto">
-                            <Table>
-                                <TableHeader>
-                                    <TableRow className="border-b border-white/10 hover:bg-transparent">
-                                        <TableHead className="text-slate-300 font-semibold">Policy #</TableHead>
-                                        <TableHead className="text-slate-300 font-semibold">Type</TableHead>
-                                        {columns.slice(0, 8).map(col => (
-                                            <TableHead key={col} className="text-slate-300 font-semibold">{col}</TableHead>
-                                        ))}
-                                        <TableHead className="text-gray-300 font-semibold">Updated</TableHead>
-                                    </TableRow>
-                                </TableHeader>
+                        <>
+                            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between text-sm text-slate-400">
+                                <span>
+                                    Showing {policyRecords.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, policyRecords.length)} of {policyRecords.length} records
+                                </span>
+                                <div className="flex items-center gap-2">
+                                    <span>Rows per page:</span>
+                                    <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
+                                        <SelectTrigger className="h-8 w-20 bg-slate-950 border-slate-800 text-white text-xs">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent className="bg-slate-800 border-slate-700">
+                                            <SelectItem value="25" className="text-white">25</SelectItem>
+                                            <SelectItem value="50" className="text-white">50</SelectItem>
+                                            <SelectItem value="100" className="text-white">100</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <Table>
+                                    <TableHeader>
+                                        <TableRow className="border-b border-white/10 hover:bg-transparent">
+                                            <TableHead className="text-slate-300 font-semibold">Policy #</TableHead>
+                                            <TableHead className="text-slate-300 font-semibold">Type</TableHead>
+                                            {columns.slice(0, 8).map(col => (
+                                                <TableHead key={col} className="text-slate-300 font-semibold">{col}</TableHead>
+                                            ))}
+                                            <TableHead className="text-gray-300 font-semibold">Updated</TableHead>
+                                        </TableRow>
+                                    </TableHeader>
                                     <TableBody>
-                                        {policyRecords.map((record) => (
+                                        {paginatedRecords.map((record) => (
                                             <TableRow key={record.id} className="border-b border-slate-800 hover:bg-slate-900/80 transition-colors">
                                                 <TableCell className="font-medium text-slate-100">{record.policy_number}</TableCell>
-                                            <TableCell>
+                                                <TableCell>
                                                     <span className={`px-2 py-1 rounded-full text-xs ${record.file_type === 'Policy' ? 'bg-slate-800 text-slate-100' : 'bg-slate-800 text-slate-100'}`}>
-                                                    {record.file_type}
-                                                </span>
-                                            </TableCell>
-                                            {columns.slice(0, 8).map(col => (
-                                                <TableCell key={col} className="text-slate-400">
-                                                    {String(record.raw_data[col] || '-').substring(0, 50)}
+                                                        {record.file_type}
+                                                    </span>
                                                 </TableCell>
-                                            ))}
-                                            <TableCell className="text-slate-400">
-                                                {new Date(record.updated_at).toLocaleDateString()}
-                                            </TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </div>
+                                                {columns.slice(0, 8).map(col => (
+                                                    <TableCell key={col} className="text-slate-400">
+                                                        {String(record.raw_data[col] || '-').substring(0, 50)}
+                                                    </TableCell>
+                                                ))}
+                                                <TableCell className="text-slate-400">
+                                                    {new Date(record.updated_at).toLocaleDateString()}
+                                                </TableCell>
+                                            </TableRow>
+                                        ))}
+                                    </TableBody>
+                                </Table>
+                            </div>
+                            {/* Pagination Controls */}
+                            {policyRecords.length > 0 && (
+                                <div className="flex items-center justify-between px-4 py-3 border-t border-slate-800 bg-slate-900/50">
+                                    <div className="text-sm text-slate-400">
+                                        Page {currentPage} of {totalPages}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setCurrentPage(1)}
+                                            disabled={currentPage === 1}
+                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                                        >
+                                            First
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                                            disabled={currentPage === 1}
+                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                                        >
+                                            Previous
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                                            disabled={currentPage === totalPages}
+                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                                        >
+                                            Next
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setCurrentPage(totalPages)}
+                                            disabled={currentPage === totalPages}
+                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                                        >
+                                            Last
+                                        </Button>
+                                    </div>
+                                </div>
+                            )}
+                        </>
                     )}
                 </CardContent>
             </Card>
