@@ -63,11 +63,17 @@ export interface DealTrackerPreviewEntry extends DealTrackerEntry {
   isUpdated: boolean
 }
 
+type DailyDealFlowInfo = {
+  call_center: string | null
+  phone_number: string | null
+  draft_date: string | null
+}
+
 /**
  * Bulk fetch all status mappings for a carrier (OPTIMIZED)
  * Returns a Map of status -> mapped_status for fast lookups
  */
-async function bulkFetchStatusMappings(
+export async function bulkFetchStatusMappings(
   carrierId: string,
   carrierCode: string | null
 ): Promise<Map<string, string>> {
@@ -156,92 +162,393 @@ export async function mapCarrierStatus(
 }
 
 /**
- * Normalize name for better matching (remove extra spaces, handle middle initials)
+ * Normalize name for better matching (remove extra spaces, commas -> space so "Last, First" matches "First Last")
  */
-function normalizeNameForSearch(name: string): string {
+export function normalizeNameForSearch(name: string): string {
   if (!name) return ''
-  // Remove extra spaces, normalize to single spaces
-  return name.replace(/\s+/g, ' ').trim()
+  // Replace commas with space so "Walker, Diane" becomes "Walker Diane" for consistent part extraction
+  const noComma = name.replace(/,/g, ' ')
+  return noComma.replace(/\s+/g, ' ').trim()
 }
 
 /**
- * Extract first and last name for flexible matching
+ * Extract first and last name for flexible matching.
+ * Returns a canonical key (sorted first|last) so "Diane Walker", "Walker, Diane", and "HART, RAYMOND L" vs "Raymond Lee Hart" match.
+ * When a comma is present, treat "Last, First MI" so last = before comma, first = first word after comma.
  */
-function extractNameParts(fullName: string): { firstName: string; lastName: string; allParts: string[] } {
+function extractNameParts(fullName: string): { firstName: string; lastName: string; allParts: string[]; firstLastKey: string } {
+  const raw = (fullName ?? '').trim()
+  if (!raw) {
+    return { firstName: '', lastName: '', allParts: [], firstLastKey: '' }
+  }
+
+  const commaIdx = raw.indexOf(',')
+  if (commaIdx >= 0) {
+    // "Last, First MI" or "HART, RAYMOND L" -> last = before comma, first = first word after comma
+    const beforeComma = raw.slice(0, commaIdx).replace(/\s+/g, ' ').trim()
+    const afterComma = raw.slice(commaIdx + 1).replace(/\s+/g, ' ').trim()
+    const firstWordAfter = afterComma.split(' ').filter(Boolean)[0] ?? ''
+    if (beforeComma && firstWordAfter) {
+      const lastName = beforeComma
+      const firstName = firstWordAfter
+      const firstLastKey = [firstName, lastName].sort().join('|').toLowerCase()
+      return {
+        firstName,
+        lastName,
+        allParts: [firstName, lastName],
+        firstLastKey,
+      }
+    }
+  }
+
   const normalized = normalizeNameForSearch(fullName)
   const parts = normalized.split(' ').filter(p => p.length > 0)
-  
   if (parts.length === 0) {
-    return { firstName: '', lastName: '', allParts: [] }
+    return { firstName: '', lastName: '', allParts: [], firstLastKey: '' }
   }
-  
   const firstName = parts[0]
-  const lastName = parts[parts.length - 1] // Last part is usually last name
-  const allParts = parts.filter((p, i) => i === 0 || i === parts.length - 1) // First and last
-  
-  return { firstName, lastName, allParts }
+  const lastName = parts[parts.length - 1]
+  const allParts = parts.filter((p, i) => i === 0 || i === parts.length - 1)
+  const firstLastKey = [firstName, lastName].sort().join('|').toLowerCase()
+  return { firstName, lastName, allParts, firstLastKey }
 }
 
 /**
- * Bulk fetch daily_deal_flow records for multiple insured names at once
- * Returns a Map of normalized name -> { call_center, phone_number }
+ * Levenshtein edit distance (for fuzzy first-name matching: Lakeysha vs Lekeysha vs Leteysha)
  */
-async function bulkFetchDailyDealFlowInfo(
+function editDistance(a: string, b: string): number {
+  const m = a.length
+  const n = b.length
+  if (m === 0) return n
+  if (n === 0) return m
+  let prev = Array.from({ length: n + 1 }, (_, i) => i)
+  for (let i = 1; i <= m; i++) {
+    const curr = [i]
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+    }
+    prev = curr
+  }
+  return prev[n]
+}
+
+/**
+ * Build insured name from AMAM policy fields to match DDF format: "First MI Last" (e.g. "Martha J Klar")
+ */
+function buildAmamInsuredName(p: { firstname?: string | null; lastname?: string | null; mi?: string | null }): string {
+  const first = p.firstname?.trim() ?? ''
+  const last = p.lastname?.trim() ?? ''
+  const mi = p.mi?.trim() ?? ''
+  const parts = first ? [first, mi, last].filter(Boolean) : [mi, last].filter(Boolean)
+  return parts.join(' ').trim() || ''
+}
+
+
+/**
+ * When running in browser, DDF is fetched via our API to avoid CORS with external Supabase.
+ * Chunks large requests to prevent timeouts.
+ */
+async function fetchDdfViaApi(
   insuredNames: string[],
   carrier: string
-): Promise<Map<string, { call_center: string | null; phone_number: string | null }>> {
-  const resultMap = new Map<string, { call_center: string | null; phone_number: string | null }>()
+): Promise<Map<string, DailyDealFlowInfo>> {
+  const CHUNK_SIZE = 200 // Process 200 names per request to avoid timeouts
+  const allResults = new Map<string, DailyDealFlowInfo>()
   
-  if (!insuredNames || insuredNames.length === 0) {
-    return resultMap
+  if (insuredNames.length > CHUNK_SIZE) {
+    console.log(`[Deal Tracker] Chunking DDF fetch: ${insuredNames.length} names into ${Math.ceil(insuredNames.length / CHUNK_SIZE)} requests`)
   }
+  
+  // Chunk the names array
+  for (let i = 0; i < insuredNames.length; i += CHUNK_SIZE) {
+    const chunk = insuredNames.slice(i, i + CHUNK_SIZE)
+    const res = await fetch('/api/ddf-lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ carrier, names: chunk }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      console.error('[Deal Tracker] DDF API error:', data.error || res.statusText)
+      throw new Error(data.error || `DDF lookup failed: ${res.status}`)
+    }
+    const results = data.results || {}
+    Object.entries(results).forEach(([k, v]) => {
+      const val = (v as { call_center?: string | null; phone_number?: string | null; draft_date?: string | null }) || {}
+      allResults.set(k, {
+        call_center: val.call_center ?? null,
+        phone_number: val.phone_number ?? null,
+        draft_date: val.draft_date ?? null,
+      })
+    })
+    const withData = Object.values(results).filter((v: any) => v?.call_center || v?.phone_number).length
+    if (chunk.length > 0 && withData === 0) {
+      console.warn('[Deal Tracker] DDF API returned no call_center/phone for', chunk.length, 'names (carrier:', carrier, '). Check server logs for [ddf-lookup] and that external DDF has rows for this carrier.')
+    }
+    
+    // Log progress for large batches
+    if (insuredNames.length > CHUNK_SIZE) {
+      console.log(`[Deal Tracker] DDF fetch progress: ${Math.min(i + CHUNK_SIZE, insuredNames.length)}/${insuredNames.length} names`)
+    }
+  }
+  
+  return allResults
+}
+
+const DDF_FETCH_LIMIT = 5000
+/** Supabase project default max rows per request; we paginate to get more */
+const SUPABASE_PAGE_SIZE = 1000
+
+/**
+ * Fetch all rows by paginating with .range(from, to).
+ * queryFactory() must return a query with .order() so range is deterministic.
+ */
+export async function fetchAllPaginated<T = any>(queryFactory: () => any): Promise<T[]> {
+  const acc: T[] = []
+  let from = 0
+  while (true) {
+    const to = from + SUPABASE_PAGE_SIZE - 1
+    const { data, error } = await queryFactory().range(from, to)
+    if (error) throw error
+    const chunk = (data ?? []) as T[]
+    acc.push(...chunk)
+    if (chunk.length < SUPABASE_PAGE_SIZE) break
+    from = to + 1
+  }
+  return acc
+}
+
+/**
+ * Fetch raw daily_deal_flow rows for a carrier (server-side only).
+ * Exported for /api/ddf-lookup to cache and reuse across chunked requests.
+ */
+export async function getDdfRecordsForCarrier(
+  externalSupabase: ReturnType<typeof createClient>,
+  carrier: string
+): Promise<{
+  insured_name?: string | null
+  lead_vendor?: string | null
+  lead_vendor_name?: string | null
+  client_phone_number?: string | null
+  phone_number?: string | null
+  carrier?: string | null
+  draft_date?: string | null
+}[]> {
+  const carrierUpper = (carrier || '').toUpperCase()
+  const isAmam = carrierUpper === 'AMAM' || carrierUpper === 'ANAM' || carrierUpper.includes('AMERICAN AMICABLE')
+  // External DDF table may not have lead_vendor_name or phone_number; use only columns that exist there
+  let query = externalSupabase
+    .from('daily_deal_flow')
+    .select('insured_name, lead_vendor, client_phone_number, carrier, draft_date')
+    .order('created_at', { ascending: false })
+    .limit(DDF_FETCH_LIMIT)
+  if (isAmam) {
+    query = query.or('carrier.ilike.%AMAM%,carrier.ilike.%ANAM%,carrier.ilike.%American%')
+  } else if (carrierUpper === 'LIBERTY') {
+    query = query.ilike('carrier', '%Liberty%')
+  } else if (carrierUpper === 'COREBRIDGE') {
+    query = query.ilike('carrier', '%Corebridge%')
+  } else {
+    query = query.ilike('carrier', carrier)
+  }
+  const { data, error } = await query
+  if (error || !data) return []
+  return data as {
+    insured_name?: string | null
+    lead_vendor?: string | null
+    lead_vendor_name?: string | null
+    client_phone_number?: string | null
+    phone_number?: string | null
+    carrier?: string | null
+    draft_date?: string | null
+  }[]
+}
+
+/**
+ * Match insured names against already-fetched DDF records. Used by API with cached records.
+ */
+export function matchDdfNamesToRecords(
+  allRecords: {
+    insured_name?: string | null
+    lead_vendor?: string | null
+    lead_vendor_name?: string | null
+    client_phone_number?: string | null
+    phone_number?: string | null
+    draft_date?: string | null
+  }[],
+  insuredNames: string[]
+): Map<string, DailyDealFlowInfo> {
+  const resultMap = new Map<string, DailyDealFlowInfo>()
+  if (!insuredNames?.length || !allRecords?.length) return resultMap
+
+  const normalizedNames = insuredNames.map(n => normalizeNameForSearch(n))
+  // Use original names for extractNameParts so "Last, First MI" (e.g. HART, RAYMOND L) is parsed correctly
+  const nameParts = insuredNames.map(n => extractNameParts((n ?? '').trim()))
+  type DailyDealFlowRecord = typeof allRecords[0]
+  const getCallCenter = (r: DailyDealFlowRecord): string | null =>
+    ((r.lead_vendor ?? r.lead_vendor_name ?? null) && String(r.lead_vendor ?? r.lead_vendor_name ?? '').trim()) || null
+  const getPhone = (r: DailyDealFlowRecord): string | null =>
+    ((r.client_phone_number ?? r.phone_number ?? null) && String(r.client_phone_number ?? r.phone_number ?? '').trim()) || null
+  const hasContact = (r: DailyDealFlowRecord) => !!(getCallCenter(r) || getPhone(r))
+  const pickBestMatch = (matches: DailyDealFlowRecord[]): DailyDealFlowRecord | null => {
+    if (!matches?.length) return null
+    const withData = matches.find(hasContact)
+    return withData ?? matches[0]
+  }
+  const exactMap = new Map<string, DailyDealFlowRecord[]>()
+  const firstLastMap = new Map<string, DailyDealFlowRecord[]>()
+  const firstNameMap = new Map<string, DailyDealFlowRecord[]>()
+  const lastNameMap = new Map<string, DailyDealFlowRecord[]>()
+  for (const record of allRecords as DailyDealFlowRecord[]) {
+    const recordName = normalizeNameForSearch(record.insured_name || '')
+    const recordParts = extractNameParts(recordName)
+    if (recordName) {
+      if (!exactMap.has(recordName)) exactMap.set(recordName, [])
+      exactMap.get(recordName)!.push(record)
+    }
+    if (recordParts.firstName && recordParts.lastName) {
+      const key = recordParts.firstLastKey
+      if (!firstLastMap.has(key)) firstLastMap.set(key, [])
+      firstLastMap.get(key)!.push(record)
+    }
+    if (recordParts.firstName) {
+      const key = recordParts.firstName.toLowerCase()
+      if (!firstNameMap.has(key)) firstNameMap.set(key, [])
+      firstNameMap.get(key)!.push(record)
+    }
+    if (recordParts.lastName) {
+      const key = recordParts.lastName.toLowerCase()
+      if (!lastNameMap.has(key)) lastNameMap.set(key, [])
+      lastNameMap.get(key)!.push(record)
+    }
+  }
+  for (let i = 0; i < normalizedNames.length; i++) {
+    const normalizedName = normalizedNames[i]
+    const parts = nameParts[i]
+    let bestMatch: DailyDealFlowRecord | null = null
+    let bestScore = 0
+    const exactMatches = exactMap.get(normalizedName)
+    if (exactMatches?.length) {
+      bestMatch = pickBestMatch(exactMatches)
+      bestScore = 100
+    } else if (parts.firstName && parts.lastName && parts.firstLastKey) {
+      const matches = firstLastMap.get(parts.firstLastKey)
+      if (matches?.length) {
+        bestMatch = pickBestMatch(matches)
+        bestScore = 80
+      }
+    }
+    if (!bestMatch && parts.firstName && parts.lastName) {
+      const lastNameKey = parts.lastName.toLowerCase()
+      const lastMatches = lastNameMap.get(lastNameKey)
+      if (lastMatches?.length) {
+        const policyFirst = parts.firstName.toLowerCase()
+        const fuzzyMatches = lastMatches.filter(r => {
+          const rName = normalizeNameForSearch(r.insured_name || '')
+          const rParts = extractNameParts(rName)
+          const rFirst = (rParts.firstName || '').toLowerCase()
+          return rFirst.length > 0 && editDistance(policyFirst, rFirst) <= 2
+        })
+        if (fuzzyMatches.length) {
+          bestMatch = pickBestMatch(fuzzyMatches)
+          bestScore = 55
+        }
+      }
+    }
+    if (!bestMatch && parts.firstName) {
+      const matches = firstNameMap.get(parts.firstName.toLowerCase())
+      if (matches?.length) {
+        bestMatch = pickBestMatch(matches)
+        bestScore = 60
+      }
+    }
+    if (!bestMatch && parts.lastName) {
+      const matches = lastNameMap.get(parts.lastName.toLowerCase())
+      if (matches?.length) {
+        bestMatch = pickBestMatch(matches)
+        bestScore = 50
+      }
+    }
+    if (!bestMatch && parts.firstName && parts.lastName) {
+      const policyFirst = parts.firstName.toLowerCase()
+      const policyLast = parts.lastName.toLowerCase()
+      const fuzzyBoth = (allRecords as DailyDealFlowRecord[]).filter(r => {
+        const rName = normalizeNameForSearch(r.insured_name || '')
+        const rParts = extractNameParts(rName)
+        const rFirst = (rParts.firstName || '').toLowerCase()
+        const rLast = (rParts.lastName || '').toLowerCase()
+        if (!rFirst || !rLast) return false
+        return editDistance(policyFirst, rFirst) <= 2 && editDistance(policyLast, rLast) <= 2
+      })
+      if (fuzzyBoth.length) {
+        bestMatch = pickBestMatch(fuzzyBoth)
+        bestScore = 52
+      }
+    }
+    if (bestMatch && bestScore >= 50) {
+      resultMap.set(normalizedName, {
+        call_center: getCallCenter(bestMatch) ?? null,
+        phone_number: getPhone(bestMatch) ?? null,
+        draft_date: bestMatch.draft_date != null ? String(bestMatch.draft_date).trim() : null,
+      })
+    }
+  }
+  return resultMap
+}
+
+/**
+ * Bulk fetch daily_deal_flow records (server-side implementation).
+ * Exported for use by /api/ddf-lookup so the browser never calls external Supabase (avoids CORS).
+ */
+export async function doBulkFetchDailyDealFlowInfo(
+  externalSupabase: ReturnType<typeof createClient>,
+  insuredNames: string[],
+  carrier: string
+): Promise<Map<string, DailyDealFlowInfo>> {
+  const resultMap = new Map<string, DailyDealFlowInfo>()
+  if (!insuredNames || insuredNames.length === 0) return resultMap
 
   try {
-    const externalSupabase = getExternalSupabaseClient()
-    
-    // Normalize all names and create search patterns
     const normalizedNames = insuredNames.map(n => normalizeNameForSearch(n))
-    const nameParts = normalizedNames.map(n => extractNameParts(n))
+    // Use original names for extractNameParts so "Last, First MI" (e.g. HART, RAYMOND L) matches "Raymond Lee Hart"
+    const nameParts = insuredNames.map(n => extractNameParts((n ?? '').trim()))
     
     console.log('[Deal Tracker] Bulk fetching daily_deal_flow for carrier:', carrier, 'names:', normalizedNames.length)
     
-    // STEP 1: FIRST filter by carrier (most important - reduces dataset significantly)
+    // STEP 1: Fetch DDF records for carrier (getDdfRecordsForCarrier only – no direct query here)
     console.log('[Deal Tracker] Step 1: Filtering daily_deal_flow records by carrier:', carrier)
-    const { data: allRecords, error } = await externalSupabase
-      .from('daily_deal_flow')
-      .select('insured_name, lead_vendor, client_phone_number, carrier')
-      .ilike('carrier', carrier) // Filter by carrier FIRST before any name matching
-      .order('created_at', { ascending: false })
-      .limit(10000) // Reasonable limit
-
-    if (error) {
-      console.error('[Deal Tracker] Error bulk fetching daily_deal_flow:', error)
-      return resultMap
-    }
-
-    if (!allRecords || allRecords.length === 0) {
+    const ddfRecords = await getDdfRecordsForCarrier(externalSupabase, carrier)
+    if (!ddfRecords || ddfRecords.length === 0) {
       console.log('[Deal Tracker] No daily_deal_flow records found for carrier:', carrier)
       return resultMap
     }
 
     // Type assertion for external database records
     type DailyDealFlowRecord = {
-      insured_name: string | null
-      lead_vendor: string | null
-      client_phone_number: string | null
-      carrier: string | null
+      insured_name?: string | null
+      lead_vendor?: string | null
+      lead_vendor_name?: string | null
+      client_phone_number?: string | null
+      phone_number?: string | null
+      carrier?: string | null
+      draft_date?: string | null
     }
-    const typedRecords = allRecords as DailyDealFlowRecord[]
-
-    console.log('[Deal Tracker] Step 1 complete: Fetched', typedRecords.length, 'records filtered by carrier:', carrier)
-    
-    // STEP 2: Build lookup maps from carrier-filtered records only
-    console.log('[Deal Tracker] Step 2: Building lookup maps from carrier-filtered records...')
+    const typedRecords = ddfRecords as DailyDealFlowRecord[]
+    const getCallCenter = (r: DailyDealFlowRecord) =>
+      (r.lead_vendor ?? r.lead_vendor_name ?? null) && String(r.lead_vendor ?? r.lead_vendor_name ?? '').trim() || null
+    const getPhone = (r: DailyDealFlowRecord) =>
+      (r.client_phone_number ?? r.phone_number ?? null) && String(r.client_phone_number ?? r.phone_number ?? '').trim() || null
+    const hasContact = (r: DailyDealFlowRecord) => !!(getCallCenter(r) || getPhone(r))
+    const pickBestMatch = (matches: DailyDealFlowRecord[]): DailyDealFlowRecord | null => {
+      if (!matches?.length) return null
+      const withData = matches.find(hasContact)
+      return withData ?? matches[0]
+    }
     const exactMap = new Map<string, DailyDealFlowRecord[]>()
     const firstLastMap = new Map<string, DailyDealFlowRecord[]>()
     const firstNameMap = new Map<string, DailyDealFlowRecord[]>()
     const lastNameMap = new Map<string, DailyDealFlowRecord[]>()
-
     // Build lookup maps from records (O(n) instead of O(n*m) later)
     for (const record of typedRecords) {
       const recordName = normalizeNameForSearch(record.insured_name || '')
@@ -253,9 +560,9 @@ async function bulkFetchDailyDealFlowInfo(
         exactMap.get(recordName)!.push(record)
       }
       
-      // First + Last map
-      if (recordParts.firstName && recordParts.lastName) {
-        const key = `${recordParts.firstName}|${recordParts.lastName}`.toLowerCase()
+      // First + Last map (canonical key so "Diane Walker" and "Walker, Diane" match)
+      if (recordParts.firstName && recordParts.lastName && recordParts.firstLastKey) {
+        const key = recordParts.firstLastKey
         if (!firstLastMap.has(key)) firstLastMap.set(key, [])
         firstLastMap.get(key)!.push(record)
       }
@@ -279,10 +586,12 @@ async function bulkFetchDailyDealFlowInfo(
     
     // STEP 3: Match each policy name using lookup maps (only matches within carrier-filtered records)
     console.log('[Deal Tracker] Step 3: Matching', normalizedNames.length, 'names against carrier-filtered records...')
+    let strategyUsed: string = 'none'
     for (let i = 0; i < normalizedNames.length; i++) {
       const normalizedName = normalizedNames[i]
       const parts = nameParts[i]
-      
+      strategyUsed = 'none'
+
       let bestMatch: any = null
       let bestScore = 0
 
@@ -292,13 +601,31 @@ async function bulkFetchDailyDealFlowInfo(
         bestMatch = exactMatches[0] // Take first (most recent due to ordering)
         bestScore = 100
       }
-      // Strategy 2: First + Last name match
-      else if (parts.firstName && parts.lastName) {
-        const key = `${parts.firstName}|${parts.lastName}`.toLowerCase()
-        const matches = firstLastMap.get(key)
+      // Strategy 2: First + Last name match (canonical key for "First Last" vs "Last, First")
+      else if (parts.firstName && parts.lastName && parts.firstLastKey) {
+        const matches = firstLastMap.get(parts.firstLastKey)
         if (matches && matches.length > 0) {
           bestMatch = matches[0]
           bestScore = 80
+        }
+      }
+      // Strategy 2b: Last name + fuzzy first name (handles typos: Lakeysha vs Lekeysha vs Leteysha)
+      if (!bestMatch && parts.firstName && parts.lastName) {
+        const lastNameKey = parts.lastName.toLowerCase()
+        const lastMatches = lastNameMap.get(lastNameKey)
+        if (lastMatches && lastMatches.length > 0) {
+          const policyFirst = parts.firstName.toLowerCase()
+          const fuzzyMatches = lastMatches.filter((r: DailyDealFlowRecord) => {
+            const rName = normalizeNameForSearch(r.insured_name || '')
+            const rParts = extractNameParts(rName)
+            const rFirst = (rParts.firstName || '').toLowerCase()
+            return rFirst.length > 0 && editDistance(policyFirst, rFirst) <= 2
+          })
+          if (fuzzyMatches.length > 0) {
+            bestMatch = pickBestMatch(fuzzyMatches)
+            bestScore = 55
+            strategyUsed = 'fuzzyFirst'
+          }
         }
       }
       // Strategy 3: First name match
@@ -323,8 +650,9 @@ async function bulkFetchDailyDealFlowInfo(
       // Only use match if score is reasonable (>= 50)
       if (bestMatch && bestScore >= 50) {
         resultMap.set(normalizedName, {
-          call_center: bestMatch.lead_vendor || null,
-          phone_number: bestMatch.client_phone_number || null,
+          call_center: getCallCenter(bestMatch) ?? null,
+          phone_number: getPhone(bestMatch) ?? null,
+          draft_date: bestMatch.draft_date != null ? String(bestMatch.draft_date).trim() : null,
         })
       }
     }
@@ -338,6 +666,23 @@ async function bulkFetchDailyDealFlowInfo(
 }
 
 /**
+ * Bulk fetch daily_deal_flow records for multiple insured names at once.
+ * In the browser we call /api/ddf-lookup (server proxy) to avoid CORS with external Supabase.
+ */
+export async function bulkFetchDailyDealFlowInfo(
+  insuredNames: string[],
+  carrier: string
+): Promise<Map<string, DailyDealFlowInfo>> {
+  if (!insuredNames || insuredNames.length === 0) {
+    return new Map()
+  }
+  if (typeof window !== 'undefined') {
+    return fetchDdfViaApi(insuredNames, carrier)
+  }
+  return doBulkFetchDailyDealFlowInfo(getExternalSupabaseClient(), insuredNames, carrier)
+}
+
+/**
  * Fetch call center and phone number from daily_deal_flow table (single lookup)
  * Uses flexible name matching to handle variations in name formatting
  * NOTE: For bulk operations, use bulkFetchDailyDealFlowInfo instead
@@ -345,9 +690,9 @@ async function bulkFetchDailyDealFlowInfo(
 export async function fetchDailyDealFlowInfo(
   insuredName: string | null,
   carrier: string
-): Promise<{ call_center: string | null; phone_number: string | null }> {
+): Promise<{ call_center: string | null; phone_number: string | null; draft_date: string | null }> {
   if (!insuredName) {
-    return { call_center: null, phone_number: null }
+    return { call_center: null, phone_number: null, draft_date: null }
   }
 
   try {
@@ -372,7 +717,7 @@ export async function fetchDailyDealFlowInfo(
     console.log('[Deal Tracker] Strategy 1: Exact match')
     let result = await externalSupabase
       .from('daily_deal_flow')
-      .select('lead_vendor, client_phone_number')
+      .select('lead_vendor, client_phone_number, draft_date')
       .ilike('insured_name', normalizedName)
       .ilike('carrier', carrier) // Case-insensitive carrier match
       .order('created_at', { ascending: false })
@@ -390,7 +735,7 @@ export async function fetchDailyDealFlowInfo(
       const firstLastPattern = `${firstName}%${lastName}`
       result = await externalSupabase
         .from('daily_deal_flow')
-        .select('lead_vendor, client_phone_number')
+        .select('lead_vendor, client_phone_number, draft_date')
         .ilike('insured_name', firstLastPattern)
         .ilike('carrier', carrier)
         .order('created_at', { ascending: false })
@@ -408,7 +753,7 @@ export async function fetchDailyDealFlowInfo(
       console.log('[Deal Tracker] Strategy 3: First name partial match')
       result = await externalSupabase
         .from('daily_deal_flow')
-        .select('lead_vendor, client_phone_number')
+        .select('lead_vendor, client_phone_number, draft_date')
         .ilike('insured_name', `${firstName}%`)
         .ilike('carrier', carrier)
         .order('created_at', { ascending: false })
@@ -426,7 +771,7 @@ export async function fetchDailyDealFlowInfo(
       console.log('[Deal Tracker] Strategy 4: Last name match')
       result = await externalSupabase
         .from('daily_deal_flow')
-        .select('lead_vendor, client_phone_number')
+        .select('lead_vendor, client_phone_number, draft_date')
         .ilike('insured_name', `%${lastName}`)
         .ilike('carrier', carrier)
         .order('created_at', { ascending: false })
@@ -446,7 +791,7 @@ export async function fetchDailyDealFlowInfo(
         if (part.length > 2) {
           result = await externalSupabase
             .from('daily_deal_flow')
-            .select('lead_vendor, client_phone_number')
+            .select('lead_vendor, client_phone_number, draft_date')
             .ilike('insured_name', `%${part}%`)
             .ilike('carrier', carrier)
             .order('created_at', { ascending: false })
@@ -463,12 +808,14 @@ export async function fetchDailyDealFlowInfo(
     }
 
     if (error || !data) {
-      console.warn(`[Deal Tracker] No daily_deal_flow entry found after all strategies for insured_name: ${insuredName}, carrier: ${carrier}`)
-      return { call_center: null, phone_number: null }
+      console.warn(
+        `[Deal Tracker] No daily_deal_flow entry found after all strategies for insured_name: ${insuredName}, carrier: ${carrier}`
+      )
+      return { call_center: null, phone_number: null, draft_date: null }
     }
 
     // Type assertion for external database response
-    const ddfData = data as { lead_vendor?: string | null; client_phone_number?: string | null } | null
+    const ddfData = data as { lead_vendor?: string | null; client_phone_number?: string | null; draft_date?: string | null } | null
 
     console.log('[Deal Tracker] Found daily_deal_flow match:', {
       insuredName,
@@ -479,10 +826,11 @@ export async function fetchDailyDealFlowInfo(
     return {
       call_center: ddfData?.lead_vendor || null,
       phone_number: ddfData?.client_phone_number || null,
+      draft_date: ddfData?.draft_date != null ? String(ddfData.draft_date).trim() : null,
     }
   } catch (error) {
     console.error('[Deal Tracker] Error fetching daily_deal_flow info:', error)
-    return { call_center: null, phone_number: null }
+    return { call_center: null, phone_number: null, draft_date: null }
   }
 }
 
@@ -624,7 +972,7 @@ export async function processAetnaCommissionsForDealTracker(
 
   // Bulk fetch status mappings and daily_deal_flow for new entries (if needed)
   let statusMappingMap = new Map<string, string>()
-  let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null }>()
+  let dailyDealFlowMap = new Map<string, DailyDealFlowInfo>()
   
   if (missingPolicyNumbers.length > 0) {
     statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
@@ -669,9 +1017,8 @@ export async function processAetnaCommissionsForDealTracker(
         sales_agent: commission.writingagentname || existing.sales_agent,
         writing_number: commission.writingagentnumber || existing.writing_number,
         commission_type: commission.commissiontype || existing.commission_type,
-        effective_date: commission.effectivedate !== null && commission.effectivedate !== undefined 
-          ? commission.effectivedate 
-          : existing.effective_date, // Update from commission if available, otherwise keep existing
+        // For updates we keep existing effective_date (or whatever was set previously, including any DDF-based value)
+        effective_date: existing.effective_date,
         source_commission_table: 'aetna_commissions',
         source_commission_id: commission.id,
         isNew: false,
@@ -692,6 +1039,7 @@ export async function processAetnaCommissionsForDealTracker(
         const ddfInfo = dailyDealFlowMap.get(normalizedName)
         const callCenter = ddfInfo?.call_center || null
         const phoneNumber = ddfInfo?.phone_number || null
+        const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
         const entry: DealTrackerPreviewEntry = {
           agency_carrier_id: agencyCarrierId,
@@ -700,7 +1048,7 @@ export async function processAetnaCommissionsForDealTracker(
           ghl_name: null,
           ghl_stage: null,
           policy_status: mappedStatus,
-          deal_creation_date: policy.issuedate || null,
+          deal_creation_date: policy.apprecddate || policy.issuedate || null,
           policy_number: commission.policy_number,
           carrier: carrierName,
           carrier_id: carrier.id,
@@ -709,10 +1057,10 @@ export async function processAetnaCommissionsForDealTracker(
           notes: null,
           status: null,
           last_updated: new Date().toISOString(),
-          sales_agent: commission.writingagentname || null,
-          writing_number: commission.writingagentnumber || null,
+          sales_agent: policy.agentcompletename || commission.writingagentname || null,
+          writing_number: policy.agentnumber || commission.writingagentnumber || null,
           commission_type: commission.commissiontype || null,
-          effective_date: commission.effectivedate || null,
+          effective_date: effectiveDateFromDdf || commission.effectivedate || null,
           call_center: callCenter,
           phone_number: phoneNumber,
           cc_pmt_ws: null,
@@ -794,67 +1142,68 @@ export async function processAetnaFilesForDealTracker(
     agencyCarrierId,
   })
 
-  // Fetch all policies from the uploaded file
+  // Fetch all policies from the uploaded file (paginated to exceed Supabase 1000-row default)
   console.log('[Deal Tracker] Fetching policies from aetna_policies...')
-  const { data: policies, error: policiesError } = await supabase
-    .from('aetna_policies')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .eq('file_id', fileId)
-
-  if (policiesError) {
+  let policies: any[]
+  try {
+    policies = await fetchAllPaginated(() =>
+      supabase
+        .from('aetna_policies')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .eq('file_id', fileId)
+        .order('id', { ascending: true })
+    )
+  } catch (policiesError: any) {
     console.error('[Deal Tracker] Error fetching policies:', policiesError)
-    throw new Error(`Failed to fetch policies: ${policiesError.message}`)
+    throw new Error(`Failed to fetch policies: ${policiesError?.message}`)
   }
 
-  console.log('[Deal Tracker] Policies found:', {
-    count: policies?.length || 0,
-    fileId,
-    agencyCarrierId,
-  })
+  console.log('[Deal Tracker] Policies found:', { count: policies?.length || 0, fileId, agencyCarrierId })
 
   if (!policies || policies.length === 0) {
     console.warn('[Deal Tracker] No policies found for file_id:', fileId)
     return []
   }
 
-  // Fetch commissions for matching policy numbers
   const policyNumbers = policies.map(p => p.policy_number)
   console.log('[Deal Tracker] Fetching commissions for', policyNumbers.length, 'policies')
-  
-  const { data: commissions, error: commissionsError } = await supabase
-    .from('aetna_commissions')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
 
-  if (commissionsError) {
-    console.warn('[Deal Tracker] Failed to fetch commissions:', commissionsError.message)
-  } else {
-    console.log('[Deal Tracker] Commissions found:', commissions?.length || 0)
+  let commissions: any[] = []
+  try {
+    commissions = await fetchAllPaginated(() =>
+      supabase
+        .from('aetna_commissions')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', policyNumbers)
+        .order('id', { ascending: true })
+    )
+  } catch (commissionsError: any) {
+    console.warn('[Deal Tracker] Failed to fetch commissions:', commissionsError?.message)
   }
+  console.log('[Deal Tracker] Commissions found:', commissions?.length || 0)
 
-  // Create a map of policy_number -> commission
   const commissionMap = new Map<string, any>()
-  if (commissions) {
-    commissions.forEach(comm => {
-      // Use the latest commission for each policy
-      if (!commissionMap.has(comm.policy_number) || 
-          (comm.created_at && commissionMap.get(comm.policy_number)?.created_at < comm.created_at)) {
-        commissionMap.set(comm.policy_number, comm)
-      }
-    })
-  }
+  commissions.forEach(comm => {
+    if (!commissionMap.has(comm.policy_number) ||
+        (comm.created_at && commissionMap.get(comm.policy_number)?.created_at < comm.created_at)) {
+      commissionMap.set(comm.policy_number, comm)
+    }
+  })
 
-  // Check existing deal tracker entries
-  const { data: existingEntries, error: existingError } = await supabase
-    .from('deal_tracker')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
-
-  if (existingError) {
-    console.warn(`Failed to fetch existing entries: ${existingError.message}`)
+  let existingEntries: any[] = []
+  try {
+    existingEntries = await fetchAllPaginated(() =>
+      supabase
+        .from('deal_tracker')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', policyNumbers)
+        .order('id', { ascending: true })
+    )
+  } catch (existingError: any) {
+    console.warn(`Failed to fetch existing entries: ${existingError?.message}`)
   }
 
   const existingMap = new Map<string, any>()
@@ -869,16 +1218,16 @@ export async function processAetnaFilesForDealTracker(
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
   console.log('[Deal Tracker] Status mappings loaded:', statusMappingMap.size, 'mappings')
 
-  // BULK FETCH: Get all daily_deal_flow records for all insured names at once
-  console.log('[Deal Tracker] Bulk fetching daily_deal_flow records...')
+  // BULK FETCH DDF only for policies that don't already have call_center/phone (skip re-lookup for already-filled rows)
+  const policiesNeedingDdf = policies.filter(p => {
+    const ex = existingMap.get(p.policy_number)
+    return !ex || (ex.call_center == null && ex.phone_number == null)
+  })
   const uniqueInsuredNames = Array.from(new Set(
-    policies
-      .map(p => p.insuredname)
-      .filter(name => name && name.trim().length > 0)
+    policiesNeedingDdf.map(p => (p.insuredname || '').trim()).filter(n => n.length > 0)
   ))
-  
-  console.log('[Deal Tracker] Unique insured names to search:', uniqueInsuredNames.length)
-  
+  const skipCount = policies.length - policiesNeedingDdf.length
+  console.log('[Deal Tracker] Bulk fetching daily_deal_flow for', uniqueInsuredNames.length, 'names (skip', skipCount, 'policies already have call_center/phone)...')
   const dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, carrierName)
   console.log('[Deal Tracker] Bulk fetch complete. Found matches for', dailyDealFlowMap.size, 'out of', uniqueInsuredNames.length, 'names')
 
@@ -908,17 +1257,21 @@ export async function processAetnaFilesForDealTracker(
       })
     }
 
-    // Get daily_deal_flow info from bulk fetch map (only if not already fetched)
-    let callCenter: string | null = null
-    let phoneNumber: string | null = null
-    
-    if (!existing || !existing.daily_deal_flow_fetched) {
-      // Use bulk fetch map
+    // Use existing call_center/phone if already set (no re-lookup); else look up DDF for new matches
+    const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
+    let callCenter: string | null
+    let phoneNumber: string | null
+    let effectiveDateFromDdf: string | null = null
+    if (alreadyHasDdf) {
+      callCenter = existing!.call_center
+      phoneNumber = existing!.phone_number
+      if (i < 3) console.log(`[Deal Tracker] policy ${i + 1}: using existing DDF (skip lookup)`)
+    } else {
       const normalizedName = normalizeNameForSearch(policy.insuredname || '')
       const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
-      callCenter = ddfInfo?.call_center || null
-      phoneNumber = ddfInfo?.phone_number || null
-      
+      callCenter = ddfInfo?.call_center ?? null
+      phoneNumber = ddfInfo?.phone_number ?? null
+      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
       if (i < 3) {
         console.log(`[Deal Tracker] daily_deal_flow lookup for policy ${i + 1}:`, {
           insuredname: policy.insuredname,
@@ -928,17 +1281,15 @@ export async function processAetnaFilesForDealTracker(
           phoneNumber,
         })
       }
-    } else {
-      callCenter = existing.call_center
-      phoneNumber = existing.phone_number
-      if (i < 3) {
-        console.log(`[Deal Tracker] Using existing daily_deal_flow for policy ${i + 1}`)
-      }
     }
 
     // Calculate deal value and CC value
     const dealValue = commission?.commissionamount || null
     const ccValue = dealValue ? dealValue / 2 : null
+
+    const effectiveDate =
+      effectiveDateFromDdf ||
+      (commission?.effectivedate ?? null)
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
@@ -947,7 +1298,7 @@ export async function processAetnaFilesForDealTracker(
       ghl_name: null,
       ghl_stage: null,
       policy_status: mappedStatus,
-      deal_creation_date: policy.issuedate || null,
+      deal_creation_date: policy.apprecddate || policy.issuedate || null,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
@@ -956,30 +1307,24 @@ export async function processAetnaFilesForDealTracker(
       notes: null,
       status: null,
       last_updated: new Date().toISOString(),
-      sales_agent: commission?.writingagentname || null,
-      writing_number: commission?.writingagentnumber || null,
+      sales_agent: policy.agentcompletename || commission?.writingagentname || null,
+      writing_number: policy.agentnumber || commission?.writingagentnumber || null,
       commission_type: commission?.commissiontype || null,
-      effective_date: commission?.effectivedate || null,
+      effective_date: effectiveDate,
       call_center: callCenter,
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
       carrier_status: policy.statusdisplaytext || policy.statuscategory || null,
       policy_type: policy.product || null,
-      daily_deal_flow_fetched: existing?.daily_deal_flow_fetched || false,
-      daily_deal_flow_fetched_at: existing?.daily_deal_flow_fetched_at || null,
+      daily_deal_flow_fetched: !!(callCenter || phoneNumber),
+      daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : (existing?.daily_deal_flow_fetched_at ?? null),
       source_policy_table: 'aetna_policies',
       source_policy_id: policy.id,
       source_commission_table: commission ? 'aetna_commissions' : null,
       source_commission_id: commission?.id || null,
       isNew: !existing,
       isUpdated: !!existing,
-    }
-
-    // Update daily_deal_flow tracking if we fetched it
-    if (!existing || !existing.daily_deal_flow_fetched) {
-      entry.daily_deal_flow_fetched = true
-      entry.daily_deal_flow_fetched_at = new Date().toISOString()
     }
 
     previewEntries.push(entry)
@@ -992,136 +1337,797 @@ export async function processAetnaFilesForDealTracker(
 }
 
 /**
- * Save deal tracker entries to database (OPTIMIZED with batch operations)
+ * Process AMAM carrier policy files and create deal tracker entries
+ */
+export async function processAmamFilesForDealTracker(
+  agencyCarrierId: string,
+  fileId: string
+): Promise<DealTrackerPreviewEntry[]> {
+  console.log('[Deal Tracker] processAmamFilesForDealTracker called', {
+    agencyCarrierId,
+    fileId,
+  })
+
+  const { data: agencyCarrier, error: acError } = await supabase
+    .from('agency_carriers')
+    .select(`
+      id,
+      carrier_id,
+      carriers (
+        id,
+        name,
+        code
+      )
+    `)
+    .eq('id', agencyCarrierId)
+    .single()
+
+  if (acError || !agencyCarrier) {
+    console.error('[Deal Tracker] Failed to fetch agency_carrier:', acError)
+    throw new Error(`Failed to fetch agency_carrier: ${acError?.message}`)
+  }
+
+  const carrier = agencyCarrier.carriers as any
+  const carrierName = carrier.name || 'AMAM'
+  const carrierCode = carrier.code || 'AMAM'
+  const carrierId = carrier.id
+
+  let policies: any[]
+  try {
+    policies = await fetchAllPaginated(() =>
+      supabase
+        .from('amam_policies')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .eq('file_id', fileId)
+        .order('id', { ascending: true })
+    )
+  } catch (policiesError: any) {
+    console.error('[Deal Tracker] Error fetching AMAM policies:', policiesError)
+    throw new Error(`Failed to fetch policies: ${policiesError?.message}`)
+  }
+
+  if (!policies || policies.length === 0) {
+    console.warn('[Deal Tracker] No AMAM policies found for file_id:', fileId)
+    return []
+  }
+
+  const policyNumbers = policies.map(p => p.policy_number)
+  let commissions: any[] = []
+  try {
+    commissions = await fetchAllPaginated(() =>
+      supabase
+        .from('amam_commissions')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', policyNumbers)
+        .order('id', { ascending: true })
+    )
+  } catch (commissionsError: any) {
+    console.warn('[Deal Tracker] Failed to fetch AMAM commissions:', commissionsError?.message)
+  }
+
+  const commissionMap = new Map<string, any>()
+  commissions.forEach(comm => {
+    if (!commissionMap.has(comm.policy_number) ||
+        (comm.created_at && commissionMap.get(comm.policy_number)?.created_at < comm.created_at)) {
+      commissionMap.set(comm.policy_number, comm)
+    }
+  })
+
+  let existingEntries: any[] = []
+  try {
+    existingEntries = await fetchAllPaginated(() =>
+      supabase
+        .from('deal_tracker')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', policyNumbers)
+        .order('id', { ascending: true })
+    )
+  } catch (existingError: any) {
+    console.warn('[Deal Tracker] Failed to fetch existing deal_tracker entries:', existingError?.message)
+  }
+
+  const existingMap = new Map<string, any>()
+  if (existingEntries) {
+    existingEntries.forEach(entry => {
+      existingMap.set(entry.policy_number, entry)
+    })
+  }
+
+  const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  // Only fetch DDF for policies that don't already have call_center/phone (skip re-lookup for already-filled rows)
+  const policiesNeedingDdfAmam = policies.filter(p => {
+    const ex = existingMap.get(p.policy_number)
+    return !ex || (ex.call_center == null && ex.phone_number == null)
+  })
+  const uniqueInsuredNamesAmam = Array.from(new Set(
+    policiesNeedingDdfAmam.map(p => buildAmamInsuredName(p)).filter(n => n.length > 0)
+  ))
+  const skipCountAmam = policies.length - policiesNeedingDdfAmam.length
+  console.log('[Deal Tracker] AMAM: carrier=', carrierName, '| names to DDF=', uniqueInsuredNamesAmam.length, '| skip (already have DDF)=', skipCountAmam)
+  console.log('[Deal Tracker] AMAM: sample names sent to DDF (first 10):', uniqueInsuredNamesAmam.slice(0, 10))
+  const dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(uniqueInsuredNamesAmam, carrierName)
+  console.log('[Deal Tracker] AMAM: DDF map size after fetch:', dailyDealFlowMap.size, 'of', uniqueInsuredNamesAmam.length, 'names')
+
+  const previewEntries: DealTrackerPreviewEntry[] = []
+
+  for (const policy of policies) {
+    const commission = commissionMap.get(policy.policy_number)
+    const existing = existingMap.get(policy.policy_number)
+    const insuredName = buildAmamInsuredName(policy)
+    const originalStatus = policy.status_raw || null
+    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+
+    // Use existing call_center/phone if already set (no re-lookup); else look up DDF
+    const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
+    let callCenter: string | null
+    let phoneNumber: string | null
+    let effectiveDateFromDdf: string | null = null
+    if (alreadyHasDdf) {
+      callCenter = existing!.call_center
+      phoneNumber = existing!.phone_number
+    } else {
+      const normalizedName = normalizeNameForSearch(insuredName)
+      const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
+      callCenter = ddfInfo?.call_center ?? null
+      phoneNumber = ddfInfo?.phone_number ?? null
+      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+    }
+
+    const entryIndex = previewEntries.length
+    if (entryIndex < 3) {
+      console.log('[Deal Tracker] AMAM policy sample', entryIndex + 1, '| insuredName:', insuredName, '| normalized:', normalizeNameForSearch(insuredName), '| ddfFound:', !!(callCenter || phoneNumber), '| call_center:', callCenter ?? '(empty)', '| phone:', phoneNumber ?? '(empty)')
+    }
+
+    const dealValue = commission?.advance != null
+      ? (typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance)
+      : null
+    const ccValue = dealValue != null ? dealValue / 2 : null
+    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
+    const effectiveDate = effectiveDateFromDdf || null
+
+    const entry: DealTrackerPreviewEntry = {
+      agency_carrier_id: agencyCarrierId,
+      name: insuredName || null,
+      tasks: null,
+      ghl_name: null,
+      ghl_stage: null,
+      policy_status: mappedStatus,
+      deal_creation_date: dealCreationDate,
+      policy_number: policy.policy_number,
+      carrier: carrierName,
+      carrier_id: carrier.id,
+      deal_value: dealValue,
+      cc_value: ccValue,
+      notes: null,
+      status: null,
+      last_updated: new Date().toISOString(),
+      sales_agent: policy.agentname_raw || null,
+      writing_number: commission?.writingagent ?? null,
+      commission_type: commission?.action ?? null,
+      effective_date: commission?.issdate ?? null,
+      call_center: callCenter,
+      phone_number: phoneNumber,
+      cc_pmt_ws: null,
+      cc_cb_ws: null,
+      carrier_status: originalStatus,
+      policy_type: policy.plan || null,
+      daily_deal_flow_fetched: !!(callCenter || phoneNumber),
+      daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : (existing?.daily_deal_flow_fetched_at ?? null),
+      source_policy_table: 'amam_policies',
+      source_policy_id: policy.id,
+      source_commission_table: commission ? 'amam_commissions' : null,
+      source_commission_id: commission?.id ?? null,
+      isNew: !existing,
+      isUpdated: !!existing,
+    }
+    previewEntries.push(entry)
+  }
+
+  console.log('[Deal Tracker] AMAM policy processing complete. Total entries:', previewEntries.length)
+  return previewEntries
+}
+
+/**
+ * Build AMAM deal tracker preview from in-memory policy rows (deferred write until confirm).
+ * Commission data will be empty; source_policy_id/source_commission_id set on confirm after insert.
+ */
+export async function processAmamFilesForDealTrackerFromRows(
+  agencyCarrierId: string,
+  fileId: string,
+  policyRows: any[]
+): Promise<DealTrackerPreviewEntry[]> {
+  if (!policyRows || policyRows.length === 0) return []
+  const totalStart = Date.now()
+
+  const { data: agencyCarrier, error: acError } = await supabase
+    .from('agency_carriers')
+    .select(`
+      id,
+      carrier_id,
+      carriers (
+        id,
+        name,
+        code
+      )
+    `)
+    .eq('id', agencyCarrierId)
+    .single()
+
+  if (acError || !agencyCarrier) throw new Error(`Failed to fetch agency_carrier: ${acError?.message}`)
+  const carrier = agencyCarrier.carriers as any
+  const carrierName = carrier.name || 'AMAM'
+  const carrierCode = carrier.code || 'AMAM'
+  const carrierId = carrier.id
+  const policyNumbers = policyRows.map((p: any) => p.policy_number)
+  const commissionMap = new Map<string, any>()
+
+  let stepStart = Date.now()
+  const { data: existingEntries } = await supabase
+    .from('deal_tracker')
+    .select('*')
+    .eq('agency_carrier_id', agencyCarrierId)
+    .in('policy_number', policyNumbers)
+  console.log('[Deal Tracker] FromRows: existing deal_tracker fetch', policyNumbers.length, 'policies took', Math.round((Date.now() - stepStart) / 1000), 's')
+  const existingMap = new Map<string, any>()
+  if (existingEntries) existingEntries.forEach((e: any) => existingMap.set(e.policy_number, e))
+
+  stepStart = Date.now()
+  const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  console.log('[Deal Tracker] FromRows: status mappings took', Math.round((Date.now() - stepStart) / 1000), 's')
+
+  const policiesNeedingDdfAmam = policyRows.filter((p: any) => {
+    const ex = existingMap.get(p.policy_number)
+    return !ex || (ex.call_center == null && ex.phone_number == null)
+  })
+  const uniqueInsuredNamesAmam = Array.from(new Set(
+    policiesNeedingDdfAmam.map((p: any) => buildAmamInsuredName(p)).filter((n: string) => n.length > 0)
+  ))
+  if (uniqueInsuredNamesAmam.length > 0) {
+    console.log('[Deal Tracker] FromRows: fetching DDF for', uniqueInsuredNamesAmam.length, 'names (slow step for large files)...')
+  }
+  stepStart = Date.now()
+  const dailyDealFlowMap = uniqueInsuredNamesAmam.length > 0
+    ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNamesAmam, carrierName)
+    : new Map<string, DailyDealFlowInfo>()
+  if (uniqueInsuredNamesAmam.length > 0) {
+    console.log('[Deal Tracker] FromRows: DDF fetch took', Math.round((Date.now() - stepStart) / 1000), 's')
+  }
+
+  const previewEntries: DealTrackerPreviewEntry[] = []
+  for (const policy of policyRows) {
+    const existing = existingMap.get(policy.policy_number)
+    const insuredName = buildAmamInsuredName(policy)
+    const originalStatus = policy.status_raw || null
+    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
+    let callCenter: string | null
+    let phoneNumber: string | null
+    let effectiveDateFromDdf: string | null = null
+    if (alreadyHasDdf) {
+      callCenter = existing!.call_center
+      phoneNumber = existing!.phone_number
+    } else {
+      const normalizedName = normalizeNameForSearch(insuredName)
+      const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
+      callCenter = ddfInfo?.call_center ?? null
+      phoneNumber = ddfInfo?.phone_number ?? null
+      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+    }
+    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
+    const effectiveDate = effectiveDateFromDdf || null
+    previewEntries.push({
+      agency_carrier_id: agencyCarrierId,
+      name: insuredName || null,
+      tasks: null,
+      ghl_name: null,
+      ghl_stage: null,
+      policy_status: mappedStatus,
+      deal_creation_date: dealCreationDate,
+      policy_number: policy.policy_number,
+      carrier: carrierName,
+      carrier_id: carrier.id,
+      deal_value: null,
+      cc_value: null,
+      notes: null,
+      status: null,
+      last_updated: new Date().toISOString(),
+      sales_agent: policy.agentname_raw || null,
+      writing_number: null,
+      commission_type: null,
+      effective_date: effectiveDate,
+      call_center: callCenter,
+      phone_number: phoneNumber,
+      cc_pmt_ws: null,
+      cc_cb_ws: null,
+      carrier_status: originalStatus,
+      policy_type: policy.plan || null,
+      daily_deal_flow_fetched: !!(callCenter || phoneNumber),
+      daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : (existing?.daily_deal_flow_fetched_at ?? null),
+      source_policy_table: 'amam_policies',
+      source_policy_id: null,
+      source_commission_table: null,
+      source_commission_id: null,
+      isNew: !existing,
+      isUpdated: !!existing,
+    })
+  }
+  console.log('[Deal Tracker] FromRows: policy preview built in', Math.round((Date.now() - totalStart) / 1000), 's total')
+  return previewEntries
+}
+
+/**
+ * Process AMAM commission files and update deal tracker entries
+ */
+export async function processAmamCommissionsForDealTracker(
+  agencyCarrierId: string,
+  fileId: string
+): Promise<DealTrackerPreviewEntry[]> {
+  console.log('[Deal Tracker] processAmamCommissionsForDealTracker called', {
+    agencyCarrierId,
+    fileId,
+  })
+
+  const { data: agencyCarrier, error: acError } = await supabase
+    .from('agency_carriers')
+    .select(`
+      id,
+      carrier_id,
+      carriers (
+        id,
+        name,
+        code
+      )
+    `)
+    .eq('id', agencyCarrierId)
+    .single()
+
+  if (acError || !agencyCarrier) {
+    console.error('[Deal Tracker] Failed to fetch agency_carrier:', acError)
+    throw new Error(`Failed to fetch agency_carrier: ${acError?.message}`)
+  }
+
+  const carrier = agencyCarrier.carriers as any
+  const carrierName = carrier.name || 'AMAM'
+  const carrierCode = carrier.code || 'AMAM'
+  const carrierId = carrier.id
+
+  const { data: commissions, error: commissionsError } = await supabase
+    .from('amam_commissions')
+    .select('*')
+    .eq('agency_carrier_id', agencyCarrierId)
+    .eq('file_id', fileId)
+
+  if (commissionsError) {
+    console.error('[Deal Tracker] Error fetching AMAM commissions:', commissionsError)
+    throw new Error(`Failed to fetch commissions: ${commissionsError.message}`)
+  }
+
+  if (!commissions || commissions.length === 0) {
+    console.warn('[Deal Tracker] No AMAM commissions found for file_id:', fileId)
+    return []
+  }
+
+  const policyNumbers = Array.from(new Set(commissions.map(c => c.policy_number)))
+  const { data: existingEntries, error: existingError } = await supabase
+    .from('deal_tracker')
+    .select('*')
+    .eq('agency_carrier_id', agencyCarrierId)
+    .in('policy_number', policyNumbers)
+
+  if (existingError) {
+    console.warn('[Deal Tracker] Failed to fetch existing entries:', existingError)
+  }
+
+  const existingMap = new Map<string, any>()
+  if (existingEntries) {
+    existingEntries.forEach(entry => {
+      existingMap.set(entry.policy_number, entry)
+    })
+  }
+
+  const commissionMap = new Map<string, any>()
+  const commissionAmountsMap = new Map<string, number>()
+  commissions.forEach(comm => {
+    const policyNum = comm.policy_number
+    if (!policyNum) return
+    const amount = comm.advance != null
+      ? (typeof comm.advance === 'string' ? parseFloat(comm.advance) : comm.advance)
+      : 0
+    const current = commissionAmountsMap.get(policyNum) || 0
+    commissionAmountsMap.set(policyNum, current + (Number.isNaN(amount) ? 0 : amount))
+    if (!commissionMap.has(policyNum) || (comm.created_at && commissionMap.get(policyNum)?.created_at < comm.created_at)) {
+      commissionMap.set(policyNum, comm)
+    }
+  })
+
+  const missingPolicyNumbers = Array.from(commissionMap.keys()).filter(pn => !existingMap.has(pn))
+  const existingNeedingDDF = Array.from(commissionMap.keys()).filter(pn => {
+    const ex = existingMap.get(pn)
+    return ex && ex.call_center == null && ex.phone_number == null
+  })
+  const allPolicyNumbersNeedingDDF = Array.from(new Set([...missingPolicyNumbers, ...existingNeedingDDF]))
+  const existingCount = Array.from(commissionMap.keys()).filter(pn => existingMap.has(pn)).length
+  console.log('[Deal Tracker] AMAM commissions: commissions=', commissionMap.size, '| in deal_tracker=', existingCount, '| missing (new)=', missingPolicyNumbers.length, '| existing needing DDF=', existingNeedingDDF.length)
+
+  let policiesMap = new Map<string, any>()
+  if (allPolicyNumbersNeedingDDF.length > 0) {
+    const { data: policies } = await supabase
+      .from('amam_policies')
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .in('policy_number', allPolicyNumbersNeedingDDF)
+    if (policies) {
+      policies.forEach(p => {
+        policiesMap.set(p.policy_number, p)
+      })
+    }
+    console.log('[Deal Tracker] AMAM commissions: loaded', policiesMap.size, 'policy rows from amam_policies for', allPolicyNumbersNeedingDDF.length, 'policy numbers needing DDF')
+  }
+
+  let statusMappingMap = new Map<string, string>()
+  let dailyDealFlowMap = new Map<string, DailyDealFlowInfo>()
+  if (missingPolicyNumbers.length > 0) {
+    statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  }
+  if (allPolicyNumbersNeedingDDF.length > 0) {
+    const policyNamesForDDF = Array.from(policiesMap.values())
+      .map(p => buildAmamInsuredName(p))
+      .filter(name => name.length > 0)
+    if (policyNamesForDDF.length > 0) {
+      console.log('[Deal Tracker] AMAM commissions: fetching DDF for', policyNamesForDDF.length, 'names (missing + existing without call_center/phone) | sample:', policyNamesForDDF.slice(0, 5))
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, carrierName)
+      console.log('[Deal Tracker] AMAM commissions: DDF map size:', dailyDealFlowMap.size, 'of', policyNamesForDDF.length)
+    } else {
+      console.log('[Deal Tracker] AMAM commissions: no policy names for DDF – upload policy file first so amam_policies has rows for these policy numbers')
+    }
+  }
+
+  const previewEntries: DealTrackerPreviewEntry[] = []
+  let newEntryLogCount = 0
+
+  for (const commission of commissionMap.values()) {
+    const policyNumber = commission.policy_number
+    const existing = existingMap.get(policyNumber)
+    const totalAmount = commissionAmountsMap.get(policyNumber)
+    const dealValue = totalAmount !== undefined && totalAmount !== null
+      ? totalAmount
+      : (commission.advance != null ? (typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance) : null)
+    const ccValue = dealValue != null ? dealValue / 2 : null
+
+    if (existing) {
+      let callCenter = existing.call_center
+      let phoneNumber = existing.phone_number
+      let dailyDealFlowFetched = existing.daily_deal_flow_fetched
+      let dailyDealFlowFetchedAt = existing.daily_deal_flow_fetched_at
+      const policy = policiesMap.get(policyNumber)
+      if (policy && (callCenter == null && phoneNumber == null)) {
+        const insuredName = buildAmamInsuredName(policy)
+        const normalizedName = normalizeNameForSearch(insuredName)
+        const ddfInfo = dailyDealFlowMap.get(normalizedName)
+        if (ddfInfo) {
+          callCenter = ddfInfo.call_center ?? null
+          phoneNumber = ddfInfo.phone_number ?? null
+          dailyDealFlowFetched = !!(callCenter || phoneNumber)
+          dailyDealFlowFetchedAt = (callCenter || phoneNumber) ? new Date().toISOString() : null
+        }
+      }
+      previewEntries.push({
+        ...existing,
+        deal_value: dealValue,
+        cc_value: ccValue,
+        writing_number: commission.writingagent ?? existing.writing_number,
+        commission_type: commission.action ?? existing.commission_type,
+        effective_date: commission.issdate !== null && commission.issdate !== undefined ? commission.issdate : existing.effective_date,
+        call_center: callCenter,
+        phone_number: phoneNumber,
+        daily_deal_flow_fetched: dailyDealFlowFetched,
+        daily_deal_flow_fetched_at: dailyDealFlowFetchedAt,
+        source_commission_table: 'amam_commissions',
+        source_commission_id: commission.id,
+        isNew: false,
+        isUpdated: true,
+      })
+      continue
+    }
+
+    const policy = policiesMap.get(policyNumber)
+    if (!policy) continue
+
+    const insuredName = buildAmamInsuredName(policy)
+    const originalStatus = policy.status_raw || null
+    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const normalizedName = normalizeNameForSearch(insuredName)
+    const ddfInfo = dailyDealFlowMap.get(normalizedName)
+    const callCenter = ddfInfo?.call_center ?? null
+    const phoneNumber = ddfInfo?.phone_number ?? null
+    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
+
+    if (newEntryLogCount < 3) {
+      console.log('[Deal Tracker] AMAM commission new-entry sample', newEntryLogCount + 1, '| insuredName:', insuredName, '| normalized:', normalizedName, '| ddfFound:', !!(callCenter || phoneNumber), '| call_center:', callCenter ?? '(empty)', '| phone:', phoneNumber ?? '(empty)')
+      newEntryLogCount++
+    }
+
+    previewEntries.push({
+      agency_carrier_id: agencyCarrierId,
+      name: insuredName || null,
+      tasks: null,
+      ghl_name: null,
+      ghl_stage: null,
+      policy_status: mappedStatus,
+      deal_creation_date: dealCreationDate,
+      policy_number: policyNumber,
+      carrier: carrierName,
+      carrier_id: carrier.id,
+      deal_value: dealValue,
+      cc_value: ccValue,
+      notes: null,
+      status: null,
+      last_updated: new Date().toISOString(),
+      sales_agent: policy.agentname_raw || null,
+      writing_number: commission.writingagent || null,
+      commission_type: commission.action || null,
+      effective_date: commission.issdate || null,
+      call_center: callCenter,
+      phone_number: phoneNumber,
+      cc_pmt_ws: null,
+      cc_cb_ws: null,
+      carrier_status: originalStatus,
+      policy_type: policy.plan || null,
+      daily_deal_flow_fetched: !!(callCenter || phoneNumber),
+      daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : null,
+      source_policy_table: 'amam_policies',
+      source_policy_id: policy.id,
+      source_commission_table: 'amam_commissions',
+      source_commission_id: commission.id,
+      isNew: true,
+      isUpdated: false,
+    })
+  }
+
+  console.log('[Deal Tracker] AMAM commission processing complete. Total entries:', previewEntries.length)
+  return previewEntries
+}
+
+/**
+ * Build AMAM commission deal tracker preview from in-memory commission rows (deferred write until confirm).
+ * Loads policies from DB for names/DDF; source_commission_id set on confirm after insert.
+ */
+export async function processAmamCommissionsForDealTrackerFromRows(
+  agencyCarrierId: string,
+  fileId: string,
+  commissionRows: any[]
+): Promise<DealTrackerPreviewEntry[]> {
+  if (!commissionRows || commissionRows.length === 0) return []
+
+  const { data: agencyCarrier, error: acError } = await supabase
+    .from('agency_carriers')
+    .select(`
+      id,
+      carrier_id,
+      carriers (
+        id,
+        name,
+        code
+      )
+    `)
+    .eq('id', agencyCarrierId)
+    .single()
+
+  if (acError || !agencyCarrier) throw new Error(`Failed to fetch agency_carrier: ${acError?.message}`)
+  const carrier = agencyCarrier.carriers as any
+  const carrierName = carrier.name || 'AMAM'
+  const carrierCode = carrier.code || 'AMAM'
+  const carrierId = carrier.id
+
+  const commissionMap = new Map<string, any>()
+  const commissionAmountsMap = new Map<string, number>()
+  commissionRows.forEach((comm: any) => {
+    const policyNum = comm.policy_number
+    if (!policyNum) return
+    const amount = comm.advance != null ? (typeof comm.advance === 'string' ? parseFloat(comm.advance) : comm.advance) : 0
+    const current = commissionAmountsMap.get(policyNum) || 0
+    commissionAmountsMap.set(policyNum, current + (Number.isNaN(amount) ? 0 : amount))
+    if (!commissionMap.has(policyNum) || (comm.created_at && commissionMap.get(policyNum)?.created_at < comm.created_at)) {
+      commissionMap.set(policyNum, comm)
+    }
+  })
+
+  const policyNumbers = Array.from(commissionMap.keys())
+  const { data: existingEntries } = await supabase
+    .from('deal_tracker')
+    .select('*')
+    .eq('agency_carrier_id', agencyCarrierId)
+    .in('policy_number', policyNumbers)
+  const existingMap = new Map<string, any>()
+  if (existingEntries) existingEntries.forEach((e: any) => existingMap.set(e.policy_number, e))
+
+  const missingPolicyNumbers = Array.from(commissionMap.keys()).filter(pn => !existingMap.has(pn))
+  const existingNeedingDDF = Array.from(commissionMap.keys()).filter(pn => {
+    const ex = existingMap.get(pn)
+    return ex && ex.call_center == null && ex.phone_number == null
+  })
+  const allPolicyNumbersNeedingDDF = Array.from(new Set([...missingPolicyNumbers, ...existingNeedingDDF]))
+  let policiesMap = new Map<string, any>()
+  if (allPolicyNumbersNeedingDDF.length > 0) {
+    const { data: policies } = await supabase
+      .from('amam_policies')
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .in('policy_number', allPolicyNumbersNeedingDDF)
+    if (policies) policies.forEach((p: any) => policiesMap.set(p.policy_number, p))
+  }
+
+  let statusMappingMap = new Map<string, string>()
+  if (missingPolicyNumbers.length > 0) {
+    statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  }
+  let dailyDealFlowMap = new Map<string, DailyDealFlowInfo>()
+  if (allPolicyNumbersNeedingDDF.length > 0) {
+    const policyNamesForDDF = Array.from(policiesMap.values()).map((p: any) => buildAmamInsuredName(p)).filter((n: string) => n.length > 0)
+    if (policyNamesForDDF.length > 0) {
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, carrierName)
+    }
+  }
+
+  const previewEntries: DealTrackerPreviewEntry[] = []
+  let newEntryLogCount = 0
+
+  for (const commission of commissionMap.values()) {
+    const policyNumber = commission.policy_number
+    const existing = existingMap.get(policyNumber)
+    const totalAmount = commissionAmountsMap.get(policyNumber)
+    const dealValue = totalAmount !== undefined && totalAmount !== null ? totalAmount : (commission.advance != null ? (typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance) : null)
+    const ccValue = dealValue != null ? dealValue / 2 : null
+
+    if (existing) {
+      let callCenter = existing.call_center
+      let phoneNumber = existing.phone_number
+      let dailyDealFlowFetched = existing.daily_deal_flow_fetched
+      let dailyDealFlowFetchedAt = existing.daily_deal_flow_fetched_at
+      const policy = policiesMap.get(policyNumber)
+      if (policy && (callCenter == null && phoneNumber == null)) {
+        const insuredName = buildAmamInsuredName(policy)
+        const normalizedName = normalizeNameForSearch(insuredName)
+        const ddfInfo = dailyDealFlowMap.get(normalizedName)
+        if (ddfInfo) {
+          callCenter = ddfInfo.call_center ?? null
+          phoneNumber = ddfInfo.phone_number ?? null
+          dailyDealFlowFetched = !!(callCenter || phoneNumber)
+          dailyDealFlowFetchedAt = (callCenter || phoneNumber) ? new Date().toISOString() : null
+        }
+      }
+      previewEntries.push({
+        ...existing,
+        deal_value: dealValue,
+        cc_value: ccValue,
+        writing_number: commission.writingagent ?? existing.writing_number,
+        commission_type: commission.action ?? existing.commission_type,
+        effective_date: commission.issdate !== null && commission.issdate !== undefined ? commission.issdate : existing.effective_date,
+        call_center: callCenter,
+        phone_number: phoneNumber,
+        daily_deal_flow_fetched: dailyDealFlowFetched,
+        daily_deal_flow_fetched_at: dailyDealFlowFetchedAt,
+        source_commission_table: 'amam_commissions',
+        source_commission_id: null,
+        isNew: false,
+        isUpdated: true,
+      })
+      continue
+    }
+
+    const policy = policiesMap.get(policyNumber)
+    if (!policy) continue
+
+    const insuredName = buildAmamInsuredName(policy)
+    const originalStatus = policy.status_raw || null
+    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const normalizedName = normalizeNameForSearch(insuredName)
+    const ddfInfo = dailyDealFlowMap.get(normalizedName)
+    const callCenter = ddfInfo?.call_center ?? null
+    const phoneNumber = ddfInfo?.phone_number ?? null
+    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
+
+    previewEntries.push({
+      agency_carrier_id: agencyCarrierId,
+      name: insuredName || null,
+      tasks: null,
+      ghl_name: null,
+      ghl_stage: null,
+      policy_status: mappedStatus,
+      deal_creation_date: dealCreationDate,
+      policy_number: policyNumber,
+      carrier: carrierName,
+      carrier_id: carrier.id,
+      deal_value: dealValue,
+      cc_value: ccValue,
+      notes: null,
+      status: null,
+      last_updated: new Date().toISOString(),
+      sales_agent: policy.agentname_raw || null,
+      writing_number: commission.writingagent || null,
+      commission_type: commission.action || null,
+      effective_date: commission.issdate || null,
+      call_center: callCenter,
+      phone_number: phoneNumber,
+      cc_pmt_ws: null,
+      cc_cb_ws: null,
+      carrier_status: originalStatus,
+      policy_type: policy.plan || null,
+      daily_deal_flow_fetched: !!(callCenter || phoneNumber),
+      daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : null,
+      source_policy_table: 'amam_policies',
+      source_policy_id: policy.id,
+      source_commission_table: 'amam_commissions',
+      source_commission_id: null,
+      isNew: true,
+      isUpdated: false,
+    })
+  }
+  return previewEntries
+}
+
+/**
+ * Save deal tracker entries to database using batched upserts.
+ * Uses onConflict (agency_carrier_id, policy_number) so inserts + updates
+ * happen in a few bulk calls instead of hundreds of individual updates.
  */
 export async function saveDealTrackerEntries(
-  entries: DealTrackerEntry[] | DealTrackerPreviewEntry[]
+  entries: DealTrackerEntry[] | DealTrackerPreviewEntry[],
+  options?: { onProgress?: (msg: string) => void }
 ): Promise<{ inserted: number; updated: number; failed: number }> {
   if (!entries || entries.length === 0) {
     return { inserted: 0, updated: 0, failed: 0 }
   }
 
-  console.log('[Deal Tracker] Starting batch save for', entries.length, 'entries...')
-  
+  const log = (msg: string) => {
+    console.log('[Deal Tracker]', msg)
+    options?.onProgress?.(msg)
+  }
+
+  log(`Starting batch save for ${entries.length.toLocaleString()} entries...`)
+
   // Clean entries: remove preview-only and auto-managed fields
+  const now = new Date().toISOString()
   const cleanEntries = entries.map(entry => {
     const { isNew, isUpdated, id, created_at, updated_at, ...dbEntry } = entry as any
-    return dbEntry
-  })
-
-  // OPTIMIZATION: Batch check all existing entries at once
-  // Since we need to match on (agency_carrier_id, policy_number) pairs,
-  // we'll fetch all entries for the agency_carrier_id and filter client-side
-  const agencyCarrierId = cleanEntries[0]?.agency_carrier_id
-  if (!agencyCarrierId) {
-    console.error('[Deal Tracker] No agency_carrier_id found in entries')
-    return { inserted: 0, updated: 0, failed: entries.length }
-  }
-
-  const policyNumbers = cleanEntries.map(e => e.policy_number)
-
-  console.log('[Deal Tracker] Batch checking existing entries for', policyNumbers.length, 'policies...')
-  const { data: existingEntries, error: checkError } = await supabase
-    .from('deal_tracker')
-    .select('id, agency_carrier_id, policy_number')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
-
-  if (checkError) {
-    console.error('[Deal Tracker] Error checking existing entries:', checkError)
-    // Fall back to individual operations if batch check fails
-    return await saveDealTrackerEntriesIndividual(entries)
-  }
-
-  // Create a map of existing entries for fast lookup
-  const existingMap = new Map<string, string>() // key: "agency_carrier_id|policy_number" -> id
-  if (existingEntries) {
-    existingEntries.forEach(entry => {
-      const key = `${entry.agency_carrier_id}|${entry.policy_number}`
-      existingMap.set(key, entry.id)
-    })
-  }
-
-  console.log('[Deal Tracker] Found', existingMap.size, 'existing entries out of', cleanEntries.length)
-
-  // Separate entries into inserts and updates
-  const toInsert: any[] = []
-  const toUpdate: Array<{ id: string; data: any }> = []
-
-  for (const entry of cleanEntries) {
-    const key = `${entry.agency_carrier_id}|${entry.policy_number}`
-    const existingId = existingMap.get(key)
-    
-    if (existingId) {
-      toUpdate.push({ id: existingId, data: entry })
-    } else {
-      toInsert.push(entry)
+    return {
+      ...dbEntry,
+      updated_at: now,
     }
-  }
-
-  console.log('[Deal Tracker] Batch operations:', {
-    toInsert: toInsert.length,
-    toUpdate: toUpdate.length,
   })
 
-  let inserted = 0
-  let updated = 0
+  const BATCH_SIZE = 500
+  let saved = 0
   let failed = 0
 
-  // OPTIMIZATION: Batch insert all new entries
-  if (toInsert.length > 0) {
-    // Supabase allows batch inserts up to 1000 rows, so we'll batch in chunks
-    const BATCH_SIZE = 500
-    for (let i = 0; i < toInsert.length; i += BATCH_SIZE) {
-      const batch = toInsert.slice(i, i + BATCH_SIZE)
-      const { error } = await supabase
-        .from('deal_tracker')
-        .insert(batch)
+  const totalBatches = Math.ceil(cleanEntries.length / BATCH_SIZE)
 
-      if (error) {
-        console.error(`[Deal Tracker] Batch insert failed (batch ${i / BATCH_SIZE + 1}):`, error)
-        failed += batch.length
-      } else {
-        inserted += batch.length
-        console.log(`[Deal Tracker] Batch inserted ${batch.length} entries (${inserted}/${toInsert.length})`)
-      }
+  for (let i = 0; i < cleanEntries.length; i += BATCH_SIZE) {
+    const batchNum = i / BATCH_SIZE + 1
+    const batch = cleanEntries.slice(i, i + BATCH_SIZE)
+    log(`Saving batch ${batchNum}/${totalBatches} (${batch.length.toLocaleString()} rows)...`)
+
+    const { error } = await supabase
+      .from('deal_tracker')
+      .upsert(batch, { onConflict: 'agency_carrier_id,policy_number', ignoreDuplicates: false })
+
+    if (error) {
+      console.error('[Deal Tracker] Batch save failed:', error)
+      failed += batch.length
+      log(`Batch ${batchNum} failed: ${error.message || 'unknown error'}`)
+    } else {
+      saved += batch.length
+      log(`Saved ${saved.toLocaleString()}/${cleanEntries.length.toLocaleString()} rows`)
     }
   }
 
-  // OPTIMIZATION: Batch update existing entries
-  if (toUpdate.length > 0) {
-    // For updates, we need to do them individually or use a stored procedure
-    // But we can still batch the queries by grouping them
-    const BATCH_SIZE = 100
-    for (let i = 0; i < toUpdate.length; i += BATCH_SIZE) {
-      const batch = toUpdate.slice(i, i + BATCH_SIZE)
-      
-      // Use Promise.all for parallel updates (faster than sequential)
-      const updatePromises = batch.map(async ({ id, data }) => {
-        const { error } = await supabase
-          .from('deal_tracker')
-          .update(data)
-          .eq('id', id)
+  log(`Batch save complete. Saved ${saved.toLocaleString()} rows, failed ${failed.toLocaleString()}.`)
 
-        return { error, id }
-      })
-
-      const results = await Promise.all(updatePromises)
-      results.forEach(({ error, id }) => {
-        if (error) {
-          console.error(`[Deal Tracker] Failed to update entry ${id}:`, error)
-          failed++
-        } else {
-          updated++
-        }
-      })
-
-      console.log(`[Deal Tracker] Batch updated ${batch.length} entries (${updated}/${toUpdate.length})`)
-    }
-  }
-
-  console.log('[Deal Tracker] Batch save complete:', { inserted, updated, failed })
-  return { inserted, updated, failed }
+  // We no longer distinguish inserted vs updated here; both are "saved".
+  return { inserted: saved, updated: 0, failed }
 }
 
 /**

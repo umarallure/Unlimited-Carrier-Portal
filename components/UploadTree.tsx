@@ -173,7 +173,7 @@ export function UploadTree() {
       })
 
       if (result.success) {
-        // Process deal tracker if Aetna Policy file
+        // Process deal tracker for supported carriers (AETNA, AMAM, MOH, RNA, TRANSAMERICA, LIBERTY)
         console.log('[UploadTree] Upload successful, checking deal tracker processing...', {
           carrierCode,
           fileType,
@@ -181,7 +181,7 @@ export function UploadTree() {
           fileId: 'fileId' in result ? result.fileId : 'N/A',
         })
         
-        if (carrierCode === 'AETNA' && (fileType === 'Policy' || fileType === 'Commission') && 'fileId' in result) {
+        if ((carrierCode === 'AETNA' || carrierCode === 'AMAM' || carrierCode === 'MOH' || carrierCode === 'RNA' || carrierCode === 'TRANSAMERICA' || carrierCode === 'LIBERTY' || carrierCode === 'COREBRIDGE') && (fileType === 'Policy' || fileType === 'Commission') && 'fileId' in result) {
           console.log('[UploadTree] Triggering deal tracker processing for', fileType, 'file...')
           await dealTracker.processAfterUpload(
             agencyCarrierId,
@@ -299,6 +299,8 @@ export function UploadTree() {
         open={dealTracker.showVerification}
         onOpenChange={dealTracker.setShowVerification}
         entries={dealTracker.verificationEntries}
+        loadingMessage={dealTracker.previewLoadingMessage}
+        saveProgressLogs={dealTracker.saveProgressLogs}
         onConfirm={dealTracker.confirmAndSave}
         onCancel={dealTracker.cancelVerification}
       />

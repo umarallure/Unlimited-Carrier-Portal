@@ -5,47 +5,66 @@
 import { useState } from 'react'
 import { processDealTrackerAfterUpload, saveDealTrackerAfterConfirmation } from './dealTrackerUpload'
 import type { DealTrackerPreviewEntry } from './dealTracker'
+import type { PendingRowsPayload } from './dealTrackerUpload'
+import { supabase } from './supabaseClient'
 
 export function useDealTrackerUpload() {
   const [verificationEntries, setVerificationEntries] = useState<DealTrackerPreviewEntry[]>([])
   const [showVerification, setShowVerification] = useState(false)
   const [processing, setProcessing] = useState(false)
+  const [previewLoadingMessage, setPreviewLoadingMessage] = useState<string | null>(null)
+  const [pendingRows, setPendingRows] = useState<PendingRowsPayload | null>(null)
+  const [saveProgressLogs, setSaveProgressLogs] = useState<string[]>([])
 
   /**
    * Process deal tracker after upload if needed
-   * Returns true if verification dialog should be shown
+   * Returns true if verification dialog should be shown.
+   * Pass pendingRows when upload deferred policy/commission write (AMAM/Aetna deal-tracker files).
    */
   const processAfterUpload = async (
     agencyCarrierId: string,
     fileId: string,
     carrierCode: string,
-    fileType: string
+    fileType: string,
+    pendingRowsPayload?: PendingRowsPayload
   ): Promise<boolean> => {
     console.log('[Deal Tracker Hook] processAfterUpload called', {
       agencyCarrierId,
       fileId,
       carrierCode,
       fileType,
+      hasPendingRows: !!pendingRowsPayload,
     })
 
-    // Only process Aetna Policy and Commission files
-    if (carrierCode !== 'AETNA' || (fileType !== 'Policy' && fileType !== 'Commission')) {
+    // Only process supported carriers (Aetna, AMAM, MOH, RNA, Transamerica, Liberty, Corebridge) for Policy and Commission files
+    const shouldProcess =
+      (carrierCode === 'AETNA' || carrierCode === 'AMAM' || carrierCode === 'MOH' || carrierCode === 'RNA' || carrierCode === 'TRANSAMERICA' || carrierCode === 'LIBERTY' || carrierCode === 'COREBRIDGE') &&
+      (fileType === 'Policy' || fileType === 'Commission')
+    if (!shouldProcess) {
       console.log('[Deal Tracker Hook] Skipping - conditions not met:', {
         carrierCode,
         fileType,
-        shouldProcess: carrierCode === 'AETNA' && (fileType === 'Policy' || fileType === 'Commission'),
+        shouldProcess,
       })
       return false
     }
 
+    setPendingRows(pendingRowsPayload ?? null)
     setProcessing(true)
+    const rowCount = pendingRowsPayload?.rows?.length ?? 0
+    if (rowCount > 0) {
+      setPreviewLoadingMessage(`Looking up call center/phone for ${rowCount.toLocaleString()} policies… (15–60s for large files)`)
+      setShowVerification(true)
+      setVerificationEntries([])
+    }
     try {
       console.log('[Deal Tracker Hook] Calling processDealTrackerAfterUpload...')
       const result = await processDealTrackerAfterUpload(
         agencyCarrierId,
         fileId,
         carrierCode,
-        fileType
+        fileType,
+        pendingRowsPayload
       )
 
       console.log('[Deal Tracker Hook] Result:', {
@@ -54,8 +73,10 @@ export function useDealTrackerUpload() {
         error: result.error,
       })
 
-      if (result.success && result.previewEntries && result.previewEntries.length > 0) {
+      setPreviewLoadingMessage(null)
         // Show verification dialog for user to review and confirm before saving
+        // Show verification dialog for user to review and confirm before saving
+      if (result.success && result.previewEntries && result.previewEntries.length > 0) {
         console.log('[Deal Tracker Hook] Setting verification entries and showing dialog')
         setVerificationEntries(result.previewEntries)
         setShowVerification(true)
@@ -68,6 +89,7 @@ export function useDealTrackerUpload() {
         })
       }
     } catch (error) {
+      setPreviewLoadingMessage(null)
       console.error('[Deal Tracker Hook] Error processing deal tracker:', error)
       console.error('[Deal Tracker Hook] Error stack:', error instanceof Error ? error.stack : 'No stack')
     } finally {
@@ -78,24 +100,35 @@ export function useDealTrackerUpload() {
   }
 
   /**
-   * Save deal tracker entries after user confirmation
+   * Save deal tracker entries after user confirmation.
+   * Pass edited entries from the verification dialog so user edits are persisted.
+   * When pendingRows was set (deferred write), policy/commission rows are written first, then deal_tracker.
    */
-  const confirmAndSave = async (): Promise<void> => {
-    if (verificationEntries.length === 0) {
+  const confirmAndSave = async (entriesToSave?: DealTrackerPreviewEntry[]): Promise<void> => {
+    const toSave = entriesToSave ?? verificationEntries
+    if (toSave.length === 0) {
       return
     }
 
     setProcessing(true)
+    setSaveProgressLogs([])
+    const onProgress = (msg: string) => {
+      setSaveProgressLogs(prev => [...prev, msg])
+    }
     try {
-      const result = await saveDealTrackerAfterConfirmation(verificationEntries)
+      const result = await saveDealTrackerAfterConfirmation(toSave, {
+        pendingRows: pendingRows ?? undefined,
+        onProgress,
+      })
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to save deal tracker entries')
       }
 
-      // Clear verification entries and close dialog
       setVerificationEntries([])
       setShowVerification(false)
+      setPendingRows(null)
+      setSaveProgressLogs([])
     } catch (error) {
       console.error('Error saving deal tracker entries:', error)
       throw error
@@ -105,17 +138,31 @@ export function useDealTrackerUpload() {
   }
 
   /**
-   * Cancel verification and clear entries
+   * Cancel verification and clear entries.
+   * When there was a deferred write, deletes the file row so policy/commission data is never written.
    */
-  const cancelVerification = () => {
+  const cancelVerification = async () => {
+    const hadPending = pendingRows != null
+    if (hadPending && pendingRows.fileId) {
+      try {
+        await supabase.from('files').delete().eq('id', pendingRows.fileId)
+        console.log('[Deal Tracker Hook] Cancelled: deleted file row', pendingRows.fileId)
+      } catch (e) {
+        console.error('[Deal Tracker Hook] Failed to delete file row on cancel:', e)
+      }
+    }
     setVerificationEntries([])
     setShowVerification(false)
+    setPendingRows(null)
+    setPreviewLoadingMessage(null)
   }
 
   return {
     verificationEntries,
     showVerification,
     processing,
+    previewLoadingMessage,
+    saveProgressLogs,
     processAfterUpload,
     confirmAndSave,
     cancelVerification,

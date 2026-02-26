@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Pencil, Trash2, Plus, FileText, Search } from 'lucide-react'
 import { Label } from "@/components/ui/label"
@@ -206,9 +206,12 @@ export default function CarriersPage() {
                             <Plus className="mr-2 h-4 w-4" /> Add Carrier
                         </Button>
                     </DialogTrigger>
-                    <DialogContent className="bg-slate-900 border-slate-700">
+                    <DialogContent className="bg-slate-900 border-slate-700" aria-describedby="carrier-dialog-desc">
                         <DialogHeader>
                             <DialogTitle className="text-white">{editingCarrier ? 'Edit Carrier' : 'Add New Carrier'}</DialogTitle>
+                            <DialogDescription id="carrier-dialog-desc" className="sr-only text-slate-400">
+                                {editingCarrier ? 'Edit carrier and agency assignments.' : 'Add a new carrier and assign agencies.'}
+                            </DialogDescription>
                         </DialogHeader>
                         <div className="space-y-4 py-4">
                             <div className="space-y-2">

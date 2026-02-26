@@ -236,7 +236,7 @@ export function OrganizationChart() {
           <div className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-2 border border-slate-700">
             <Building2 className="w-4 h-4 text-orange-400" />
             <Label className="text-sm text-slate-300 font-medium">Agency:</Label>
-            <Select value={selectedAgencyId || undefined} onValueChange={setSelectedAgencyId}>
+            <Select value={selectedAgencyId} onValueChange={setSelectedAgencyId}>
               <SelectTrigger className="w-[220px] bg-slate-900 border-slate-700 text-white">
                 <SelectValue placeholder="Select an agency" />
               </SelectTrigger>

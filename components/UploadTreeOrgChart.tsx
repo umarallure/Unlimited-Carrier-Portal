@@ -6,6 +6,7 @@ import { zoomIdentity } from 'd3-zoom'
 import { supabase } from '@/lib/supabaseClient'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
 import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import type { PendingRowsPayload } from '@/lib/dealTrackerUpload'
 import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
 import { fetchDailyStatus, fetchDailyFileTypes, getLocalDayRange, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { Building2, Calendar, Loader2, RefreshCw, CheckCircle, AlertCircle, Upload } from 'lucide-react'
@@ -13,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 
 const MAX_FILE_SIZE_MB = 10
@@ -320,7 +321,7 @@ export function UploadTreeOrgChart() {
         setUploadMessage({ type: 'success', text: `${uploadDialog.fileType} uploaded. ${count} record(s) processed.` })
         setTimeout(() => setUploadMessage(null), 6000)
         
-        // Process deal tracker if Aetna Policy file
+        // Process deal tracker for supported carriers (AETNA, AMAM, MOH, RNA, TRANSAMERICA, LIBERTY)
         console.log('[UploadTreeOrgChart] Upload successful, checking deal tracker processing...', {
           carrierCode: uploadDialog.carrierCode,
           fileType: uploadDialog.fileType,
@@ -328,13 +329,14 @@ export function UploadTreeOrgChart() {
           fileId: 'fileId' in result ? result.fileId : 'N/A',
         })
         
-        if (uploadDialog.carrierCode === 'AETNA' && (uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
+        if ((uploadDialog.carrierCode === 'AETNA' || uploadDialog.carrierCode === 'AMAM' || uploadDialog.carrierCode === 'MOH' || uploadDialog.carrierCode === 'RNA' || uploadDialog.carrierCode === 'TRANSAMERICA' || uploadDialog.carrierCode === 'LIBERTY' || uploadDialog.carrierCode === 'COREBRIDGE') && (uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
           console.log('[UploadTreeOrgChart] Triggering deal tracker processing for', uploadDialog.fileType, 'file...')
           await dealTracker.processAfterUpload(
             uploadDialog.agencyCarrierId,
             result.fileId,
             uploadDialog.carrierCode,
-            uploadDialog.fileType
+            uploadDialog.fileType,
+            'pendingRows' in result ? (result.pendingRows as PendingRowsPayload) : undefined
           )
         }
         
@@ -361,7 +363,7 @@ export function UploadTreeOrgChart() {
           <div className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-2 border border-slate-700">
             <Building2 className="w-4 h-4 text-orange-400" />
             <Label className="text-sm text-slate-300 font-medium">Agency:</Label>
-            <Select value={selectedAgencyId || undefined} onValueChange={setSelectedAgencyId}>
+            <Select value={selectedAgencyId} onValueChange={setSelectedAgencyId}>
               <SelectTrigger className="w-[220px] bg-slate-900 border-slate-700 text-white">
                 <SelectValue placeholder="Select an agency" />
               </SelectTrigger>
@@ -428,12 +430,15 @@ export function UploadTreeOrgChart() {
           setDragActive(false)
         }
       }}>
-        <DialogContent className="bg-slate-900 border-slate-700">
+        <DialogContent className="bg-slate-900 border-slate-700" aria-describedby="upload-dialog-desc">
           <DialogHeader>
             <DialogTitle className="text-white flex items-center gap-2">
               <Upload className="w-5 h-5 text-orange-400" />
               Upload {uploadDialog?.fileType} — {uploadDialog?.carrierName}
             </DialogTitle>
+            <DialogDescription id="upload-dialog-desc" className="text-slate-400 sr-only">
+              Select a file to upload for this carrier and file type.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <input
@@ -499,6 +504,8 @@ export function UploadTreeOrgChart() {
         open={dealTracker.showVerification}
         onOpenChange={dealTracker.setShowVerification}
         entries={dealTracker.verificationEntries}
+        loadingMessage={dealTracker.previewLoadingMessage}
+        saveProgressLogs={dealTracker.saveProgressLogs}
         onConfirm={dealTracker.confirmAndSave}
         onCancel={dealTracker.cancelVerification}
       />

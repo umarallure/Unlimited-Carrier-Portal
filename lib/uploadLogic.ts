@@ -3,7 +3,7 @@
  * Used by the tree-based upload page (and optionally the old upload page).
  */
 import { supabase } from './supabaseClient'
-import { parseFile, parseRNAExcel } from './fileParser'
+import { parseFile, parseRNAExcel, parseRNACommissionCSV } from './fileParser'
 
 export type FileKind = 'Policy' | 'Commission'
 
@@ -102,6 +102,47 @@ export function buildAmamCommissionRows(records: ParsedRecord[], agencyCarrierId
       freq: d['Freq'] ?? null,
       source_file: fileName,
       source_format: 'AMAM_COMMISSION',
+    }
+  })
+}
+
+export function buildMohCommissionRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
+  return records.map((r, idx) => {
+    const d = r.data
+    return {
+      agency_carrier_id: agencyCarrierId,
+      file_id: fileId,
+      row_number: idx + 1,
+
+      company: d['Company'] ?? null,
+      paid_producer: d['Paid Producer'] ?? null,
+      mga_name: d['MGA Name'] ?? null,
+      prod_num: d['Prod Num'] ?? null,
+      policy_number: normalizePolicyNumber(d['Policy'] ?? r.policyNumber),
+      insureds_name: d['Insureds Name'] ?? null,
+      issue_state: d['Issue State'] ?? null,
+
+      activity_date: d['Activity Date'] != null ? String(d['Activity Date']) : null,
+      plan_code: d['Plan Code'] ?? null,
+      issue_date: d['Issue Date'] != null ? String(d['Issue Date']) : null,
+      paid_to_date: d['Paid To Date'] != null ? String(d['Paid To Date']) : null,
+      age: d['Age'] != null ? Number(d['Age']) : null,
+      mode: d['Mode'] ?? null,
+      bill_type: d['Bill Type'] ?? null,
+      mos: d['MOS'] ?? null,
+
+      face_amount_thousands: parseNumber(d['Face Amount (000)']),
+      comm_premium: parseNumber(d['Comm Premium']),
+      dur: d['DUR'] ?? null,
+      activity_type: d['Activity Type'] ?? null,
+      split_pct: parseNumber(d['Split %']),
+      comm_pct: parseNumber(d['Comm Pct']),
+      comm_amt: parseNumber(d['Comm Amt']),
+      adv_comm: parseNumber(d['Adv Comm']),
+      comments: d['Comments'] ?? null,
+
+      source_file: fileName,
+      source_format: 'MOH_COMMISSION',
     }
   })
 }
@@ -384,7 +425,7 @@ export function buildCorebridgePolicyRows(records: ParsedRecord[], agencyCarrier
   })
 }
 
-/** Liberty policy CSV: Policy, Plan, Agent, Insured, Status, Submitted, Issued, Paid To, Premium */
+/** Liberty policy CSV: Policy, Plan, Agent, Insured (or Insured Name), Status, Submitted, Issued, Paid To, Premium */
 export function buildLibertyPolicyRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
   return records.map((r, idx) => {
     const d = r.data
@@ -396,7 +437,7 @@ export function buildLibertyPolicyRows(records: ParsedRecord[], agencyCarrierId:
 
       plan: d['Plan'] ?? null,
       agent: d['Agent'] ?? null,
-      insured: d['Insured'] ?? null,
+      insured: (d['Insured'] ?? d['Insured Name'] ?? '').toString().trim() || null,
       status: d['Status'] ?? null,
       submitted: d['Submitted'] != null ? String(d['Submitted']) : null,
       issued: d['Issued'] != null ? String(d['Issued']) : null,
@@ -434,6 +475,99 @@ export function buildRNAPolicyRows(records: ParsedRecord[], agencyCarrierId: str
       source_format: 'RNA_POLICY',
     }
   })
+}
+
+/** RNA commission CSV (Commission Statement): ADVANCE and Earned sections with Certificate, Insured's Name, amounts, etc. */
+/** Aggregates by policy_number so one row per policy with summed advance_amount + earned_amount (upsert keeps one row per policy). */
+export function buildRNACommissionRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
+  const byPolicy = new Map<string, {
+    policy_number: string
+    advance_amount: number
+    earned_amount: number
+    insured_name: string | null
+    product_id: string | null
+    issue_date: string | null
+    effective_date: string | null
+    mode: string | null
+    description: string | null
+    premium: number | null
+    comm_pct: number | null
+    paid_to_date: string | null
+    activity_type: string | null
+    split_pct: number | null
+    comments: string | null
+    agent_name: string | null
+    agent_id: string | null
+    row_number: number
+  }>()
+
+  records.forEach((r, idx) => {
+    const d = r.data
+    const advanceAmt = d['Advance Amount'] != null ? (typeof d['Advance Amount'] === 'number' ? d['Advance Amount'] : parseNumber(d['Advance Amount'])) : 0
+    const earnedAmt = d['Earned'] != null ? (typeof d['Earned'] === 'number' ? d['Earned'] : parseNumber(d['Earned'])) : 0
+    const policyNumber = normalizePolicyNumber(r.policyNumber)
+    if (!policyNumber) return
+
+    const existing = byPolicy.get(policyNumber)
+    const numAdv = typeof advanceAmt === 'number' && !Number.isNaN(advanceAmt) ? advanceAmt : 0
+    const numEarned = typeof earnedAmt === 'number' && !Number.isNaN(earnedAmt) ? earnedAmt : 0
+
+    if (existing) {
+      existing.advance_amount += numAdv
+      existing.earned_amount += numEarned
+      existing.row_number = idx + 1
+      if ((d['Comment'] ?? '').toString().trim()) existing.comments = (existing.comments ? existing.comments + '; ' : '') + (d['Comment'] ?? '')
+      return
+    }
+
+    const activityType = d['Description'] ?? d['1st Yr Rnwl'] ?? null
+    byPolicy.set(policyNumber, {
+      policy_number: policyNumber,
+      advance_amount: numAdv,
+      earned_amount: numEarned,
+      insured_name: d["Insured's Name"] ?? null,
+      product_id: d['Product ID'] ?? null,
+      issue_date: d['Issue Date'] != null ? String(d['Issue Date']) : null,
+      effective_date: d['Effective Date'] != null ? String(d['Effective Date']) : null,
+      mode: d['Mode'] ?? null,
+      description: d['Description'] ?? null,
+      premium: d['Premium'] != null ? (typeof d['Premium'] === 'number' ? d['Premium'] : parseNumber(d['Premium'])) : null,
+      comm_pct: d['Comm%'] != null ? (typeof d['Comm%'] === 'number' ? d['Comm%'] : parseNumber(d['Comm%'])) : null,
+      paid_to_date: d['Paid To Date'] != null ? String(d['Paid To Date']) : null,
+      activity_type: activityType != null ? String(activityType) : null,
+      split_pct: d['Split %'] != null ? (typeof d['Split %'] === 'number' ? d['Split %'] : parseNumber(d['Split %'])) : null,
+      comments: d['Comment'] ?? null,
+      agent_name: d['Agent_Name'] ?? null,
+      agent_id: d['Agent_ID'] ?? null,
+      row_number: idx + 1,
+    })
+  })
+
+  return Array.from(byPolicy.values()).map(row => ({
+    agency_carrier_id: agencyCarrierId,
+    file_id: fileId,
+    row_number: row.row_number,
+    policy_number: row.policy_number,
+    insured_name: row.insured_name,
+    product_id: row.product_id,
+    issue_date: row.issue_date,
+    effective_date: row.effective_date,
+    mode: row.mode,
+    description: row.description,
+    premium: row.premium,
+    comm_pct: row.comm_pct,
+    advance_amount: row.advance_amount,
+    earned_amount: row.earned_amount,
+    paid_to_date: row.paid_to_date,
+    activity_type: row.activity_type,
+    split_pct: row.split_pct,
+    comments: row.comments,
+    agent_name: row.agent_name,
+    agent_id: row.agent_id,
+    statement_date: null,
+    source_file: fileName,
+    source_format: 'RNA_COMMISSION',
+  }))
 }
 
 type TargetTable = 'aetna_policies' | 'aetna_commissions' | 'amam_policies' | 'amam_commissions' | 'transamerica_policies' | 'transamerica_commissions' | 'moh_policies' | 'moh_commissions' | 'corebridge_policies' | 'corebridge_commissions' | 'liberty_policies' | 'liberty_commissions' | 'rna_policies' | 'rna_commissions'
@@ -515,17 +649,21 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
 
   const fileNameLower = file.name.toLowerCase()
   const isRNAPolicyExcel = carrierCode === 'RNA' && fileType === 'Policy' && (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls'))
-  
+  const isRNACommissionCSV = carrierCode === 'RNA' && fileType === 'Commission' && fileNameLower.endsWith('.csv')
+
   console.log('[Upload Logic] Parsing file:', {
     fileName: file.name,
     carrierCode,
     fileType,
     isRNAPolicyExcel,
+    isRNACommissionCSV,
   })
-  
+
   const parseResult = isRNAPolicyExcel
     ? (await parseRNAExcel(file) as { records: ParsedRecord[]; totalRecords: number })
-    : (await parseFile(file) as { records: ParsedRecord[]; totalRecords: number })
+    : isRNACommissionCSV
+      ? (await parseRNACommissionCSV(file) as { records: ParsedRecord[]; totalRecords: number })
+      : (await parseFile(file) as { records: ParsedRecord[]; totalRecords: number })
   
   console.log('[Upload Logic] Parse result:', {
     recordCount: parseResult.records.length,
@@ -543,9 +681,11 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   else if (carrierCode === 'AETNA' && fileType === 'Commission') rows = buildAetnaCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'TRANSAMERICA' && fileType === 'Policy') rows = buildTransamericaPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'MOH' && fileType === 'Policy') rows = buildMohPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'MOH' && fileType === 'Commission') rows = buildMohCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'COREBRIDGE' && fileType === 'Policy') rows = buildCorebridgePolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'LIBERTY' && fileType === 'Policy') rows = buildLibertyPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'RNA' && fileType === 'Policy') rows = buildRNAPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'RNA' && fileType === 'Commission') rows = buildRNACommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
 
   if (!rows.length) return { success: false, error: 'File parsed but no mappable records were found.' }
 

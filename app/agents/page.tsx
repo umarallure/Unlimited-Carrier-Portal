@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Pencil, Trash2, Plus, Users, Mail, Search, FileText } from 'lucide-react'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -287,9 +287,12 @@ export default function AgentsPage() {
                             <Plus className="mr-2 h-4 w-4" /> Add Agent
                         </Button>
                     </DialogTrigger>
-                    <DialogContent className="bg-slate-900 border-slate-700">
+                    <DialogContent className="bg-slate-900 border-slate-700" aria-describedby="agent-dialog-desc">
                         <DialogHeader>
                             <DialogTitle className="text-white">{editingAgent ? 'Edit Agent' : 'Add New Agent'}</DialogTitle>
+                            <DialogDescription id="agent-dialog-desc" className="sr-only text-slate-400">
+                                {editingAgent ? 'Edit agent details and agency.' : 'Add a new agent and assign agency.'}
+                            </DialogDescription>
                         </DialogHeader>
                         <div className="space-y-4 py-4">
                             <div className="space-y-2">

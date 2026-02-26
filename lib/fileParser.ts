@@ -251,13 +251,23 @@ export async function parseExcel(file: File): Promise<ParseResult> {
                     return;
                 }
 
-                // Prefer "Commission Details" sheet for commission files, otherwise use first sheet
+                // Prefer a "Details" / "Commission Details" style sheet when present, otherwise use first sheet
                 let targetSheetName = workbook.SheetNames[0];
-                const commissionDetailsSheet = workbook.SheetNames.find(name => 
-                    name.toLowerCase().includes('commission') && name.toLowerCase().includes('detail')
+                const lowerNames = workbook.SheetNames.map(name => name.toLowerCase());
+
+                // 1) Exact / strong matches like "Commission Details"
+                const strongIndex = lowerNames.findIndex(name =>
+                    name.includes('commission') && name.includes('detail')
                 );
-                if (commissionDetailsSheet) {
-                    targetSheetName = commissionDetailsSheet;
+                // 2) Any sheet that mentions "detail" / "details" (e.g. MOH "DETAILS" tab)
+                const detailsIndex = lowerNames.findIndex(name =>
+                    name.includes('detail')
+                );
+
+                if (strongIndex >= 0) {
+                    targetSheetName = workbook.SheetNames[strongIndex];
+                } else if (detailsIndex >= 0) {
+                    targetSheetName = workbook.SheetNames[detailsIndex];
                 }
                 
                 const worksheet = workbook.Sheets[targetSheetName];
@@ -447,6 +457,213 @@ export async function parseRNAExcel(file: File): Promise<ParseResult> {
         };
         reader.onerror = () => reject(new Error('Failed to read the RNA Excel file'));
         reader.readAsBinaryString(file);
+    });
+}
+
+/**
+ * Parse RNA (Royal Neighbors of America) Commission Statement CSV.
+ * File has sections: "ADVANCE Commission Statement" and "Earned Commission Statement" with different column layouts.
+ * Each section has a header row then data rows until "Subtotals" or "Commission Summary".
+ */
+export async function parseRNACommissionCSV(file: File): Promise<ParseResult> {
+    return new Promise((resolve, reject) => {
+        Papa.parse(file, {
+            header: false,
+            skipEmptyLines: false,
+            complete: (results: any) => {
+                try {
+                    const rows = results.data as string[][];
+                    if (!rows?.length) {
+                        reject(new Error('RNA commission file is empty'));
+                        return;
+                    }
+
+                    const records: ParsedRecord[] = [];
+                    let currentAgentName = '';
+                    let currentAgentId = '';
+
+                    function cellStr(row: any[], idx: number): string {
+                        if (!row || idx >= row.length) return '';
+                        return String(row[idx] ?? '').trim();
+                    }
+
+                    function findCellIndex(row: any[], pred: (v: string) => boolean): number {
+                        if (!row) return -1;
+                        for (let i = 0; i < row.length; i++) {
+                            if (pred(cellStr(row, i))) return i;
+                        }
+                        return -1;
+                    }
+
+                    function parseCurrency(val: string): number | null {
+                        if (val == null || String(val).trim() === '') return null;
+                        const s = String(val).replace(/\$|,/g, '').trim();
+                        const neg = /^\(.*\)$/.test(s);
+                        const num = parseFloat(s.replace(/[()]/g, ''));
+                        if (Number.isNaN(num)) return null;
+                        return neg ? -num : num;
+                    }
+
+                    let i = 0;
+                    while (i < rows.length) {
+                        const row = rows[i];
+                        const rowText = Array.isArray(row) ? row.map(c => String(c ?? '')).join(',') : '';
+
+                        if (/Agent Earning Commission/i.test(rowText)) {
+                            i++;
+                            while (i < rows.length) {
+                                const nextRow = rows[i];
+                                if (!Array.isArray(nextRow)) { i++; continue; }
+                                const first = cellStr(nextRow, 0);
+                                const second = cellStr(nextRow, 1);
+                                if (first && !/Commission Statement|Summary|Balance|Payment|Run Date|Period Ending/i.test(first)) {
+                                    currentAgentName = first;
+                                    currentAgentId = second || currentAgentId;
+                                    i++;
+                                    break;
+                                }
+                                i++;
+                            }
+                            continue;
+                        }
+
+                        if (/ADVANCE Commission Statement/i.test(rowText)) {
+                            i++;
+                            let headerRow: any[] | null = null;
+                            while (i < rows.length) {
+                                const r = rows[i];
+                                if (Array.isArray(r) && r.some((c: any) => String(c ?? '').trim().length > 0)) {
+                                    headerRow = r;
+                                    i++;
+                                    break;
+                                }
+                                i++;
+                            }
+                            if (!headerRow) continue;
+                            const headers = headerRow.map((h: any) => String(h ?? '').trim());
+                            const certIdx = headers.findIndex((h: string) => /^Certificate$/i.test(h));
+                            const insuredIdx = headers.findIndex((h: string) => /Insured'?s? Name/i.test(h));
+                            const prodIdx = headers.findIndex((h: string) => /Product ID/i.test(h));
+                            const issueIdx = headers.findIndex((h: string) => /Issue Date/i.test(h));
+                            const effIdx = headers.findIndex((h: string) => /Effective Date/i.test(h));
+                            const modeIdx = headers.findIndex((h: string) => /^Mode$/i.test(h));
+                            const descIdx = headers.findIndex((h: string) => /Description/i.test(h));
+                            const premIdx = headers.findIndex((h: string) => /^Premium$/i.test(h));
+                            const commPctIdx = headers.findIndex((h: string) => /Comm%|Comm %/i.test(h));
+                            const advIdx = headers.findIndex((h: string) => /Advance Amount/i.test(h));
+
+                            while (i < rows.length) {
+                                const dataRow = rows[i];
+                                if (!Array.isArray(dataRow)) { i++; break; }
+                                const firstCell = cellStr(dataRow, 0);
+                                if (/Subtotals|Commission Summary|ADVANCE Commission|Earned Commission|Agent Earning/i.test(firstCell)) break;
+                                const rowHasSubtotals = dataRow.some((c: any) => /Subtotals for Agent/i.test(String(c ?? '')));
+                                if (rowHasSubtotals) { i++; continue; }
+                                const cert = certIdx >= 0 ? cellStr(dataRow, certIdx) : '';
+                                if (!cert) { i++; continue; }
+
+                                const rowData: Record<string, any> = {};
+                                headers.forEach((h, idx) => { if (h && idx < dataRow.length) rowData[h] = dataRow[idx]; });
+                                rowData['Agent_Name'] = currentAgentName;
+                                rowData['Agent_ID'] = currentAgentId;
+                                if (insuredIdx >= 0) rowData["Insured's Name"] = cellStr(dataRow, insuredIdx);
+                                if (prodIdx >= 0) rowData['Product ID'] = cellStr(dataRow, prodIdx);
+                                if (issueIdx >= 0) rowData['Issue Date'] = cellStr(dataRow, issueIdx);
+                                if (effIdx >= 0) rowData['Effective Date'] = cellStr(dataRow, effIdx);
+                                if (modeIdx >= 0) rowData['Mode'] = cellStr(dataRow, modeIdx);
+                                if (descIdx >= 0) rowData['Description'] = cellStr(dataRow, descIdx);
+                                const premVal = premIdx >= 0 ? cellStr(dataRow, premIdx) : '';
+                                rowData['Premium'] = premVal ? parseCurrency(premVal) : null;
+                                const commVal = commPctIdx >= 0 ? cellStr(dataRow, commPctIdx) : '';
+                                rowData['Comm%'] = commVal ? parseCurrency(commVal) : null;
+                                const advVal = advIdx >= 0 ? cellStr(dataRow, advIdx) : '';
+                                rowData['Advance Amount'] = advVal ? parseCurrency(advVal) : null;
+                                rowData['Earned'] = null;
+
+                                records.push({ policyNumber: cert, data: rowData });
+                                i++;
+                            }
+                            continue;
+                        }
+
+                        if (/Earned Commission Statement/i.test(rowText)) {
+                            i++;
+                            let headerRow: any[] | null = null;
+                            while (i < rows.length) {
+                                const r = rows[i];
+                                if (Array.isArray(r) && r.some((c: any) => String(c ?? '').trim().length > 0)) {
+                                    headerRow = r;
+                                    i++;
+                                    break;
+                                }
+                                i++;
+                            }
+                            if (!headerRow) continue;
+                            const headers = headerRow.map((h: any) => String(h ?? '').trim());
+                            const certIdx = headers.findIndex((h: string) => /^Certificate$/i.test(h));
+                            const insuredIdx = headers.findIndex((h: string) => /Insured'?s? Name/i.test(h));
+                            const prodIdx = headers.findIndex((h: string) => /Prod ID|Product ID/i.test(h));
+                            const issueIdx = headers.findIndex((h: string) => /Issue Date/i.test(h));
+                            const modeIdx = headers.findIndex((h: string) => /^Mode$/i.test(h));
+                            const paidToIdx = headers.findIndex((h: string) => /Paid To Date/i.test(h));
+                            const yrRnwlIdx = headers.findIndex((h: string) => /1st Yr Rnwl|1st Yr/i.test(h));
+                            const splitIdx = headers.findIndex((h: string) => /Split %/i.test(h));
+                            const premIdx = headers.findIndex((h: string) => /^Prem$/i.test(h));
+                            const commPctIdx = headers.findIndex((h: string) => /Comm%|Comm %/i.test(h));
+                            const earnedIdx = headers.findIndex((h: string) => /^Earned$/i.test(h));
+                            const commentIdx = headers.findIndex((h: string) => /Comment/i.test(h));
+
+                            while (i < rows.length) {
+                                const dataRow = rows[i];
+                                if (!Array.isArray(dataRow)) { i++; break; }
+                                const firstCell = cellStr(dataRow, 0);
+                                if (/Subtotals|Commission Summary|EARNED Commission|ADVANCE Commission|Agent Earning/i.test(firstCell)) break;
+                                const rowHasSubtotals = dataRow.some((c: any) => /Subtotals for Agent/i.test(String(c ?? '')));
+                                if (rowHasSubtotals) { i++; continue; }
+                                const cert = certIdx >= 0 ? cellStr(dataRow, certIdx) : '';
+                                if (!cert) { i++; continue; }
+
+                                const rowData: Record<string, any> = {};
+                                headers.forEach((h, idx) => { if (h && idx < dataRow.length) rowData[h] = dataRow[idx]; });
+                                rowData['Agent_Name'] = currentAgentName;
+                                rowData['Agent_ID'] = currentAgentId;
+                                if (insuredIdx >= 0) rowData["Insured's Name"] = cellStr(dataRow, insuredIdx);
+                                if (prodIdx >= 0) rowData['Product ID'] = cellStr(dataRow, prodIdx);
+                                if (issueIdx >= 0) rowData['Issue Date'] = cellStr(dataRow, issueIdx);
+                                if (modeIdx >= 0) rowData['Mode'] = cellStr(dataRow, modeIdx);
+                                if (paidToIdx >= 0) rowData['Paid To Date'] = cellStr(dataRow, paidToIdx);
+                                if (yrRnwlIdx >= 0) rowData['1st Yr Rnwl'] = cellStr(dataRow, yrRnwlIdx);
+                                const splitVal = splitIdx >= 0 ? cellStr(dataRow, splitIdx) : '';
+                                rowData['Split %'] = splitVal ? parseCurrency(splitVal) : null;
+                                const premVal = premIdx >= 0 ? cellStr(dataRow, premIdx) : '';
+                                rowData['Premium'] = premVal ? parseCurrency(premVal) : null;
+                                const commVal = commPctIdx >= 0 ? cellStr(dataRow, commPctIdx) : '';
+                                rowData['Comm%'] = commVal ? parseCurrency(commVal) : null;
+                                const earnedVal = earnedIdx >= 0 ? cellStr(dataRow, earnedIdx) : '';
+                                rowData['Earned'] = earnedVal ? parseCurrency(earnedVal) : null;
+                                rowData['Advance Amount'] = null;
+                                if (commentIdx >= 0) rowData['Comment'] = cellStr(dataRow, commentIdx);
+
+                                records.push({ policyNumber: cert, data: rowData });
+                                i++;
+                            }
+                            continue;
+                        }
+
+                        i++;
+                    }
+
+                    resolve({
+                        records,
+                        totalRecords: records.length,
+                        detectedPolicyColumn: 'Certificate',
+                    });
+                } catch (err) {
+                    reject(err);
+                }
+            },
+            error: (err: any) => reject(err),
+        });
     });
 }
 

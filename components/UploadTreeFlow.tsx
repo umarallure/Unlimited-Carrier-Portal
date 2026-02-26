@@ -241,13 +241,13 @@ function UploadNode({ data }: { data: any }) {
 
       {/* Confirmation Dialog */}
       <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
-        <DialogContent className="bg-slate-900 border-slate-700 max-w-md">
+        <DialogContent className="bg-slate-900 border-slate-700 max-w-md" aria-describedby="upload-confirm-desc">
           <DialogHeader>
             <DialogTitle className="text-white flex items-center gap-2">
               <AlertCircle className="w-5 h-5 text-orange-400" />
               Confirm File Upload
             </DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription id="upload-confirm-desc" className="text-slate-400">
               Please verify the file details before uploading.
             </DialogDescription>
           </DialogHeader>
@@ -552,7 +552,7 @@ export function UploadTreeFlow() {
                     await loadDailyStatuses() // Refetch – carrier and Policy/Commission nodes update (uses local day range)
                     const count = (result as { count?: number }).count ?? 0
                     
-                    // Process deal tracker if Aetna Policy file
+                    // Process deal tracker for supported carriers (AETNA, AMAM, MOH, RNA, TRANSAMERICA, LIBERTY, COREBRIDGE)
                     console.log('[UploadTreeFlow] Upload successful, checking deal tracker processing...', {
                       carrierCode: carrier.code,
                       fileType,
@@ -560,7 +560,12 @@ export function UploadTreeFlow() {
                       fileId: 'fileId' in result ? result.fileId : 'N/A',
                     })
                     
-                    if (carrier.code === 'AETNA' && (fileType === 'Policy' || fileType === 'Commission') && 'fileId' in result) {
+                    const isDealTrackerCarrier = carrier.code === 'AETNA' || carrier.code === 'AMAM' || carrier.code === 'MOH' || carrier.code === 'RNA' || carrier.code === 'TRANSAMERICA' || carrier.code === 'LIBERTY' || carrier.code === 'COREBRIDGE'
+                    const shouldProcessDealTracker =
+                      isDealTrackerCarrier &&
+                      (fileType === 'Policy' || fileType === 'Commission') &&
+                      'fileId' in result
+                    if (shouldProcessDealTracker) {
                       console.log('[UploadTreeFlow] Triggering deal tracker processing for', fileType, 'file...')
                       const dealTrackerResult = await dealTracker.processAfterUpload(
                         ac.id,
@@ -571,10 +576,10 @@ export function UploadTreeFlow() {
                       console.log('[UploadTreeFlow] Deal tracker processing result:', dealTrackerResult)
                     } else {
                       console.log('[UploadTreeFlow] Deal tracker processing skipped:', {
-                        isAetna: carrier.code === 'AETNA',
+                        isDealTrackerCarrier,
                         fileType,
                         hasFileId: 'fileId' in result,
-                        shouldProcess: carrier.code === 'AETNA' && (fileType === 'Policy' || fileType === 'Commission'),
+                        shouldProcess: isDealTrackerCarrier && (fileType === 'Policy' || fileType === 'Commission'),
                       })
                     }
                     
@@ -758,7 +763,7 @@ export function UploadTreeFlow() {
             <div className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-2 border border-slate-700">
               <Building2 className="w-4 h-4 text-orange-400" />
               <Label htmlFor="agency-select" className="text-sm text-slate-300 font-medium whitespace-nowrap">Agency:</Label>
-              <Select value={selectedAgencyId || undefined} onValueChange={setSelectedAgencyId}>
+              <Select value={selectedAgencyId} onValueChange={setSelectedAgencyId}>
                 <SelectTrigger id="agency-select" className="w-[220px] bg-slate-900 border-slate-700 text-white focus:ring-orange-500 focus:border-orange-500">
                   <SelectValue placeholder="Select an agency" />
                 </SelectTrigger>

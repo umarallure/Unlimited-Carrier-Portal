@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "@/components/ui/dialog"
 import { Pencil, Trash2, Plus, Building2, Search } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
@@ -128,9 +128,12 @@ export default function AgenciesPage() {
                             <Plus className="mr-2 h-4 w-4" /> Add Agency
                         </Button>
                     </DialogTrigger>
-                    <DialogContent className="bg-slate-900 border-slate-700">
+                    <DialogContent className="bg-slate-900 border-slate-700" aria-describedby="agency-dialog-desc">
                         <DialogHeader>
                             <DialogTitle className="text-white">{editingAgency ? 'Edit Agency' : 'Add New Agency'}</DialogTitle>
+                            <DialogDescription id="agency-dialog-desc" className="sr-only text-slate-400">
+                                {editingAgency ? 'Edit agency name.' : 'Create a new agency.'}
+                            </DialogDescription>
                         </DialogHeader>
                         <div className="space-y-4 py-4">
                             <div className="space-y-2">
