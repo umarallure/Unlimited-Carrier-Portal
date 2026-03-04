@@ -6,8 +6,10 @@ import { zoomIdentity } from 'd3-zoom'
 import { supabase } from '@/lib/supabaseClient'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
 import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import { useCommissionReportUpload } from '@/lib/useCommissionReportUpload'
 import type { PendingRowsPayload } from '@/lib/dealTrackerUpload'
 import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
+import { CommissionReportDialog } from '@/components/CommissionReportDialog'
 import { fetchDailyStatus, fetchDailyFileTypes, getLocalDayRange, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { Building2, Calendar, Loader2, RefreshCw, CheckCircle, AlertCircle, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -82,8 +84,19 @@ function getNodeHtml(d: ChartNode): string {
 
 type SavedTransform = { x: number; y: number; k: number }
 
+type LastUploadContext = {
+  agencyCarrierId: string
+  fileId: string
+  carrierCode: string
+  fileType: FileKind
+}
+
 export function UploadTreeOrgChart() {
   const dealTracker = useDealTrackerUpload()
+  const commissionReport = useCommissionReportUpload({
+    onAfterSave: () => dealTracker.confirmAndSave(),
+  })
+  const [lastUploadContext, setLastUploadContext] = useState<LastUploadContext | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef = useRef<InstanceType<typeof OrgChart> | null>(null)
   const savedTransformRef = useRef<SavedTransform | null>(null)
@@ -330,6 +343,12 @@ export function UploadTreeOrgChart() {
         })
         
         if ((uploadDialog.carrierCode === 'AETNA' || uploadDialog.carrierCode === 'AMAM' || uploadDialog.carrierCode === 'MOH' || uploadDialog.carrierCode === 'RNA' || uploadDialog.carrierCode === 'TRANSAMERICA' || uploadDialog.carrierCode === 'LIBERTY' || uploadDialog.carrierCode === 'COREBRIDGE') && (uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
+          setLastUploadContext({
+            agencyCarrierId: uploadDialog.agencyCarrierId,
+            fileId: result.fileId,
+            carrierCode: uploadDialog.carrierCode,
+            fileType: uploadDialog.fileType,
+          })
           console.log('[UploadTreeOrgChart] Triggering deal tracker processing for', uploadDialog.fileType, 'file...')
           await dealTracker.processAfterUpload(
             uploadDialog.agencyCarrierId,
@@ -508,6 +527,35 @@ export function UploadTreeOrgChart() {
         saveProgressLogs={dealTracker.saveProgressLogs}
         onConfirm={dealTracker.confirmAndSave}
         onCancel={dealTracker.cancelVerification}
+        fileType={lastUploadContext?.fileType}
+        onNext={
+          lastUploadContext?.fileType === 'Commission' &&
+          (lastUploadContext?.carrierCode === 'AETNA' || lastUploadContext?.carrierCode === 'AMAM')
+            ? () => {
+                dealTracker.setShowVerification(false)
+                if (lastUploadContext)
+                  commissionReport.openCommissionReport(
+                    lastUploadContext.agencyCarrierId,
+                    lastUploadContext.fileId,
+                    lastUploadContext.carrierCode
+                  )
+              }
+            : undefined
+        }
+      />
+
+      {/* Commission Report step (after "Next" from deal tracker for AETNA/AMAM Commission) */}
+      <CommissionReportDialog
+        open={commissionReport.showCommissionReport}
+        onOpenChange={commissionReport.setShowCommissionReport}
+        rows={commissionReport.commissionRows}
+        loading={commissionReport.loading}
+        saving={commissionReport.saving}
+        carrierCode={lastUploadContext?.carrierCode ?? 'AETNA'}
+        onSave={async (editedRows) => {
+          await commissionReport.saveCommissionReport(editedRows)
+        }}
+        onCancel={commissionReport.cancelCommissionReport}
       />
     </div>
   )

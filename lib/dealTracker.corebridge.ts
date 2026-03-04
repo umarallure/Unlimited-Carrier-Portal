@@ -5,6 +5,7 @@ import {
   fetchAllPaginated,
   bulkFetchDailyDealFlowInfo,
   normalizeNameForSearch,
+  statusFromDealValue,
 } from './dealTracker'
 
 /**
@@ -164,7 +165,7 @@ export async function processCorebridgeFilesForDealTracker(
       deal_value: dealValue,
       cc_value: ccValue,
       notes: null,
-      status: null,
+      status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: (policy.writing_servicing_agent as string) ?? null,
       writing_number: (policy.agent_number as string) ?? null,

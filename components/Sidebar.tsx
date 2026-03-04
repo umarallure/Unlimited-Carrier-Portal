@@ -101,6 +101,16 @@ const Sidebar = () => {
                 </Link>
 
                 <Link
+                    href="/commission-report"
+                    className="group flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-900 transition-colors"
+                >
+                    <div className="w-8 h-8 rounded-md bg-slate-900 flex items-center justify-center">
+                        <FileText size={18} className="text-slate-200" />
+                    </div>
+                    <span className="text-sm font-medium text-slate-100">Commission Report</span>
+                </Link>
+
+                <Link
                     href="/upload-tree"
                     className="group flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-900 transition-colors"
                 >

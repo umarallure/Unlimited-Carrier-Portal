@@ -9,7 +9,8 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Loader2, Search, RefreshCw, X, Calendar } from 'lucide-react'
+import Link from 'next/link'
+import { Loader2, Search, RefreshCw, X, Calendar, History } from 'lucide-react'
 
 export default function DealTrackerPage() {
   const [entries, setEntries] = useState<any[]>([])
@@ -17,12 +18,14 @@ export default function DealTrackerPage() {
   const [searchTerm, setSearchTerm] = useState('')
   const [carrierFilter, setCarrierFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [agencyFilter, setAgencyFilter] = useState<string>('all')
   const [agentFilter, setAgentFilter] = useState<string>('all')
   const [callCenterFilter, setCallCenterFilter] = useState<string>('all')
   const [dateFromFilter, setDateFromFilter] = useState<string>('')
   const [dateToFilter, setDateToFilter] = useState<string>('')
   const [dealValueMin, setDealValueMin] = useState<string>('')
   const [dealValueMax, setDealValueMax] = useState<string>('')
+  const [agencies, setAgencies] = useState<string[]>([])
   const [carriers, setCarriers] = useState<string[]>([])
   const [agents, setAgents] = useState<string[]>([])
   const [callCenters, setCallCenters] = useState<string[]>([])
@@ -39,21 +42,39 @@ export default function DealTrackerPage() {
 
   useEffect(() => {
     setCurrentPage(1) // Reset to page 1 when filters change
-  }, [searchTerm, carrierFilter, statusFilter, agentFilter, callCenterFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax])
+  }, [searchTerm, carrierFilter, statusFilter, agencyFilter, agentFilter, callCenterFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax])
 
   const fetchFilterOptions = async () => {
     // Fetch all entries to get unique filter values
     const { data } = await supabase
       .from('deal_tracker')
-      .select('carrier, policy_status, sales_agent, call_center')
+      .select(`
+        carrier,
+        policy_status,
+        sales_agent,
+        call_center,
+        agency_carriers (
+          agencies (
+            name
+          )
+        )
+      `)
       .order('carrier')
 
     if (data) {
+      const uniqueAgencies = Array.from(
+        new Set(
+          data
+            .map((e: any) => e.agency_carriers?.agencies?.name)
+            .filter((name: string | null | undefined) => !!name)
+        )
+      ).sort()
       const uniqueCarriers = Array.from(new Set(data.map(e => e.carrier).filter(Boolean))).sort()
       const uniqueAgents = Array.from(new Set(data.map(e => e.sales_agent).filter(Boolean))).sort()
       const uniqueCallCenters = Array.from(new Set(data.map(e => e.call_center).filter(Boolean))).sort()
       const uniqueStatuses = Array.from(new Set(data.map(e => e.policy_status).filter(Boolean))).sort()
       
+      setAgencies(uniqueAgencies as string[])
       setCarriers(uniqueCarriers)
       setAgents(uniqueAgents)
       setCallCenters(uniqueCallCenters)
@@ -95,6 +116,14 @@ export default function DealTrackerPage() {
     // Carrier filter
     if (carrierFilter !== 'all' && entry.carrier !== carrierFilter) {
       return false
+    }
+
+    // Agency filter
+    if (agencyFilter !== 'all') {
+      const agencyName = entry.agency_carriers?.agencies?.name
+      if (agencyName !== agencyFilter) {
+        return false
+      }
     }
 
     // Status filter
@@ -158,6 +187,7 @@ export default function DealTrackerPage() {
     setSearchTerm('')
     setCarrierFilter('all')
     setStatusFilter('all')
+    setAgencyFilter('all')
     setAgentFilter('all')
     setCallCenterFilter('all')
     setDateFromFilter('')
@@ -167,7 +197,7 @@ export default function DealTrackerPage() {
   }
 
   const hasActiveFilters = searchTerm || carrierFilter !== 'all' || statusFilter !== 'all' || 
-    agentFilter !== 'all' || callCenterFilter !== 'all' || dateFromFilter || dateToFilter || 
+    agencyFilter !== 'all' || agentFilter !== 'all' || callCenterFilter !== 'all' || dateFromFilter || dateToFilter || 
     dealValueMin || dealValueMax
 
   if (loading) {
@@ -244,8 +274,21 @@ export default function DealTrackerPage() {
             </Button>
           </div>
 
-          {/* Row 2: Agent, Call Center, Date Range */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+          {/* Row 2: Agency, Agent, Call Center, Date Range */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
+            <Select value={agencyFilter} onValueChange={setAgencyFilter}>
+              <SelectTrigger className="bg-slate-950 border-slate-800 text-white">
+                <SelectValue placeholder="All Agencies" />
+              </SelectTrigger>
+              <SelectContent className="bg-slate-800 border-slate-700">
+                <SelectItem value="all" className="text-white">All Agencies</SelectItem>
+                {agencies.map(agency => (
+                  <SelectItem key={agency} value={agency} className="text-white">
+                    {agency}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Select value={agentFilter} onValueChange={setAgentFilter}>
               <SelectTrigger className="bg-slate-950 border-slate-800 text-white">
                 <SelectValue placeholder="All Agents" />
@@ -357,6 +400,12 @@ export default function DealTrackerPage() {
                   <TableHead className="text-slate-300 font-semibold">Policy Number</TableHead>
                   <TableHead className="text-slate-300 font-semibold">Carrier</TableHead>
                   <TableHead className="text-slate-300 font-semibold">Policy Status</TableHead>
+                  <TableHead className="text-slate-300 font-semibold" title="Raw status from carrier file (no mapping)">
+                    Carrier Status (raw)
+                  </TableHead>
+                  <TableHead className="text-slate-300 font-semibold" title="Rule-based: NOT yet paid / Charge Back / Paid from deal value">
+                    Status
+                  </TableHead>
                   <TableHead className="text-slate-300 font-semibold">Deal Value</TableHead>
                   <TableHead className="text-slate-300 font-semibold">CC Value</TableHead>
                   <TableHead className="text-slate-300 font-semibold">Sales Agent</TableHead>
@@ -365,18 +414,19 @@ export default function DealTrackerPage() {
                   <TableHead className="text-slate-300 font-semibold">Phone Number</TableHead>
                   <TableHead className="text-slate-300 font-semibold">Deal Creation Date</TableHead>
                   <TableHead className="text-slate-300 font-semibold">Effective Date</TableHead>
+                  <TableHead className="text-slate-300 font-semibold w-20">History</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={12} className="text-center py-8">
+                    <TableCell colSpan={15} className="text-center py-8">
                       <Loader2 className="w-8 h-8 animate-spin text-orange-400 mx-auto" />
                     </TableCell>
                   </TableRow>
                 ) : filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={12} className="text-center text-slate-400 py-8">
+                    <TableCell colSpan={15} className="text-center text-slate-400 py-8">
                       {hasActiveFilters ? 'No deals found matching your filters' : 'No deals found'}
                     </TableCell>
                   </TableRow>
@@ -389,6 +439,14 @@ export default function DealTrackerPage() {
                       <TableCell>
                         <Badge variant="outline" className="border-slate-700 text-slate-300">
                           {entry.policy_status || '-'}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-slate-300">
+                        {entry.carrier_status || '-'}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="border-slate-700 text-slate-300" title="From deal value: 0 → NOT yet paid, negative → Charge Back, positive → Paid">
+                          {entry.status || '-'}
                         </Badge>
                       </TableCell>
                       <TableCell className="text-slate-300">
@@ -420,6 +478,30 @@ export default function DealTrackerPage() {
                         {entry.effective_date
                           ? new Date(entry.effective_date).toLocaleDateString()
                           : '-'}
+                      </TableCell>
+                      <TableCell className="text-slate-300">
+                        {(() => {
+                          const updatesCount = Array.isArray(entry.version_history)
+                            ? entry.version_history.length
+                            : 0
+                          return (
+                            <Link
+                              href={`/records/history?table=deal_tracker&id=${encodeURIComponent(entry.id)}`}
+                              className="inline-flex items-center gap-1 text-orange-400 hover:text-orange-300 text-sm"
+                              title={
+                                updatesCount === 0
+                                  ? 'No previous versions'
+                                  : `Updated ${updatesCount} time${updatesCount === 1 ? '' : 's'}`
+                              }
+                            >
+                              <History className="w-4 h-4" />
+                              <span>History</span>
+                              <span className="ml-1 inline-flex items-center justify-center rounded-full border border-orange-500/60 bg-orange-500/10 px-1.5 text-[10px] leading-none text-orange-300">
+                                {updatesCount}
+                              </span>
+                            </Link>
+                          )
+                        })()}
                       </TableCell>
                     </TableRow>
                   ))

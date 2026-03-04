@@ -690,32 +690,49 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   if (!rows.length) return { success: false, error: 'File parsed but no mappable records were found.' }
 
   const BATCH_SIZE = 500
-  const isPolicyTable = targetTable === 'aetna_policies' || targetTable === 'amam_policies' || targetTable === 'transamerica_policies' || targetTable === 'moh_policies' || targetTable === 'corebridge_policies' || targetTable === 'liberty_policies' || targetTable === 'rna_policies'
-  const isCommissionTable = targetTable === 'aetna_commissions' || targetTable === 'amam_commissions' || targetTable === 'transamerica_commissions' || targetTable === 'moh_commissions' || targetTable === 'corebridge_commissions' || targetTable === 'liberty_commissions' || targetTable === 'rna_commissions'
+  const isPolicyTable =
+    targetTable === 'aetna_policies' ||
+    targetTable === 'amam_policies' ||
+    targetTable === 'transamerica_policies' ||
+    targetTable === 'moh_policies' ||
+    targetTable === 'corebridge_policies' ||
+    targetTable === 'liberty_policies' ||
+    targetTable === 'rna_policies'
+  const isCommissionTable =
+    targetTable === 'aetna_commissions' ||
+    targetTable === 'amam_commissions' ||
+    targetTable === 'transamerica_commissions' ||
+    targetTable === 'moh_commissions' ||
+    targetTable === 'corebridge_commissions' ||
+    targetTable === 'liberty_commissions' ||
+    targetTable === 'rna_commissions'
   const now = new Date().toISOString()
 
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     let chunk = rows.slice(i, i + BATCH_SIZE).map(row => ({ ...row, updated_at: now }))
-    
-    // For both policy and commission tables, use upsert to update existing records
+
+    // For both policy and commission tables, use upsert to update existing records.
+    // Never send id or created_at so we don't overwrite "first added" and conflict is on the unique constraint.
     if (isPolicyTable || isCommissionTable) {
-      // Upsert matches on (agency_carrier_id, policy_number) — Same policy/commission re-uploaded updates existing row.
-      // Never send id or created_at so we don't overwrite "first added" and conflict is on the unique constraint.
       chunk.forEach(row => {
         delete (row as any).id
         delete (row as any).created_at
       })
-      
-      // CRITICAL: Deduplicate chunk by (agency_carrier_id, policy_number) to prevent "cannot affect row a second time" error
-      // If multiple rows have the same unique key, keep the last one (most recent data)
+    }
+
+    // Policy tables: still deduplicate per chunk to avoid 'cannot affect row a second time'.
+    // Commission tables: we want EVERY record to be processed so version_history captures all
+    // statement lines; duplicates are handled by sequential upserts below.
+    if (isPolicyTable) {
       const seen = new Map<string, any>()
       const deduplicatedChunk: any[] = []
-      
+
       for (const row of chunk) {
         const key = `${row.agency_carrier_id}::${row.policy_number}`
         if (seen.has(key)) {
-          // Replace with newer row (keep the latest occurrence)
-          const existingIndex = deduplicatedChunk.findIndex(r => `${r.agency_carrier_id}::${r.policy_number}` === key)
+          const existingIndex = deduplicatedChunk.findIndex(
+            r => `${r.agency_carrier_id}::${r.policy_number}` === key
+          )
           if (existingIndex >= 0) {
             deduplicatedChunk[existingIndex] = row
           }
@@ -724,14 +741,18 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
           deduplicatedChunk.push(row)
         }
       }
-      
+
       if (deduplicatedChunk.length !== chunk.length) {
-        console.log(`[Upload Logic] Deduplicated chunk ${i / BATCH_SIZE + 1}: ${chunk.length} -> ${deduplicatedChunk.length} rows (removed ${chunk.length - deduplicatedChunk.length} duplicates)`)
+        console.log(
+          `[Upload Logic] Deduplicated policy chunk ${i / BATCH_SIZE + 1}: ${chunk.length} -> ${deduplicatedChunk.length} rows (removed ${
+            chunk.length - deduplicatedChunk.length
+          } duplicates)`
+        )
       }
-      
+
       chunk = deduplicatedChunk
     }
-    
+
     const query = supabase.from(targetTable)
     let error: any = null
     let result: any = null
@@ -747,13 +768,19 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
         result = response
       } else if (isCommissionTable) {
         // Commission tables: upsert on (agency_carrier_id, policy_number)
-        // ONE commission record per policy - updates existing record with version history when same policy appears in new files
-        const response = await query.upsert(chunk, { 
-          onConflict: 'agency_carrier_id,policy_number', 
-          ignoreDuplicates: false 
-        })
-        error = response.error
-        result = response
+        // We intentionally do NOT deduplicate here so every statement line is applied.
+        // To avoid 'cannot affect row a second time', we upsert rows one-by-one.
+        for (const row of chunk) {
+          const response = await query.upsert([row], {
+            onConflict: 'agency_carrier_id,policy_number',
+            ignoreDuplicates: false,
+          })
+          if (response.error) {
+            error = response.error
+            result = response
+            break
+          }
+        }
       } else {
         // Other tables: insert (no unique constraint)
         const response = await query.insert(chunk)

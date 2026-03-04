@@ -6,7 +6,91 @@ import { supabase } from '@/lib/supabaseClient'
 import { Button } from '@/components/ui/button'
 import { History, ArrowLeft, Loader2 } from 'lucide-react'
 
-const EXCLUDE_KEYS = ['id', 'agency_carrier_id', 'file_id', 'row_number', 'source_file', 'source_format', 'agency_carriers', 'version_history', 'raw_data', 'file_type', 'carrier_code', 'table']
+const EXCLUDE_KEYS = [
+    'id',
+    'agency_carrier_id',
+    'carrier_id',
+    'file_id',
+    'row_number',
+    'source_file',
+    'source_format',
+    'agency_carriers',
+    'version_history',
+    'raw_data',
+    'file_type',
+    'carrier_code',
+    'table',
+    // Technical tracking / metadata fields users don't need to see per version
+    'daily_deal_flow_fetched',
+    'daily_deal_flow_fetched_at',
+    'source_policy_table',
+    'source_policy_id',
+    'source_commission_table',
+    'source_commission_id',
+    'created_at',
+    'updated_at',
+]
+
+// Keys that matter most to business users and should be emphasized in diffs.
+const IMPORTANT_KEYS = [
+  'policy_status',
+  'carrier_status',
+  'status',
+  'deal_value',
+  'cc_value',
+  'charge_back',
+  'effective_date',
+  'deal_creation_date',
+  'sales_agent',
+  'writing_number',
+  'call_center',
+  'phone_number',
+]
+
+// Which fields to actually display in the grids (and in what order).
+// This guarantees CURRENT and PREVIOUS cards show the same set of business-relevant fields.
+const DISPLAY_KEYS = [
+    'name',
+    'carrier',
+    'policy_number',
+    'deal_creation_date',
+    'effective_date',
+    'policy_status',
+    'carrier_status',
+    'status',
+    'deal_value',
+    'cc_value',
+    'charge_back',
+    'call_center',
+    'phone_number',
+    'sales_agent',
+    'writing_number',
+    'policy_type',
+    'ghl_stage',
+    'ghl_name',
+]
+
+// Friendly labels for key fields
+const LABELS: Record<string, string> = {
+  policy_status: 'Policy Status',
+  carrier_status: 'Carrier Status',
+  status: 'Status',
+  deal_value: 'Deal Value',
+  cc_value: 'CC Value',
+  charge_back: 'Charge Back',
+  effective_date: 'Effective Date',
+  deal_creation_date: 'Deal Creation Date',
+  sales_agent: 'Sales Agent',
+  writing_number: 'Writing #',
+  call_center: 'Call Center',
+  phone_number: 'Phone Number',
+  name: 'Name',
+  policy_number: 'Policy Number',
+}
+
+function prettyKey(key: string) {
+  return LABELS[key] ?? key.replace(/_/g, ' ')
+}
 
 function toFlat(obj: any): Record<string, string> {
     if (!obj || typeof obj !== 'object') return {}
@@ -98,6 +182,19 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
     const historyReversed = (record.version_history || []).slice().reverse()
     const prevFlats = historyReversed.map((e: any) => toFlat(e?.snapshot))
 
+    // Use a consistent field order for CURRENT and all PREVIOUS cards, restricted to DISPLAY_KEYS
+    const fieldOrder = DISPLAY_KEYS.filter((key) => {
+        if (currentFlat[key] !== undefined) return true
+        return prevFlats.some((m: Record<string, string>) => m && m[key] !== undefined)
+    })
+
+    // Precompute diff for current vs most recent previous snapshot
+    const currentDiff = prevFlats.length > 0 ? diff(prevFlats[0], currentFlat) : { added: [], removed: [], changed: [] }
+    const currentChangedKeys = new Set<string>()
+    ;[...currentDiff.changed, ...currentDiff.added, ...currentDiff.removed].forEach(([key]) => {
+        currentChangedKeys.add(key)
+    })
+
     return (
         <div className="space-y-6">
             <div className="flex flex-wrap items-center gap-3">
@@ -107,11 +204,16 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                         Back to Records
                     </Button>
                 </Link>
-                <div className="flex items-center gap-2">
-                    <History className="w-6 h-6 text-orange-400" />
-                    <h1 className="text-2xl font-bold text-white">
-                        Version history — <span className="font-mono text-orange-300">{record.policy_number}</span>
-                    </h1>
+                <div className="flex flex-wrap items-center gap-3">
+                    <History className="w-6 h-6 text-orange-400 shrink-0" />
+                    <div>
+                        <h1 className="text-2xl font-bold text-white">
+                            Version history — <span className="font-mono text-orange-300">{record.policy_number}</span>
+                        </h1>
+                        <p className="text-slate-400 text-sm mt-0.5">
+                            This record has been updated {(record.version_history || []).length} time{(record.version_history || []).length === 1 ? '' : 's'}.
+                        </p>
+                    </div>
                 </div>
             </div>
 
@@ -135,32 +237,67 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                             </div>
                             <div className="p-4">
                                 {prevFlats.length > 0 && (() => {
-                                    const d = diff(prevFlats[0], currentFlat)
-                                    const hasChanges = d.added.length + d.removed.length + d.changed.length > 0
+                                    const d = currentDiff
+                                    const changedImportant = d.changed.filter(([key]) => IMPORTANT_KEYS.includes(key))
+                                    const addedImportant = d.added.filter(([key]) => IMPORTANT_KEYS.includes(key))
+                                    const removedImportant = d.removed.filter(([key]) => IMPORTANT_KEYS.includes(key))
+                                    const hasChanges = changedImportant.length + addedImportant.length + removedImportant.length > 0
                                     return hasChanges ? (
                                         <div className="mb-4 rounded-lg bg-slate-900/80 border border-slate-600 p-3 text-xs">
-                                            <span className="font-medium text-slate-300">What changed from previous:</span>
+                                            <span className="font-medium text-slate-300">Key changes since previous version:</span>
                                             <ul className="mt-2 space-y-1 text-slate-200">
-                                                {d.changed.map(([key, oldVal, newVal]) => (
-                                                    <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="line-through text-red-400/90">{oldVal}</span> → <span className="text-emerald-400">{newVal}</span></li>
+                                                {changedImportant.map(([key, oldVal, newVal]) => (
+                                                    <li key={key}>
+                                                        <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
+                                                        <span className="line-through text-red-400/90">{oldVal}</span>{' '}
+                                                        → <span className="text-emerald-400">{newVal}</span>
+                                                    </li>
                                                 ))}
-                                                {d.added.map(([key, val]) => (
-                                                    <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-emerald-400">added: {val}</span></li>
+                                                {addedImportant.map(([key, val]) => (
+                                                    <li key={key}>
+                                                        <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
+                                                        <span className="text-emerald-400">added: {val}</span>
+                                                    </li>
                                                 ))}
-                                                {d.removed.map(([key, val]) => (
-                                                    <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-red-400/90">removed (was: {val})</span></li>
+                                                {removedImportant.map(([key, val]) => (
+                                                    <li key={key}>
+                                                        <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
+                                                        <span className="text-red-400/90">removed (was: {val})</span>
+                                                    </li>
                                                 ))}
                                             </ul>
                                         </div>
                                     ) : null
                                 })()}
-                                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                                    {Object.entries(currentFlat).map(([key, val]) => (
+                                <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+                                    {fieldOrder.map((key) => {
+                                        const val = currentFlat[key]
+                                        if (val === undefined) return null
+                                        return (
                                         <span key={key} className="flex gap-2">
-                                            <dt className="text-slate-500 shrink-0">{key.replace(/_/g, ' ')}:</dt>
-                                            <dd className="text-slate-200 truncate min-w-0">{String(val)}</dd>
+                                            <dt
+                                                className={
+                                                    'shrink-0 ' +
+                                                    (currentChangedKeys.has(key)
+                                                        ? 'text-emerald-300 font-semibold'
+                                                        : 'text-slate-500')
+                                                }
+                                            >
+                                                {prettyKey(key)}:
+                                            </dt>
+                                            <dd
+                                                className={
+                                                    'truncate min-w-0 ' +
+                                                    (currentChangedKeys.has(key)
+                                                        ? 'text-emerald-300 font-semibold'
+                                                        : 'text-slate-200')
+                                                }
+                                            >
+                                                {String(val)}
+                                            </dd>
                                         </span>
-                                    ))}
+                                        )
+                                    })}
                                 </dl>
                             </div>
                         </div>
@@ -171,7 +308,14 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                         const thisFlat = prevFlats[idx] || {}
                         const nextFlat = idx === 0 ? currentFlat : prevFlats[idx - 1]
                         const d = diff(thisFlat, nextFlat)
-                        const hasChanges = d.added.length + d.removed.length + d.changed.length > 0
+                        const changedImportant = d.changed.filter(([key]) => IMPORTANT_KEYS.includes(key))
+                        const addedImportant = d.added.filter(([key]) => IMPORTANT_KEYS.includes(key))
+                        const removedImportant = d.removed.filter(([key]) => IMPORTANT_KEYS.includes(key))
+                        const hasChanges = changedImportant.length + addedImportant.length + removedImportant.length > 0
+                        const changedKeys = new Set<string>()
+                        ;[...d.changed, ...d.added, ...d.removed].forEach(([key]) => {
+                            changedKeys.add(key)
+                        })
                         return (
                             <div key={idx} className="relative flex gap-4">
                                 <div className="absolute -left-6 md:-left-8 top-6 w-4 h-4 rounded-full bg-slate-600 border-2 border-slate-900 shrink-0" aria-hidden />
@@ -184,28 +328,60 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                                     <div className="p-4">
                                         {hasChanges && (
                                             <div className="mb-4 rounded-lg bg-slate-900/80 border border-slate-600 p-3 text-xs">
-                                                <span className="font-medium text-slate-300">What changed in next version:</span>
+                                                <span className="font-medium text-slate-300">Key changes in next version:</span>
                                                 <ul className="mt-2 space-y-1 text-slate-200">
-                                                    {d.changed.map(([key, oldVal, newVal]) => (
-                                                        <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="line-through text-red-400/90">{oldVal}</span> → <span className="text-emerald-400">{newVal}</span></li>
+                                                    {changedImportant.map(([key, oldVal, newVal]) => (
+                                                        <li key={key}>
+                                                            <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
+                                                            <span className="line-through text-red-400/90">{oldVal}</span>{' '}
+                                                            → <span className="text-emerald-400">{newVal}</span>
+                                                        </li>
                                                     ))}
-                                                    {d.added.map(([key, val]) => (
-                                                        <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-emerald-400">added: {val}</span></li>
+                                                    {addedImportant.map(([key, val]) => (
+                                                        <li key={key}>
+                                                            <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
+                                                            <span className="text-emerald-400">added: {val}</span>
+                                                        </li>
                                                     ))}
-                                                    {d.removed.map(([key, val]) => (
-                                                        <li key={key}><span className="text-slate-500">{key.replace(/_/g, ' ')}:</span> <span className="text-red-400/90">removed (was: {val})</span></li>
+                                                    {removedImportant.map(([key, val]) => (
+                                                        <li key={key}>
+                                                            <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
+                                                            <span className="text-red-400/90">removed (was: {val})</span>
+                                                        </li>
                                                     ))}
                                                 </ul>
                                             </div>
                                         )}
                                         {Object.keys(thisFlat).length > 0 ? (
-                                            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                                                {Object.entries(thisFlat).map(([key, val]) => (
+                                            <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+                                                {fieldOrder.map((key) => {
+                                                    const val = thisFlat[key]
+                                                    if (val === undefined) return null
+                                                    return (
                                                     <span key={key} className="flex gap-2">
-                                                        <dt className="text-slate-500 shrink-0">{key.replace(/_/g, ' ')}:</dt>
-                                                        <dd className="text-slate-300 truncate min-w-0">{String(val)}</dd>
+                                                        <dt
+                                                            className={
+                                                                'shrink-0 ' +
+                                                                (changedKeys.has(key)
+                                                                    ? 'text-amber-300 font-semibold'
+                                                                    : 'text-slate-500')
+                                                            }
+                                                        >
+                                                            {prettyKey(key)}:
+                                                        </dt>
+                                                        <dd
+                                                            className={
+                                                                'truncate min-w-0 ' +
+                                                                (changedKeys.has(key)
+                                                                    ? 'text-amber-300 font-semibold'
+                                                                    : 'text-slate-300')
+                                                            }
+                                                        >
+                                                            {String(val)}
+                                                        </dd>
                                                     </span>
-                                                ))}
+                                                    )
+                                                })}
                                             </dl>
                                         ) : (
                                             <p className="text-slate-500 text-sm">No snapshot data.</p>

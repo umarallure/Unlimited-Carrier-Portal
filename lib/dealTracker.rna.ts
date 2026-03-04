@@ -5,6 +5,7 @@ import {
   fetchAllPaginated,
   bulkFetchDailyDealFlowInfo,
   normalizeNameForSearch,
+  statusFromDealValue,
 } from './dealTracker'
 
 /**
@@ -221,7 +222,7 @@ export async function processRNAFilesForDealTracker(
       deal_value: dealValue,
       cc_value: ccValue,
       notes: commission?.comments ?? null,
-      status: null,
+      status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: commission?.agent_name ?? policy.agent_name ?? null,
       writing_number: commission?.agent_id ?? policy.agent_id ?? null,
@@ -476,7 +477,7 @@ export async function processRNACommissionsForDealTracker(
       deal_value: dealValue,
       cc_value: ccValue,
       notes: comm.comments ?? null,
-      status: null,
+      status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: comm.agent_name ?? policy?.agent_name ?? null,
       writing_number: comm.agent_id ?? policy?.agent_id ?? null,

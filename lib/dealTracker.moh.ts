@@ -5,6 +5,7 @@ import {
   fetchAllPaginated,
   bulkFetchDailyDealFlowInfo,
   normalizeNameForSearch,
+  statusFromDealValue,
 } from './dealTracker'
 
 /**
@@ -224,7 +225,7 @@ export async function processMohFilesForDealTracker(
       deal_value: dealValue,
       cc_value: ccValue,
       notes: commission?.comments ?? null,
-      status: null,
+      status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: commission?.paid_producer ?? policy.wrt_agt_nme ?? null,
       writing_number: commission?.prod_num ?? policy.wrt_agt_prod_num ?? null,
@@ -453,7 +454,7 @@ export async function processMohCommissionsForDealTracker(
       deal_value: dealValue,
       cc_value: ccValue,
       notes: comm.comments ?? null,
-      status: null,
+      status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: comm.paid_producer ?? policy?.wrt_agt_nme ?? null,
       writing_number: comm.prod_num ?? policy?.wrt_agt_prod_num ?? null,

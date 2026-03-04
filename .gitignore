@@ -48,3 +48,6 @@ schema_introspect.py
 *_headers.txt
 tes.ipynb
 *.ipynb
+
+# carrier scraper auth/session artifacts
+/scripts/carrier/*.json

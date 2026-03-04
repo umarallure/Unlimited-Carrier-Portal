@@ -35,6 +35,9 @@ interface DealTrackerVerificationDialogProps {
   saveProgressLogs?: string[]
   onConfirm: (entriesToSave: DealTrackerPreviewEntry[]) => Promise<void>
   onCancel: () => void
+  /** When set to 'Commission' and onNext is provided, show "Next" instead of "Confirm & Save" to open Commission Report dialog */
+  fileType?: string
+  onNext?: () => void
 }
 
 function formatNum(val: number | null | undefined): string {
@@ -65,6 +68,8 @@ export function DealTrackerVerificationDialog({
   saveProgressLogs = [],
   onConfirm,
   onCancel,
+  fileType,
+  onNext,
 }: DealTrackerVerificationDialogProps) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -278,6 +283,7 @@ export function DealTrackerVerificationDialog({
                   <TableHead className="text-slate-200 font-semibold min-w-[120px]">Name</TableHead>
                   <TableHead className="text-slate-200 font-semibold w-28">Policy #</TableHead>
                   <TableHead className="text-slate-200 font-semibold min-w-[100px]">Policy Status</TableHead>
+                  <TableHead className="text-slate-200 font-semibold min-w-[100px]" title="Raw status from carrier file (no mapping)">Carrier Status (raw)</TableHead>
                   <TableHead className="text-slate-200 font-semibold w-24">Deal Value</TableHead>
                   <TableHead className="text-slate-200 font-semibold w-24">CC Value</TableHead>
                   <TableHead className="text-slate-200 font-semibold min-w-[100px]">Sales Agent</TableHead>
@@ -293,7 +299,7 @@ export function DealTrackerVerificationDialog({
               <TableBody>
                 {filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={14} className="text-center text-slate-500 py-8">
+                    <TableCell colSpan={15} className="text-center text-slate-500 py-8">
                       No entries match the current filter. Switch to &quot;All&quot; to see all rows.
                     </TableCell>
                   </TableRow>
@@ -342,6 +348,9 @@ export function DealTrackerVerificationDialog({
                           className="h-8 bg-slate-900 border-slate-600 text-slate-100 text-sm"
                           placeholder="-"
                         />
+                      </TableCell>
+                      <TableCell className="p-1 text-slate-300 text-sm" title="Raw status from carrier file">
+                        {entry.carrier_status ?? '-'}
                       </TableCell>
                       <TableCell className="p-1">
                         <Input
@@ -527,23 +536,33 @@ export function DealTrackerVerificationDialog({
           >
             Cancel
           </Button>
-          <Button
-            onClick={handleConfirm}
-            disabled={saving || isLoading || editableEntries.length === 0}
-            className="min-w-[140px] bg-blue-600 hover:bg-blue-700 text-white font-semibold"
-          >
-            {saving ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              <>
-                <CheckCircle className="w-4 h-4 mr-2" />
-                Confirm & Save
-              </>
-            )}
-          </Button>
+          {fileType === 'Commission' && onNext ? (
+            <Button
+              onClick={() => onNext()}
+              disabled={isLoading || editableEntries.length === 0}
+              className="min-w-[120px] bg-orange-600 hover:bg-orange-700 text-white font-semibold"
+            >
+              Next
+            </Button>
+          ) : (
+            <Button
+              onClick={handleConfirm}
+              disabled={saving || isLoading || editableEntries.length === 0}
+              className="min-w-[140px] bg-blue-600 hover:bg-blue-700 text-white font-semibold"
+            >
+              {saving ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <CheckCircle className="w-4 h-4 mr-2" />
+                  Confirm & Save
+                </>
+              )}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

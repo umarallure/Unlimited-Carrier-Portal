@@ -103,6 +103,26 @@ It fetches:
 
 **Important**: This lookup happens only once per policy. Once fetched, the `daily_deal_flow_fetched` flag is set to `true` and the data is stored in the `deal_tracker` table.
 
+## Importing existing Aetna deals from CSV
+
+If you have a CSV export of Aetna deals (e.g. from GHL or a spreadsheet) with columns matching the deal tracker (Name, Policy Number, Carrier, Deal Value, Sales Agent, Call Center, etc.), you can bulk-import into `deal_tracker`:
+
+1. **Prerequisites**: `.env.local` with Supabase credentials. At least one **Aetna** agency_carrier must exist (create it in the app if needed).
+
+2. **Run the import script** from the `admin-dashboard` folder:
+   ```bash
+   node scripts/import-aetna-deals-csv.js "D:\path\to\deals_aetna.xlsx.csv"
+   ```
+
+3. **If you have multiple Aetna agency_carriers**, the script will list their IDs and exit. Set the one you want and run again:
+   ```bash
+   set AGENCY_CARRIER_ID=<uuid-from-list>
+   node scripts/import-aetna-deals-csv.js "D:\path\to\deals_aetna.xlsx.csv"
+   ```
+   (On macOS/Linux use `export AGENCY_CARRIER_ID=...`.)
+
+4. Rows are **upserted** by `(agency_carrier_id, policy_number)`, so re-running with the same CSV updates existing rows. Rows without a Policy Number are skipped.
+
 ## Viewing Deal Tracker Entries
 
 Navigate to `/deal-tracker` to view all standardized deals with filtering and search capabilities.

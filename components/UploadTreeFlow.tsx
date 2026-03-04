@@ -25,7 +25,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
 import { fetchDailyStatus, fetchDailyFileTypes, setDailyStatus, getLocalDayRange, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import { useCommissionReportUpload } from '@/lib/useCommissionReportUpload'
 import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
+import { CommissionReportDialog } from '@/components/CommissionReportDialog'
 import { cn } from '@/lib/utils'
 
 // Custom Node Components - Professional and Simple
@@ -408,8 +410,19 @@ function calculateLayout(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: 
 
 type AgencyOption = { id: string; name: string }
 
+type LastUploadContext = {
+  agencyCarrierId: string
+  fileId: string
+  carrierCode: string
+  fileType: FileKind
+}
+
 export function UploadTreeFlow() {
   const dealTracker = useDealTrackerUpload()
+  const commissionReport = useCommissionReportUpload({
+    onAfterSave: () => dealTracker.confirmAndSave(),
+  })
+  const [lastUploadContext, setLastUploadContext] = useState<LastUploadContext | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [loading, setLoading] = useState(true)
@@ -566,6 +579,12 @@ export function UploadTreeFlow() {
                       (fileType === 'Policy' || fileType === 'Commission') &&
                       'fileId' in result
                     if (shouldProcessDealTracker) {
+                      setLastUploadContext({
+                        agencyCarrierId: ac.id,
+                        fileId: result.fileId,
+                        carrierCode: carrier.code,
+                        fileType,
+                      })
                       console.log('[UploadTreeFlow] Triggering deal tracker processing for', fileType, 'file...')
                       const dealTrackerResult = await dealTracker.processAfterUpload(
                         ac.id,
@@ -924,6 +943,35 @@ export function UploadTreeFlow() {
         entries={dealTracker.verificationEntries}
         onConfirm={dealTracker.confirmAndSave}
         onCancel={dealTracker.cancelVerification}
+        fileType={lastUploadContext?.fileType}
+        onNext={
+          lastUploadContext?.fileType === 'Commission' &&
+          (lastUploadContext?.carrierCode === 'AETNA' || lastUploadContext?.carrierCode === 'AMAM')
+            ? () => {
+                dealTracker.setShowVerification(false)
+                if (lastUploadContext)
+                  commissionReport.openCommissionReport(
+                    lastUploadContext.agencyCarrierId,
+                    lastUploadContext.fileId,
+                    lastUploadContext.carrierCode
+                  )
+              }
+            : undefined
+        }
+      />
+
+      {/* Commission Report step (after "Next" from deal tracker for AETNA/AMAM Commission) */}
+      <CommissionReportDialog
+        open={commissionReport.showCommissionReport}
+        onOpenChange={commissionReport.setShowCommissionReport}
+        rows={commissionReport.commissionRows}
+        loading={commissionReport.loading}
+        saving={commissionReport.saving}
+        carrierCode={lastUploadContext?.carrierCode ?? 'AETNA'}
+        onSave={async (editedRows) => {
+          await commissionReport.saveCommissionReport(editedRows)
+        }}
+        onCancel={commissionReport.cancelCommissionReport}
       />
     </div>
   )

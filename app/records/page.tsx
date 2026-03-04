@@ -67,6 +67,7 @@ export default function RecordsPage() {
                 { name: 'liberty_commissions', type: 'Commission', carrierCode: 'LIBERTY' },
                 { name: 'rna_policies', type: 'Policy', carrierCode: 'RNA' },
                 { name: 'rna_commissions', type: 'Commission', carrierCode: 'RNA' },
+                { name: 'deal_tracker', type: 'Deal Tracker', carrierCode: 'DEAL_TRACKER' },
             ]
 
             for (const table of tables) {
@@ -224,9 +225,9 @@ export default function RecordsPage() {
                 </div>
             </div>
 
-            {/* Type tabs: Policy or Commission (each shows its own columns) */}
+            {/* Type tabs: Policy, Commission, or Deal Tracker (each shows its own columns) */}
             <div className="flex gap-1 p-1 bg-slate-900 rounded-xl border border-slate-800 w-fit">
-                {(['Policy', 'Commission'] as const).map((type) => (
+                {(['Policy', 'Commission', 'Deal Tracker'] as const).map((type) => (
                     <button
                         key={type}
                         type="button"

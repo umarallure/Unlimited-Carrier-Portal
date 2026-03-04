@@ -5,6 +5,7 @@ import {
   fetchAllPaginated,
   bulkFetchDailyDealFlowInfo,
   normalizeNameForSearch,
+  statusFromDealValue,
 } from './dealTracker'
 
 /**
@@ -165,7 +166,7 @@ export async function processLibertyFilesForDealTracker(
       deal_value: dealValue,
       cc_value: ccValue,
       notes: null,
-      status: null,
+      status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: policy.agent ?? null,
       writing_number: null,
