@@ -21,7 +21,9 @@ import { cn } from '@/lib/utils'
 
 const MAX_FILE_SIZE_MB = 10
 const ACCEPT_TYPES = '.xlsx,.xls,.csv'
+const ACCEPT_TYPES_WITH_PDF = '.xlsx,.xls,.csv,.pdf'
 const ACCEPT_LABEL = 'CSV, XLSX, XLS'
+const ACCEPT_LABEL_WITH_PDF = 'CSV, XLSX, XLS, PDF (Corebridge Commission)'
 
 type ChartNode = {
   id: string
@@ -335,14 +337,16 @@ export function UploadTreeOrgChart() {
         setTimeout(() => setUploadMessage(null), 6000)
         
         // Process deal tracker for supported carriers (AETNA, AMAM, MOH, RNA, TRANSAMERICA, LIBERTY)
+        const upperCarrierCode = (uploadDialog.carrierCode || '').toUpperCase()
+
         console.log('[UploadTreeOrgChart] Upload successful, checking deal tracker processing...', {
-          carrierCode: uploadDialog.carrierCode,
+          carrierCode: upperCarrierCode,
           fileType: uploadDialog.fileType,
           hasFileId: 'fileId' in result,
           fileId: 'fileId' in result ? result.fileId : 'N/A',
         })
         
-        if ((uploadDialog.carrierCode === 'AETNA' || uploadDialog.carrierCode === 'AMAM' || uploadDialog.carrierCode === 'MOH' || uploadDialog.carrierCode === 'RNA' || uploadDialog.carrierCode === 'TRANSAMERICA' || uploadDialog.carrierCode === 'LIBERTY' || uploadDialog.carrierCode === 'COREBRIDGE') && (uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
+        if ((upperCarrierCode === 'AETNA' || upperCarrierCode === 'AMAM' || upperCarrierCode === 'MOH' || upperCarrierCode === 'RNA' || upperCarrierCode === 'TRANSAMERICA' || upperCarrierCode === 'LIBERTY' || upperCarrierCode === 'COREBRIDGE' || upperCarrierCode === 'AFLAC' || upperCarrierCode === 'SENTINEL') && (uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
           setLastUploadContext({
             agencyCarrierId: uploadDialog.agencyCarrierId,
             fileId: result.fileId,
@@ -463,7 +467,13 @@ export function UploadTreeOrgChart() {
             <input
               ref={fileInputRef}
               type="file"
-              accept={ACCEPT_TYPES}
+              accept={
+                (uploadDialog?.carrierCode === 'COREBRIDGE' ||
+                  uploadDialog?.carrierCode === 'SENTINEL') &&
+                uploadDialog?.fileType === 'Commission'
+                  ? ACCEPT_TYPES_WITH_PDF
+                  : ACCEPT_TYPES
+              }
               className="sr-only"
               onChange={e => setUploadingFile(e.target.files?.[0] ?? null)}
             />
@@ -492,7 +502,11 @@ export function UploadTreeOrgChart() {
               <div className="min-w-0 flex-1">
                 <p className="font-semibold text-slate-200">Drag and drop files</p>
                 <p className="mt-0.5 text-sm text-slate-400">
-                  Up to {MAX_FILE_SIZE_MB}MB per file in {ACCEPT_LABEL}.
+                  Up to {MAX_FILE_SIZE_MB}MB per file in{' '}
+                  {uploadDialog?.carrierCode === 'COREBRIDGE' && uploadDialog?.fileType === 'Commission'
+                    ? ACCEPT_LABEL_WITH_PDF
+                    : ACCEPT_LABEL}
+                  .
                 </p>
                 <button
                   type="button"
@@ -530,7 +544,9 @@ export function UploadTreeOrgChart() {
         fileType={lastUploadContext?.fileType}
         onNext={
           lastUploadContext?.fileType === 'Commission' &&
-          (lastUploadContext?.carrierCode === 'AETNA' || lastUploadContext?.carrierCode === 'AMAM')
+          ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC'].includes(
+            (lastUploadContext?.carrierCode || '').toUpperCase()
+          )
             ? () => {
                 dealTracker.setShowVerification(false)
                 if (lastUploadContext)

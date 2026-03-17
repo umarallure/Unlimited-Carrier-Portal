@@ -2,10 +2,15 @@ import { supabase } from './supabaseClient'
 import type { DealTrackerPreviewEntry } from './dealTracker'
 import {
   bulkFetchStatusMappings,
+  bulkFetchGhlStageMappings,
   fetchAllPaginated,
   bulkFetchDailyDealFlowInfo,
   normalizeNameForSearch,
   statusFromDealValue,
+  statusFromDealValueAndChargeback,
+  getChangedFieldsAndPrevious,
+  financialsUnchanged,
+  carrierStatusUnchanged,
 } from './dealTracker'
 
 /**
@@ -97,6 +102,7 @@ export async function processCorebridgeFilesForDealTracker(
   }
 
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
 
   const policiesNeedingDdf = policies.filter(p => {
     const ex = existingMap.get(p.policy_number)
@@ -129,6 +135,7 @@ export async function processCorebridgeFilesForDealTracker(
     const insuredName = buildCorebridgeInsuredName(policy)
     const originalStatus = (policy.policy_status as string) || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
 
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
@@ -145,27 +152,38 @@ export async function processCorebridgeFilesForDealTracker(
     let ccValue: number | null = dealValue != null ? (existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : dealValue / 2) : null
 
     const dealCreationDate = (policy.date_of_issue as string | undefined) || null
-    const effectiveDate =
-      effectiveDateFromDdf ||
+
+    // Effective date rule for Corebridge:
+    // - If the policy already has effective_date/date_of_issue, keep it.
+    // - Only fall back to DDF draft_date when there is no effective date present.
+    const effectiveDateExisting =
       (policy.effective_date as string | undefined) ||
       (policy.date_of_issue as string | undefined) ||
       null
+
+    const effectiveDate = effectiveDateExisting || effectiveDateFromDdf || null
+
+    const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: null,
-      ghl_stage: null,
-      policy_status: mappedStatus,
+      ghl_name: existing?.ghl_name ?? null,
+      ghl_stage: statusUnchanged
+        ? (existing?.ghl_stage ?? null)
+        : (mappedGhlStage ?? null),
+      policy_status: statusUnchanged
+        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
+        : (mappedStatus ?? originalStatus),
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
-      notes: null,
-      status: statusFromDealValue(dealValue),
+      notes: existing?.notes ?? null,
+      status: (existing && financialsUnchanged(existing, dealValue, null)) ? (existing.status ?? statusFromDealValue(dealValue)) : statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: (policy.writing_servicing_agent as string) ?? null,
       writing_number: (policy.agent_number as string) ?? null,
@@ -186,10 +204,232 @@ export async function processCorebridgeFilesForDealTracker(
       isNew: !existing,
       isUpdated: !!existing,
     }
-
+    if (existing) {
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as unknown as Record<string, unknown>, entry as unknown as Record<string, unknown>)
+      entry.changedFields = changedFields
+      entry.previousValues = previousValues
+    }
     previewEntries.push(entry)
   }
 
   console.log('[Deal Tracker] Corebridge policy processing complete. Total entries:', previewEntries.length)
+  return previewEntries
+}
+
+/**
+ * Process Corebridge commission file and create/update deal tracker entries.
+ * Mirrors Aetna/AMAM "commission-driven" update so the verification dialog appears.
+ */
+export async function processCorebridgeCommissionsForDealTracker(
+  agencyCarrierId: string,
+  fileId: string
+): Promise<DealTrackerPreviewEntry[]> {
+  console.log('[Deal Tracker] processCorebridgeCommissionsForDealTracker called', {
+    agencyCarrierId,
+    fileId,
+  })
+
+  const { data: agencyCarrier, error: acError } = await supabase
+    .from('agency_carriers')
+    .select(`
+      id,
+      carrier_id,
+      carriers (
+        id,
+        name,
+        code
+      )
+    `)
+    .eq('id', agencyCarrierId)
+    .single()
+
+  if (acError || !agencyCarrier) {
+    console.error('[Deal Tracker] Failed to fetch agency_carrier (Corebridge):', acError)
+    throw new Error(`Failed to fetch agency_carrier: ${acError?.message}`)
+  }
+
+  const carrier = agencyCarrier.carriers as any
+  const carrierName = carrier.name || 'Corebridge'
+  const carrierCode = carrier.code || 'COREBRIDGE'
+  const carrierId = carrier.id
+
+  const commissions = await fetchAllPaginated(() =>
+    supabase
+      .from('corebridge_commissions')
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .eq('file_id', fileId)
+      .order('row_number', { ascending: true })
+  )
+
+  if (!commissions || commissions.length === 0) {
+    console.warn('[Deal Tracker] No Corebridge commissions found for file_id:', fileId)
+    return []
+  }
+
+  const policyNumbers = Array.from(new Set(commissions.map((c: any) => c.policy_number).filter(Boolean)))
+  if (policyNumbers.length === 0) return []
+
+  let existingEntries: any[] = []
+  try {
+    existingEntries = await fetchAllPaginated(() =>
+      supabase
+        .from('deal_tracker')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', policyNumbers)
+        .order('id', { ascending: true })
+    )
+  } catch (e: any) {
+    console.warn('[Deal Tracker] Failed to fetch existing Corebridge deal_tracker entries:', e?.message)
+  }
+
+  const existingMap = new Map<string, any>()
+  existingEntries?.forEach((entry: any) => existingMap.set(entry.policy_number, entry))
+
+  // Aggregate commission amounts per policy (positive vs negative)
+  const latestRowByPolicy = new Map<string, any>()
+  const posMap = new Map<string, number>()
+  const negMap = new Map<string, number>()
+  for (const comm of commissions) {
+    const policyNum = comm.policy_number
+    if (!policyNum) continue
+
+    // Only use commission lines where COMM TYPE represents advances or overrides
+    // when computing deal_value/cc_value, but we still want preview rows for
+    // every policy so the verification dialog appears.
+    const rawType = (comm.comm_type ?? '').toString().toUpperCase().trim()
+    const isAdvanceType = rawType.includes('GENERICATT') && rawType.endsWith('AD')
+    const isOverrideType = rawType.includes('OVERRIDE')
+
+    const amt =
+      comm.commission_amount != null
+        ? (typeof comm.commission_amount === 'string' ? parseFloat(comm.commission_amount) : comm.commission_amount)
+        : 0
+    if (!Number.isNaN(amt) && typeof amt === 'number' && (isAdvanceType || isOverrideType)) {
+      if (amt > 0) posMap.set(policyNum, (posMap.get(policyNum) || 0) + amt)
+      else if (amt < 0) negMap.set(policyNum, (negMap.get(policyNum) || 0) + amt)
+    }
+
+    if (!latestRowByPolicy.has(policyNum)) latestRowByPolicy.set(policyNum, comm)
+  }
+
+  const previewEntries: DealTrackerPreviewEntry[] = []
+
+  for (const [policyNum, latest] of latestRowByPolicy.entries()) {
+    const existing = existingMap.get(policyNum)
+    const insuredName = (latest.insured_name ?? '').toString().trim() || null
+    const salesAgent = (latest.agent_code ?? '').toString().trim() || null
+    const statementDate = (latest.statement_date ?? '').toString().trim() || null
+
+    const pos = posMap.get(policyNum) ?? 0
+    const neg = negMap.get(policyNum) ?? 0
+
+    // Mirror Aetna/AMAM rules:
+    // - deal_value is driven by summed POSITIVE commission amounts.
+    // - If there is no positive amount in this batch but an existing deal_value
+    //   already exists, we KEEP the existing deal_value instead of nulling it
+    //   out or letting negatives flip it.
+    // - Negative amounts are treated as chargebacks and accumulated on top of
+    //   any existing charge_back.
+    const positiveAmount = pos > 0 ? pos : null
+    const batchChargeBack = neg < 0 ? neg : null
+
+    let dealValue: number | null
+    if (positiveAmount != null && positiveAmount > 0) {
+      dealValue = positiveAmount
+    } else if (existing && existing.deal_value != null) {
+      dealValue =
+        typeof existing.deal_value === 'number'
+          ? existing.deal_value
+          : parseFloat(String(existing.deal_value))
+    } else {
+      dealValue = null
+    }
+
+    const existingCbRaw =
+      existing && (existing as any).charge_back != null
+        ? (typeof (existing as any).charge_back === 'number'
+            ? (existing as any).charge_back
+            : parseFloat(String((existing as any).charge_back)))
+        : null
+
+    let effectiveChargeBack: number | null = null
+    if (batchChargeBack != null) {
+      if (existingCbRaw != null && !Number.isNaN(existingCbRaw)) {
+        effectiveChargeBack = existingCbRaw + batchChargeBack
+      } else {
+        effectiveChargeBack = batchChargeBack
+      }
+    } else if (existingCbRaw != null && !Number.isNaN(existingCbRaw)) {
+      effectiveChargeBack = existingCbRaw
+    }
+
+    let ccValue: number | null =
+      dealValue != null && !Number.isNaN(dealValue) ? dealValue / 2 : null
+
+    if (Number.isNaN(ccValue as number)) ccValue = null
+
+    const derivedStatus = statusFromDealValueAndChargeback(dealValue, effectiveChargeBack)
+    const statusForEntry =
+      existing && financialsUnchanged(existing, dealValue, effectiveChargeBack)
+        ? (existing.status ?? derivedStatus)
+        : derivedStatus
+
+    const nameForEntry = existing?.name ?? insuredName
+    const salesAgentForEntry =
+      existing?.sales_agent && existing.sales_agent.toString().trim()
+        ? existing.sales_agent
+        : salesAgent
+
+    const entry: DealTrackerPreviewEntry = {
+      agency_carrier_id: agencyCarrierId,
+      // For commissions, never overwrite existing name from policy/deal_tracker.
+      name: nameForEntry ?? null,
+      tasks: existing?.tasks ?? null,
+      ghl_name: existing?.ghl_name ?? null,
+      ghl_stage: existing?.ghl_stage ?? null,
+      policy_status: existing?.policy_status ?? null,
+      deal_creation_date: existing?.deal_creation_date ?? statementDate,
+      policy_number: policyNum,
+      carrier: carrierName,
+      carrier_id: carrierId,
+      deal_value: dealValue,
+      cc_value: ccValue,
+      notes: existing?.notes ?? null,
+      // Status follows standard rules from deal value + chargeback; do not
+      // overwrite when financials are unchanged.
+      status: statusForEntry,
+      last_updated: new Date().toISOString(),
+      sales_agent: salesAgentForEntry ?? null,
+      writing_number: existing?.writing_number ?? null,
+      commission_type: latest.comm_type ?? null,
+      effective_date: existing?.effective_date ?? statementDate,
+      call_center: existing?.call_center ?? null,
+      phone_number: existing?.phone_number ?? null,
+      cc_pmt_ws: positiveAmount ?? (existing?.cc_pmt_ws ?? null),
+      cc_cb_ws: effectiveChargeBack ?? (existing?.cc_cb_ws ?? null),
+      carrier_status: existing?.carrier_status ?? null,
+      policy_type: existing?.policy_type ?? null,
+      daily_deal_flow_fetched: existing?.daily_deal_flow_fetched ?? false,
+      daily_deal_flow_fetched_at: existing?.daily_deal_flow_fetched_at ?? null,
+      source_policy_table: existing?.source_policy_table ?? null,
+      source_policy_id: existing?.source_policy_id ?? null,
+      source_commission_table: 'corebridge_commissions',
+      source_commission_id: latest.id ?? null,
+      isNew: !existing,
+      isUpdated: !!existing,
+    }
+
+    if (existing) {
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as unknown as Record<string, unknown>, entry as unknown as Record<string, unknown>)
+      entry.changedFields = changedFields
+      entry.previousValues = previousValues
+    }
+
+    previewEntries.push(entry)
+  }
+
+  console.log('[Deal Tracker] Corebridge commission processing complete. Total entries:', previewEntries.length)
   return previewEntries
 }

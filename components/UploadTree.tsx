@@ -9,12 +9,17 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
 import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import { useCommissionReportUpload } from '@/lib/useCommissionReportUpload'
 import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
+import { CommissionReportDialog } from '@/components/CommissionReportDialog'
 import { fetchDailyStatus, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { cn } from '@/lib/utils'
 
 export function UploadTree() {
   const dealTracker = useDealTrackerUpload()
+  const commissionReport = useCommissionReportUpload({
+    onAfterSave: () => dealTracker.confirmAndSave(),
+  })
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -24,6 +29,12 @@ export function UploadTree() {
   })
   const [uploadingStates, setUploadingStates] = useState<Record<string, { uploading: boolean; message?: { type: 'success' | 'error'; text: string } }>>({})
   const [dailyStatusMap, setDailyStatusMap] = useState<Record<string, DailyStatus>>({})
+  const [lastUploadContext, setLastUploadContext] = useState<{
+    agencyCarrierId: string
+    fileId: string
+    carrierCode: string
+    fileType: FileKind
+  } | null>(null)
 
   useEffect(() => {
     loadTreeData()
@@ -181,14 +192,29 @@ export function UploadTree() {
           fileId: 'fileId' in result ? result.fileId : 'N/A',
         })
         
-        if ((carrierCode === 'AETNA' || carrierCode === 'AMAM' || carrierCode === 'MOH' || carrierCode === 'RNA' || carrierCode === 'TRANSAMERICA' || carrierCode === 'LIBERTY' || carrierCode === 'COREBRIDGE') && (fileType === 'Policy' || fileType === 'Commission') && 'fileId' in result) {
+        const upperCarrierCode = (carrierCode || '').toUpperCase()
+
+        if (
+          (upperCarrierCode === 'AETNA' ||
+            upperCarrierCode === 'AMAM' ||
+            upperCarrierCode === 'MOH' ||
+            upperCarrierCode === 'RNA' ||
+            upperCarrierCode === 'TRANSAMERICA' ||
+            upperCarrierCode === 'LIBERTY' ||
+            upperCarrierCode === 'COREBRIDGE' ||
+            upperCarrierCode === 'AFLAC' ||
+            upperCarrierCode === 'SENTINEL') &&
+          (fileType === 'Policy' || fileType === 'Commission') &&
+          'fileId' in result
+        ) {
           console.log('[UploadTree] Triggering deal tracker processing for', fileType, 'file...')
-          await dealTracker.processAfterUpload(
+          setLastUploadContext({
             agencyCarrierId,
-            result.fileId,
+            fileId: result.fileId,
             carrierCode,
-            fileType
-          )
+            fileType,
+          })
+          await dealTracker.processAfterUpload(agencyCarrierId, result.fileId, carrierCode, fileType)
         }
         
         await loadDailyStatuses() // Refresh – carrier shows green only when both Policy and Commission uploaded
@@ -303,6 +329,38 @@ export function UploadTree() {
         saveProgressLogs={dealTracker.saveProgressLogs}
         onConfirm={dealTracker.confirmAndSave}
         onCancel={dealTracker.cancelVerification}
+        fileType={lastUploadContext?.fileType}
+        onNext={
+          lastUploadContext?.fileType === 'Commission' &&
+          ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC'].includes(
+            (lastUploadContext?.carrierCode || '').toUpperCase()
+          )
+            ? () => {
+                dealTracker.setShowVerification(false)
+                if (lastUploadContext) {
+                  commissionReport.openCommissionReport(
+                    lastUploadContext.agencyCarrierId,
+                    lastUploadContext.fileId,
+                    lastUploadContext.carrierCode
+                  )
+                }
+              }
+            : undefined
+        }
+      />
+
+      {/* Commission Report Dialog (Commission Tracker) */}
+      <CommissionReportDialog
+        open={commissionReport.showCommissionReport}
+        onOpenChange={commissionReport.setShowCommissionReport}
+        rows={commissionReport.commissionRows}
+        loading={commissionReport.loading}
+        saving={commissionReport.saving}
+        carrierCode={lastUploadContext?.carrierCode ?? 'AETNA'}
+        onSave={async (editedRows) => {
+          await commissionReport.saveCommissionReport(editedRows)
+        }}
+        onCancel={commissionReport.cancelCommissionReport}
       />
     </div>
   )
@@ -391,7 +449,7 @@ function CustomUploadTree({ nodes, defaultExpanded = [], uploadDate, uploadingSt
                   <Label className="text-xs text-slate-400 mb-1.5 block">Select File (CSV or Excel)</Label>
                   <Input
                     type="file"
-                    accept=".csv,.xlsx,.xls"
+                    accept=".csv,.xlsx,.xls,.pdf"
                     onChange={(e) => {
                       const selectedFile = e.target.files?.[0]
                       if (selectedFile && uploadKey) {

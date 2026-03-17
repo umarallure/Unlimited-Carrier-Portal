@@ -2,10 +2,14 @@ import { supabase } from './supabaseClient'
 import type { DealTrackerPreviewEntry } from './dealTracker'
 import {
   bulkFetchStatusMappings,
+  bulkFetchGhlStageMappings,
   fetchAllPaginated,
   bulkFetchDailyDealFlowInfo,
   normalizeNameForSearch,
   statusFromDealValue,
+  getChangedFieldsAndPrevious,
+  financialsUnchanged,
+  carrierStatusUnchanged,
 } from './dealTracker'
 
 /**
@@ -99,6 +103,7 @@ export async function processTransamericaFilesForDealTracker(
   }
 
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
 
   const policiesNeedingDdf = policies.filter(p => {
     const ex = existingMap.get(p.policy_number)
@@ -124,6 +129,7 @@ export async function processTransamericaFilesForDealTracker(
     const insuredName = buildTransamericaInsuredName(policy)
     const originalStatus = policy.status || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
 
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
@@ -147,21 +153,27 @@ export async function processTransamericaFilesForDealTracker(
       (policy.issue_date as string | undefined) ||
       null
 
+    const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: null,
-      ghl_stage: null,
-      policy_status: mappedStatus,
+      ghl_name: existing?.ghl_name ?? null,
+      ghl_stage: statusUnchanged
+        ? (existing?.ghl_stage ?? null)
+        : (mappedGhlStage ?? null),
+      policy_status: statusUnchanged
+        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
+        : (mappedStatus ?? originalStatus),
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
-      notes: null,
-      status: statusFromDealValue(dealValue),
+      notes: existing?.notes ?? null,
+      status: (existing && financialsUnchanged(existing, dealValue, null)) ? (existing.status ?? statusFromDealValue(dealValue)) : statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: null,
       writing_number: null,
@@ -182,7 +194,14 @@ export async function processTransamericaFilesForDealTracker(
       isNew: !existing,
       isUpdated: !!existing,
     }
-
+    if (existing) {
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(
+        existing as unknown as Record<string, unknown>,
+        entry as unknown as Record<string, unknown>
+      )
+      entry.changedFields = changedFields
+      entry.previousValues = previousValues
+    }
     previewEntries.push(entry)
   }
 

@@ -23,8 +23,11 @@ import {
 } from './dealTracker.rna'
 import { processTransamericaFilesForDealTracker } from './dealTracker.transamerica'
 import { processLibertyFilesForDealTracker } from './dealTracker.liberty'
-import { processCorebridgeFilesForDealTracker } from './dealTracker.corebridge'
+import { processCorebridgeCommissionsForDealTracker, processCorebridgeFilesForDealTracker } from './dealTracker.corebridge'
+import { processSentinelFilesForDealTracker, processSentinelCommissionsForDealTracker } from './dealTracker.sentinel'
+import { processAflacFilesForDealTracker, processAflacCommissionsForDealTracker } from './dealTracker.aflac'
 import { supabase } from './supabaseClient'
+import { syncCommissionTrackerForAgencyCarrier } from './commissionTracker'
 
 /** Payload for deferred deal-tracker flow (in-memory rows + target table + file id). Not used in current upload workflow. */
 export interface PendingRowsPayload {
@@ -59,14 +62,17 @@ export async function processDealTrackerAfterUpload(
     hasPendingRows: !!pendingRows,
   })
 
-  const isAetna = carrierCode === 'AETNA'
-  const isAmam = carrierCode === 'AMAM'
-  const isMoh = carrierCode === 'MOH'
-  const isRNA = carrierCode === 'RNA'
-  const isTransamerica = carrierCode === 'TRANSAMERICA'
-  const isLiberty = carrierCode === 'LIBERTY'
-  const isCorebridge = carrierCode === 'COREBRIDGE'
-  if (!isAetna && !isAmam && !isMoh && !isRNA && !isTransamerica && !isLiberty && !isCorebridge) {
+  const upperCode = (carrierCode || '').toUpperCase()
+  const isAetna = upperCode === 'AETNA'
+  const isAmam = upperCode === 'AMAM'
+  const isMoh = upperCode === 'MOH'
+  const isRNA = upperCode === 'RNA'
+  const isTransamerica = upperCode === 'TRANSAMERICA'
+  const isLiberty = upperCode === 'LIBERTY'
+  const isCorebridge = upperCode === 'COREBRIDGE'
+  const isAflac = upperCode === 'AFLAC'
+  const isSentinel = upperCode === 'SENTINEL'
+  if (!isAetna && !isAmam && !isMoh && !isRNA && !isTransamerica && !isLiberty && !isCorebridge && !isAflac && !isSentinel) {
     console.log('[Deal Tracker] Skipping - carrier not supported for deal tracker:', carrierCode)
     return { success: true }
   }
@@ -82,6 +88,9 @@ export async function processDealTrackerAfterUpload(
       if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing Aetna commission file for deal tracker...')
         previewEntries = await processAetnaCommissionsForDealTracker(agencyCarrierId, fileId)
+        // Also normalize into commission_tracker so the commission report table
+        // stays consistent with the rest of the system.
+        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
       } else {
         console.log('[Deal Tracker] Processing Aetna policy file for deal tracker...')
         previewEntries = await processAetnaFilesForDealTracker(agencyCarrierId, fileId)
@@ -99,6 +108,7 @@ export async function processDealTrackerAfterUpload(
         if (fileType === 'Commission') {
           console.log('[Deal Tracker] Processing AMAM commission file for deal tracker...')
           previewEntries = await processAmamCommissionsForDealTracker(agencyCarrierId, fileId)
+          await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
         } else {
           console.log('[Deal Tracker] Processing AMAM policy file for deal tracker...')
           previewEntries = await processAmamFilesForDealTracker(agencyCarrierId, fileId)
@@ -135,8 +145,28 @@ export async function processDealTrackerAfterUpload(
       if (fileType === 'Policy') {
         console.log('[Deal Tracker] Processing Corebridge policy file for deal tracker...')
         previewEntries = await processCorebridgeFilesForDealTracker(agencyCarrierId, fileId)
+      } else if (fileType === 'Commission') {
+        console.log('[Deal Tracker] Processing Corebridge commission file for deal tracker...')
+        previewEntries = await processCorebridgeCommissionsForDealTracker(agencyCarrierId, fileId)
+        console.log('[Deal Tracker] Syncing commission_tracker for Corebridge...')
+        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
       }
-      // Corebridge commission not wired for deal tracker yet
+    } else if (isAflac) {
+      if (fileType === 'Policy') {
+        console.log('[Deal Tracker] Processing AFLAC policy file for deal tracker...')
+        previewEntries = await processAflacFilesForDealTracker(agencyCarrierId, fileId)
+      } else if (fileType === 'Commission') {
+        console.log('[Deal Tracker] Processing AFLAC commission file for deal tracker...')
+        previewEntries = await processAflacCommissionsForDealTracker(agencyCarrierId, fileId)
+      }
+    } else if (isSentinel) {
+      if (fileType === 'Policy') {
+        console.log('[Deal Tracker] Processing Sentinel policy file for deal tracker...')
+        previewEntries = await processSentinelFilesForDealTracker(agencyCarrierId, fileId)
+      } else if (fileType === 'Commission') {
+        console.log('[Deal Tracker] Processing Sentinel commission file for deal tracker...')
+        previewEntries = await processSentinelCommissionsForDealTracker(agencyCarrierId, fileId)
+      }
     }
 
     console.log('[Deal Tracker] Processing complete', {

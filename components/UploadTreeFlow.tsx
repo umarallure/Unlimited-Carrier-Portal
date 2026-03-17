@@ -209,7 +209,7 @@ function UploadNode({ data }: { data: any }) {
       <input
         id={`file-input-${data.id}`}
         type="file"
-        accept=".csv,.xlsx,.xls"
+        accept=".csv,.xlsx,.xls,.pdf"
         onChange={handleFileChange}
         className="hidden"
       />
@@ -946,7 +946,10 @@ export function UploadTreeFlow() {
         fileType={lastUploadContext?.fileType}
         onNext={
           lastUploadContext?.fileType === 'Commission' &&
-          (lastUploadContext?.carrierCode === 'AETNA' || lastUploadContext?.carrierCode === 'AMAM')
+          (lastUploadContext?.carrierCode === 'AETNA' ||
+            lastUploadContext?.carrierCode === 'AMAM' ||
+            lastUploadContext?.carrierCode === 'MOH' ||
+            lastUploadContext?.carrierCode === 'COREBRIDGE')
             ? () => {
                 dealTracker.setShowVerification(false)
                 if (lastUploadContext)

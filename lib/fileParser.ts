@@ -55,6 +55,28 @@ export function detectPolicyNumberColumn(headers: string[]): string | null {
 }
 
 /**
+ * Normalize Excel-style "formula" wrappers that appear in CSV exports, e.g.:
+ *   ="0001129844" or =("0001129844")
+ * so downstream logic just sees the plain textual value.
+ */
+function normalizeExcelWrappedString(value: any): any {
+    if (typeof value !== 'string') return value;
+    let s = value.trim();
+
+    // Pattern 1: ="0001129844"
+    if (s.startsWith('="') && s.endsWith('"')) {
+        return s.slice(2, -1);
+    }
+
+    // Pattern 2: =("0001129844")
+    if (s.startsWith('=("') && s.endsWith('")')) {
+        return s.slice(3, -2);
+    }
+
+    return s;
+}
+
+/**
  * Parse CSV file and extract records
  */
 export async function parseCSV(file: File): Promise<ParseResult> {
@@ -104,7 +126,9 @@ export async function parseCSV(file: File): Promise<ParseResult> {
                         // Skip empty rows or rows that don't have enough columns
                         if (!row || row.length <= policyColumnIndex) continue;
 
-                        const policyNumber = String(row[policyColumnIndex] || '').trim();
+                        const policyNumber = String(
+                            normalizeExcelWrappedString(row[policyColumnIndex] || '')
+                        ).trim();
 
                         if (policyNumber) {
                             // Map row data to header names
@@ -112,10 +136,8 @@ export async function parseCSV(file: File): Promise<ParseResult> {
                             headers.forEach((header, index) => {
                                 if (index < row.length) {
                                     let value = row[index];
-                                    // Remove Excel formula indicators
-                                    if (typeof value === 'string' && value.startsWith('="') && value.endsWith('"')) {
-                                        value = value.slice(2, -1);
-                                    }
+                                    // Remove Excel-style wrappers like ="000" or =("000")
+                                    value = normalizeExcelWrappedString(value);
                                     if (header) { // Only add if header is not empty
                                         rowData[header] = value;
                                     }

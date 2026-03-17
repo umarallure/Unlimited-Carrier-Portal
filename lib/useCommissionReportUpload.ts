@@ -73,24 +73,32 @@ function dbRowToDisplay(
   carrierCode: string,
   dealTrackerMap?: Map<string, DealTrackerRow>
 ): CommissionDisplayRow {
+  // For Corebridge, we intentionally do NOT take the name from the
+  // commission file. We always prefer the policy/deal_tracker name so
+  // commissions only influence deal value, cc value and status.
   let name =
-    row.client ?? row.insured_name ?? row.INSURED_NAME ?? row['Name'] ?? ''
+    carrierCode === 'COREBRIDGE'
+      ? ''
+      : row.client ?? row.insured_name ?? row.insureds_name ?? row.INSURED_NAME ?? row['Name'] ?? ''
   let salesAgent =
-    row.writingagentname ?? row.writingagent ?? row['Sales Agent'] ?? ''
+    row.writingagentname ?? row.writingagent ?? row.paid_producer ?? row['Sales Agent'] ?? ''
   const policyNumber = String(row.policy_number ?? '')
   const dt = dealTrackerMap?.get(policyNumber)
   if (dt) {
     if (!name?.toString().trim()) name = dt.name ?? ''
-    // For AMAM, commission file often has only agent number; prefer deal_tracker name when current value is number-only
     const useDtSalesAgent =
       !salesAgent?.toString().trim() ||
-      (carrierCode === 'AMAM' && looksLikeNumberOnly(salesAgent) && dt.sales_agent?.toString().trim())
+      (carrierCode === 'AMAM' && looksLikeNumberOnly(salesAgent) && dt.sales_agent?.toString().trim()) ||
+      (carrierCode === 'MOH' && looksLikeNumberOnly(salesAgent) && dt.sales_agent?.toString().trim())
     if (useDtSalesAgent && dt.sales_agent?.toString().trim()) salesAgent = dt.sales_agent
   }
   const dateRaw =
-    row.commissionpaiddate ?? row.statement_date ?? row.effectivedate ?? row.appdate ?? row['Date'] ?? ''
-  const rate = row.rate_pct ?? row.com_rate ?? row.adv_rate ?? row['Commission Rate'] ?? ''
-  const rawAdvanceVal = row.commissionamount ?? row.advance ?? row['Advance']
+    row.commissionpaiddate ?? row.statement_date ?? row.activity_date ?? row.issue_date ?? row.effectivedate ?? row.appdate ?? row['Date'] ?? ''
+  const rate = row.rate_pct ?? row.com_rate ?? row.adv_rate ?? row.comm_pct ?? row['Commission Rate'] ?? ''
+  const rawAdvanceVal =
+    carrierCode === 'COREBRIDGE'
+      ? (row.commission_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
+      : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
   let advance = rawAdvanceVal != null && rawAdvanceVal !== '' ? String(rawAdvanceVal) : ''
   let chargeBack = ''
 
@@ -102,13 +110,14 @@ function dbRowToDisplay(
     advance = ''
     chargeBack = String(parsedAdvance.toFixed(2))
   }
-  const carrierLabel = carrierCode === 'AMAM' ? 'AMAM' : 'Aetna'
+  const carrierLabel = carrierCode === 'AMAM' ? 'AMAM' : carrierCode === 'MOH' ? 'MOH' : 'Aetna'
+  const effectiveCarrierLabel = carrierCode === 'COREBRIDGE' ? 'Corebridge' : carrierLabel
   return {
     id: row.id,
     name: String(name ?? ''),
     date: toDateInputValue(dateRaw),
     policy_number: policyNumber,
-    carrier: row.__carrier ?? carrierLabel,
+    carrier: row.__carrier ?? effectiveCarrierLabel,
     sales_agent: String(salesAgent ?? ''),
     commission_rate: rate != null && rate !== '' ? String(rate) : '',
     advance,
@@ -125,14 +134,14 @@ function displayToDbRow(
   dealTrackerRow?: DealTrackerRow | null
 ): Record<string, unknown> {
   const raw = (display._raw || {}) as Record<string, unknown>
-  let name = display.name || (raw.client as string) || (raw.insured_name as string)
-  let salesAgent = display.sales_agent || (raw.writingagentname as string) || (raw.writingagent as string)
+  let name = display.name || (raw.client as string) || (raw.insured_name as string) || (raw.insureds_name as string)
+  let salesAgent = display.sales_agent || (raw.writingagentname as string) || (raw.writingagent as string) || (raw.paid_producer as string)
   if (dealTrackerRow) {
     if (!name?.toString().trim() && dealTrackerRow.name?.toString().trim()) name = dealTrackerRow.name
-    // Prefer deal_tracker name when empty or (for AMAM) when current value is only a number
     const useDtSalesAgent =
       !salesAgent?.toString().trim() ||
-      (carrierCode === 'AMAM' && looksLikeNumberOnly(salesAgent) && dealTrackerRow.sales_agent?.toString().trim())
+      (carrierCode === 'AMAM' && looksLikeNumberOnly(salesAgent) && dealTrackerRow.sales_agent?.toString().trim()) ||
+      (carrierCode === 'MOH' && looksLikeNumberOnly(salesAgent) && dealTrackerRow.sales_agent?.toString().trim())
     if (useDtSalesAgent && dealTrackerRow.sales_agent?.toString().trim()) salesAgent = dealTrackerRow.sales_agent
   }
   const base = {
@@ -142,19 +151,48 @@ function displayToDbRow(
     policy_number: display.policy_number || (raw.policy_number as string),
   } as Record<string, unknown>
 
-  if (carrierCode === 'AETNA') {
+  if (carrierCode === 'AETNA' || carrierCode === 'AFLAC') {
     base.client = name
     base.writingagentname = salesAgent
     base.rate_pct = display.commission_rate || (raw.rate_pct as string)
     const advNum = display.advance ? parseFloat(String(display.advance).replace(/,/g, '')) : NaN
-    // Only update commissionamount when advance is positive; otherwise preserve existing value
     if (!Number.isNaN(advNum) && advNum > 0) {
       base.commissionamount = advNum
     } else {
       base.commissionamount = raw.commissionamount as number
     }
-    // Charge Back is a derived/display-only field from negative commissionamount; we don't persist a separate column.
     if (display.date) base.commissionpaiddate = display.date
+  } else if (carrierCode === 'MOH') {
+    base.insureds_name = name
+    // Do not overwrite MOH sales agent here; it is already maintained from the policy upload.
+    if (display.commission_rate != null && display.commission_rate !== '') {
+      const rateNum = parseFloat(String(display.commission_rate).replace(/,/g, ''))
+      if (!Number.isNaN(rateNum)) base.comm_pct = rateNum
+    }
+    const advNum = display.advance ? parseFloat(String(display.advance).replace(/,/g, '')) : NaN
+    const cbNum = display.charge_back ? parseFloat(String(display.charge_back).replace(/,/g, '')) : NaN
+    if (!Number.isNaN(advNum) && advNum > 0) {
+      base.comm_amt = advNum
+    } else if (!Number.isNaN(cbNum) && cbNum < 0) {
+      base.comm_amt = cbNum
+    } else {
+      base.comm_amt = (raw.comm_amt as number) ?? (raw.adv_comm as number)
+    }
+    if (display.date) base.activity_date = display.date
+  } else if (carrierCode === 'COREBRIDGE') {
+    base.insured_name = name
+    base.agent_code = salesAgent
+    if (display.commission_rate != null && display.commission_rate !== '') {
+      const rateNum = parseFloat(String(display.commission_rate).replace(/,/g, ''))
+      if (!Number.isNaN(rateNum)) base.commission_rate = rateNum
+    }
+    // For Corebridge: "Advance" field in dialog maps to commission_amount (COMM ACTIVITY).
+    // Keep advance_balance as parsed OUTSTANDING ADV BALANCE from the PDF unless user edits raw.
+    const advNum = display.advance ? parseFloat(String(display.advance).replace(/,/g, '')) : NaN
+    const cbNum = display.charge_back ? parseFloat(String(display.charge_back).replace(/,/g, '')) : NaN
+    if (!Number.isNaN(advNum) && advNum > 0) base.commission_amount = advNum
+    else if (!Number.isNaN(cbNum) && cbNum < 0) base.commission_amount = cbNum
+    if (display.date) base.statement_date = display.date
   } else {
     base.insured_name = name
     base.writingagent = salesAgent
@@ -178,14 +216,29 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
 
   const openCommissionReport = useCallback(
     async (agencyCarrierId: string, fileId: string, carrierCode: string) => {
-      if (carrierCode !== 'AETNA' && carrierCode !== 'AMAM') return
+      if (
+        carrierCode !== 'AETNA' &&
+        carrierCode !== 'AMAM' &&
+        carrierCode !== 'MOH' &&
+        carrierCode !== 'COREBRIDGE' &&
+        carrierCode !== 'AFLAC'
+      )
+        return
       setContext({ agencyCarrierId, fileId, carrierCode })
       setLoading(true)
       setShowCommissionReport(true)
       setCommissionRows([])
       try {
         const table =
-          carrierCode === 'AMAM' ? 'amam_commissions' : 'aetna_commissions'
+          carrierCode === 'AMAM'
+            ? 'amam_commissions'
+            : carrierCode === 'MOH'
+              ? 'moh_commissions'
+              : carrierCode === 'COREBRIDGE'
+                ? 'corebridge_commissions'
+                : carrierCode === 'AFLAC'
+                  ? 'aflac_commissions'
+                  : 'aetna_commissions'
         const { data, error } = await supabase
           .from(table)
           .select('*')
@@ -217,7 +270,15 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
       if (!context || editedRows.length === 0) return
       const { agencyCarrierId, fileId, carrierCode } = context
       const table =
-        carrierCode === 'AMAM' ? 'amam_commissions' : 'aetna_commissions'
+        carrierCode === 'AMAM'
+          ? 'amam_commissions'
+          : carrierCode === 'MOH'
+            ? 'moh_commissions'
+            : carrierCode === 'COREBRIDGE'
+              ? 'corebridge_commissions'
+              : carrierCode === 'AFLAC'
+                ? 'aflac_commissions'
+                : 'aetna_commissions'
       setSaving(true)
       try {
         const policyNumbers = editedRows.map((r) => r.policy_number).filter(Boolean)
@@ -234,16 +295,13 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         const now = new Date().toISOString()
         const chunk = dbRows.map((row) => {
           const r = { ...row, updated_at: now }
-          delete (r as any).id
           delete (r as any).created_at
           return r
         })
+        const upsertOptions = { onConflict: 'id', ignoreDuplicates: false }
         const { error } = await supabase
           .from(table)
-          .upsert(chunk, {
-            onConflict: 'agency_carrier_id,policy_number',
-            ignoreDuplicates: false,
-          })
+          .upsert(chunk, upsertOptions)
         if (error) throw error
         setShowCommissionReport(false)
         setCommissionRows([])

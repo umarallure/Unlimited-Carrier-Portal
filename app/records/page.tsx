@@ -68,6 +68,8 @@ export default function RecordsPage() {
                 { name: 'rna_policies', type: 'Policy', carrierCode: 'RNA' },
                 { name: 'rna_commissions', type: 'Commission', carrierCode: 'RNA' },
                 { name: 'deal_tracker', type: 'Deal Tracker', carrierCode: 'DEAL_TRACKER' },
+                // Aggregated commission entries across carriers; uses agency_carrier/carrier for the filter & grouping
+                { name: 'commission_tracker', type: 'Commission', carrierCode: 'COMMISSION_TRACKER' },
             ]
 
             for (const table of tables) {

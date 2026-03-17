@@ -51,3 +51,6 @@ tes.ipynb
 
 # carrier scraper auth/session artifacts
 /scripts/carrier/*.json
+# local persistent browser profile (cookies/session)
+/carrier-browser-profile
+carrier-downloads/

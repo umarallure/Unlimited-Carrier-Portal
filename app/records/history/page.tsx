@@ -4,6 +4,7 @@ import { useState, useEffect, use } from 'react'
 import Link from 'next/link'
 import { supabase } from '@/lib/supabaseClient'
 import { Button } from '@/components/ui/button'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { History, ArrowLeft, Loader2 } from 'lucide-react'
 
 const EXCLUDE_KEYS = [
@@ -39,6 +40,9 @@ const IMPORTANT_KEYS = [
   'deal_value',
   'cc_value',
   'charge_back',
+  'advance_amount',
+  'charge_back_amount',
+  'commission_rate',
   'effective_date',
   'deal_creation_date',
   'sales_agent',
@@ -53,6 +57,7 @@ const DISPLAY_KEYS = [
     'name',
     'carrier',
     'policy_number',
+    // Deal tracker date/value fields
     'deal_creation_date',
     'effective_date',
     'policy_status',
@@ -61,6 +66,11 @@ const DISPLAY_KEYS = [
     'deal_value',
     'cc_value',
     'charge_back',
+    // Commission tracker value fields
+    'date',
+    'commission_rate',
+    'advance_amount',
+    'charge_back_amount',
     'call_center',
     'phone_number',
     'sales_agent',
@@ -86,6 +96,14 @@ const LABELS: Record<string, string> = {
   phone_number: 'Phone Number',
   name: 'Name',
   policy_number: 'Policy Number',
+  carrier: 'Carrier',
+  date: 'Date',
+  advance_amount: 'Advance',
+  charge_back_amount: 'Charge Back',
+  commission_rate: 'Commission Rate',
+  policy_type: 'Policy Type',
+  ghl_stage: 'GHL Stage',
+  ghl_name: 'GHL Name',
 }
 
 function prettyKey(key: string) {
@@ -123,6 +141,8 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
     const [record, setRecord] = useState<any>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [expandedCurrent, setExpandedCurrent] = useState(false)
+    const [expandedTimeline, setExpandedTimeline] = useState<Record<number, boolean>>({})
 
     useEffect(() => {
         if (!tableName || !recordId) {
@@ -217,189 +237,219 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                 </div>
             </div>
 
-            {/* Journey timeline: vertical line + cards */}
-            <div className="relative pl-6 md:pl-8">
-                {/* Vertical line */}
-                <div className="absolute left-[11px] md:left-[15px] top-0 bottom-0 w-0.5 bg-slate-700 rounded-full" aria-hidden />
+            <Tabs defaultValue="summary" className="space-y-4">
+                <TabsList className="bg-slate-900 border border-slate-700">
+                    <TabsTrigger value="summary" className="data-[state=active]:bg-slate-800 data-[state=active]:text-white">
+                        Summary
+                    </TabsTrigger>
+                    <TabsTrigger value="timeline" className="data-[state=active]:bg-slate-800 data-[state=active]:text-white">
+                        Timeline
+                    </TabsTrigger>
+                </TabsList>
 
-                <div className="space-y-6 pb-8">
-                    {/* Current (first step) */}
-                    <div className="relative flex gap-4">
+                <TabsContent value="summary" className="space-y-4">
+                    {/* Single "What changed" summary at top — one place to see all differences */}
+                    {prevFlats.length > 0 && (() => {
+                        const d = currentDiff
+                        const changedRows = d.changed.map(([key, oldVal, newVal]) => ({ key, before: oldVal, after: newVal }))
+                        const addedRows = d.added.map(([key, val]) => ({ key, before: '—', after: val }))
+                        const removedRows = d.removed.map(([key, val]) => ({ key, before: val, after: '—' }))
+                        const allRows = [...changedRows, ...addedRows, ...removedRows].filter(({ key }) => DISPLAY_KEYS.includes(key) || IMPORTANT_KEYS.includes(key))
+                        if (allRows.length === 0) return null
+                        return (
+                            <div className="rounded-xl border border-slate-600 bg-slate-800/60 overflow-hidden">
+                                <div className="px-4 py-3 border-b border-slate-600 bg-slate-800">
+                                    <h2 className="text-sm font-semibold text-white">What changed in this update</h2>
+                                    <p className="text-xs text-slate-400 mt-0.5">Before → After (current version)</p>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead>
+                                            <tr className="border-b border-slate-600">
+                                                <th className="text-left py-2.5 px-4 font-medium text-slate-400">Field</th>
+                                                <th className="text-left py-2.5 px-4 font-medium text-slate-400 w-[40%]">Before</th>
+                                                <th className="text-left py-2.5 px-4 font-medium text-slate-400 w-[40%]">After</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {allRows.map(({ key, before, after }) => (
+                                                <tr key={key} className="border-b border-slate-700/80 hover:bg-slate-700/30">
+                                                    <td className="py-2 px-4 text-slate-300 font-medium shrink-0">{prettyKey(key)}</td>
+                                                    <td className="py-2 px-4 text-slate-400 max-w-[200px] truncate" title={String(before)}>{before}</td>
+                                                    <td className="py-2 px-4 text-emerald-300 font-medium max-w-[200px] truncate" title={String(after)}>{after}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )
+                    })()}
+                </TabsContent>
+
+                <TabsContent value="timeline">
+                    {/* Timeline: current then previous snapshots */}
+                    <div className="relative pl-6 md:pl-8">
+                        <div className="absolute left-[11px] md:left-[15px] top-0 bottom-0 w-0.5 bg-slate-700 rounded-full" aria-hidden />
+
+                        <div className="space-y-6 pb-8">
+                            {/* Current version */}
+                            <div className="relative flex gap-4">
                         <div className="absolute -left-6 md:-left-8 top-6 w-4 h-4 rounded-full bg-orange-500 border-2 border-slate-900 shrink-0" aria-hidden />
                         <div className="flex-1 min-w-0 rounded-xl border border-orange-500/40 bg-slate-800/60 shadow-lg overflow-hidden">
                             <div className="px-4 py-3 border-b border-slate-700 bg-slate-800/80">
-                                <span className="text-xs font-semibold text-orange-400 uppercase tracking-wide">Current</span>
+                                <span className="text-xs font-semibold text-orange-400 uppercase tracking-wide">Current version</span>
                                 {record.updated_at && (
                                     <span className="ml-2 text-slate-500 text-xs">
-                                        Updated {new Date(record.updated_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                                        As of {new Date(record.updated_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
                                     </span>
                                 )}
                             </div>
-                            <div className="p-4">
-                                {prevFlats.length > 0 && (() => {
-                                    const d = currentDiff
-                                    const changedImportant = d.changed.filter(([key]) => IMPORTANT_KEYS.includes(key))
-                                    const addedImportant = d.added.filter(([key]) => IMPORTANT_KEYS.includes(key))
-                                    const removedImportant = d.removed.filter(([key]) => IMPORTANT_KEYS.includes(key))
-                                    const hasChanges = changedImportant.length + addedImportant.length + removedImportant.length > 0
-                                    return hasChanges ? (
-                                        <div className="mb-4 rounded-lg bg-slate-900/80 border border-slate-600 p-3 text-xs">
-                                            <span className="font-medium text-slate-300">Key changes since previous version:</span>
-                                            <ul className="mt-2 space-y-1 text-slate-200">
-                                                {changedImportant.map(([key, oldVal, newVal]) => (
-                                                    <li key={key}>
-                                                        <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
-                                                        <span className="line-through text-red-400/90">{oldVal}</span>{' '}
-                                                        → <span className="text-emerald-400">{newVal}</span>
-                                                    </li>
-                                                ))}
-                                                {addedImportant.map(([key, val]) => (
-                                                    <li key={key}>
-                                                        <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
-                                                        <span className="text-emerald-400">added: {val}</span>
-                                                    </li>
-                                                ))}
-                                                {removedImportant.map(([key, val]) => (
-                                                    <li key={key}>
-                                                        <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
-                                                        <span className="text-red-400/90">removed (was: {val})</span>
-                                                    </li>
-                                                ))}
-                                            </ul>
-                                        </div>
-                                    ) : null
-                                })()}
-                                <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 text-sm">
-                                    {fieldOrder.map((key) => {
-                                        const val = currentFlat[key]
-                                        if (val === undefined) return null
-                                        return (
-                                        <span key={key} className="flex gap-2">
-                                            <dt
-                                                className={
-                                                    'shrink-0 ' +
-                                                    (currentChangedKeys.has(key)
-                                                        ? 'text-emerald-300 font-semibold'
-                                                        : 'text-slate-500')
-                                                }
-                                            >
-                                                {prettyKey(key)}:
-                                            </dt>
-                                            <dd
-                                                className={
-                                                    'truncate min-w-0 ' +
-                                                    (currentChangedKeys.has(key)
-                                                        ? 'text-emerald-300 font-semibold'
-                                                        : 'text-slate-200')
-                                                }
-                                            >
-                                                {String(val)}
-                                            </dd>
-                                        </span>
-                                        )
-                                    })}
-                                </dl>
+                            <div className="p-4 space-y-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-xs text-slate-400">
+                                  Showing {expandedCurrent ? 'all fields' : 'only important fields that changed'} in this version.
+                                </p>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 px-2 text-xs border-slate-600 text-slate-200 hover:bg-slate-700"
+                                  onClick={() => setExpandedCurrent(v => !v)}
+                                >
+                                  {expandedCurrent ? 'Hide details' : 'Show full snapshot'}
+                                </Button>
+                              </div>
+                              <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+                                {fieldOrder.map((key) => {
+                                  const val = currentFlat[key]
+                                  if (val === undefined) return null
+                                  const isHeadline = IMPORTANT_KEYS.includes(key)
+                                  if (!expandedCurrent && (!isHeadline || !currentChangedKeys.has(key))) return null
+                                  return (
+                                    <span key={key} className="flex gap-2">
+                                      <dt
+                                        className={
+                                          'shrink-0 ' +
+                                          (currentChangedKeys.has(key)
+                                            ? 'text-emerald-300 font-semibold'
+                                            : 'text-slate-500')
+                                        }
+                                      >
+                                        {prettyKey(key)}:
+                                      </dt>
+                                      <dd
+                                        className={
+                                          'truncate min-w-0 ' +
+                                          (currentChangedKeys.has(key)
+                                            ? 'text-emerald-300 font-semibold'
+                                            : 'text-slate-200')
+                                        }
+                                      >
+                                        {String(val)}
+                                      </dd>
+                                    </span>
+                                  )
+                                })}
+                              </dl>
                             </div>
                         </div>
                     </div>
 
-                    {/* Previous versions (journey steps) */}
-                    {historyReversed.map((entry: any, idx: number) => {
+                            {/* Previous versions (snapshots before each update) */}
+                            {historyReversed.map((entry: any, idx: number) => {
                         const thisFlat = prevFlats[idx] || {}
                         const nextFlat = idx === 0 ? currentFlat : prevFlats[idx - 1]
                         const d = diff(thisFlat, nextFlat)
-                        const changedImportant = d.changed.filter(([key]) => IMPORTANT_KEYS.includes(key))
-                        const addedImportant = d.added.filter(([key]) => IMPORTANT_KEYS.includes(key))
-                        const removedImportant = d.removed.filter(([key]) => IMPORTANT_KEYS.includes(key))
-                        const hasChanges = changedImportant.length + addedImportant.length + removedImportant.length > 0
                         const changedKeys = new Set<string>()
-                        ;[...d.changed, ...d.added, ...d.removed].forEach(([key]) => {
-                            changedKeys.add(key)
-                        })
+                        ;[...d.changed, ...d.added, ...d.removed].forEach(([key]) => changedKeys.add(key))
                         return (
                             <div key={idx} className="relative flex gap-4">
                                 <div className="absolute -left-6 md:-left-8 top-6 w-4 h-4 rounded-full bg-slate-600 border-2 border-slate-900 shrink-0" aria-hidden />
                                 <div className="flex-1 min-w-0 rounded-xl border border-slate-700 bg-slate-800/40 shadow overflow-hidden">
                                     <div className="px-4 py-3 border-b border-slate-700 bg-slate-800/60">
                                         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wide">
-                                            Previous — {entry.at ? new Date(entry.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '–'}
+                                            Before this update
+                                        </span>
+                                        <span className="ml-2 text-slate-500 text-xs">
+                                            {entry.at ? new Date(entry.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '–'}
+                                            {idx === 0 && ' (replaced by current version above)'}
                                         </span>
                                     </div>
-                                    <div className="p-4">
-                                        {hasChanges && (
-                                            <div className="mb-4 rounded-lg bg-slate-900/80 border border-slate-600 p-3 text-xs">
-                                                <span className="font-medium text-slate-300">Key changes in next version:</span>
-                                                <ul className="mt-2 space-y-1 text-slate-200">
-                                                    {changedImportant.map(([key, oldVal, newVal]) => (
-                                                        <li key={key}>
-                                                            <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
-                                                            <span className="line-through text-red-400/90">{oldVal}</span>{' '}
-                                                            → <span className="text-emerald-400">{newVal}</span>
-                                                        </li>
-                                                    ))}
-                                                    {addedImportant.map(([key, val]) => (
-                                                        <li key={key}>
-                                                            <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
-                                                            <span className="text-emerald-400">added: {val}</span>
-                                                        </li>
-                                                    ))}
-                                                    {removedImportant.map(([key, val]) => (
-                                                        <li key={key}>
-                                                            <span className="text-slate-500">{prettyKey(key)}:</span>{' '}
-                                                            <span className="text-red-400/90">removed (was: {val})</span>
-                                                        </li>
-                                                    ))}
-                                                </ul>
-                                            </div>
-                                        )}
-                                        {Object.keys(thisFlat).length > 0 ? (
-                                            <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 text-sm">
-                                                {fieldOrder.map((key) => {
-                                                    const val = thisFlat[key]
-                                                    if (val === undefined) return null
-                                                    return (
-                                                    <span key={key} className="flex gap-2">
-                                                        <dt
-                                                            className={
-                                                                'shrink-0 ' +
-                                                                (changedKeys.has(key)
-                                                                    ? 'text-amber-300 font-semibold'
-                                                                    : 'text-slate-500')
-                                                            }
-                                                        >
-                                                            {prettyKey(key)}:
-                                                        </dt>
-                                                        <dd
-                                                            className={
-                                                                'truncate min-w-0 ' +
-                                                                (changedKeys.has(key)
-                                                                    ? 'text-amber-300 font-semibold'
-                                                                    : 'text-slate-300')
-                                                            }
-                                                        >
-                                                            {String(val)}
-                                                        </dd>
-                                                    </span>
-                                                    )
-                                                })}
-                                            </dl>
-                                        ) : (
-                                            <p className="text-slate-500 text-sm">No snapshot data.</p>
-                                        )}
+                                    <div className="p-4 space-y-3">
+                                      {idx === 0 && (
+                                        <p className="mb-1 text-xs text-slate-400">
+                                          Snapshot of this record before the latest update. See &quot;What changed in this update&quot; above for the exact before → after values.
+                                        </p>
+                                      )}
+                                      <div className="flex items-center justify-between gap-3">
+                                        <p className="text-xs text-slate-400">
+                                          Showing {expandedTimeline[idx] ? 'all fields' : 'only important fields that changed'} in this snapshot.
+                                        </p>
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-7 px-2 text-xs border-slate-600 text-slate-200 hover:bg-slate-700"
+                                          onClick={() =>
+                                            setExpandedTimeline(prev => ({ ...prev, [idx]: !prev[idx] }))
+                                          }
+                                        >
+                                          {expandedTimeline[idx] ? 'Hide details' : 'Show full snapshot'}
+                                        </Button>
+                                      </div>
+                                      {Object.keys(thisFlat).length > 0 ? (
+                                        <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+                                          {fieldOrder.map((key) => {
+                                            const val = thisFlat[key]
+                                            if (val === undefined) return null
+                                            const isHeadline = IMPORTANT_KEYS.includes(key)
+                                            if (!expandedTimeline[idx] && (!isHeadline || !changedKeys.has(key))) return null
+                                            return (
+                                              <span key={key} className="flex gap-2">
+                                                <dt
+                                                  className={
+                                                    'shrink-0 ' +
+                                                    (changedKeys.has(key)
+                                                      ? 'text-amber-300 font-semibold'
+                                                      : 'text-slate-500')
+                                                  }
+                                                >
+                                                  {prettyKey(key)}:
+                                                </dt>
+                                                <dd
+                                                  className={
+                                                    'truncate min-w-0 ' +
+                                                    (changedKeys.has(key)
+                                                      ? 'text-amber-300 font-semibold'
+                                                      : 'text-slate-300')
+                                                  }
+                                                >
+                                                  {String(val)}
+                                                </dd>
+                                              </span>
+                                            )
+                                          })}
+                                        </dl>
+                                      ) : (
+                                        <p className="text-slate-500 text-sm">No snapshot data.</p>
+                                      )}
                                     </div>
                                 </div>
                             </div>
                         )
-                    })}
+                            })}
 
-                    {(!record.version_history || record.version_history.length === 0) && (
-                        <div className="relative flex gap-4">
-                            <div className="absolute -left-6 md:-left-8 top-4 w-4 h-4 rounded-full bg-slate-700 border-2 border-slate-900 shrink-0" aria-hidden />
-                            <p className="text-slate-500 text-sm pl-2">No previous versions (record has not been updated since creation).</p>
+                            {(!record.version_history || record.version_history.length === 0) && (
+                                <div className="relative flex gap-4">
+                                    <div className="absolute -left-6 md:-left-8 top-4 w-4 h-4 rounded-full bg-slate-700 border-2 border-slate-900 shrink-0" aria-hidden />
+                                    <p className="text-slate-500 text-sm pl-2">No previous versions (record has not been updated since creation).</p>
+                                </div>
+                            )}
                         </div>
-                    )}
-                </div>
-            </div>
+                    </div>
+                </TabsContent>
+            </Tabs>
         </div>
     )
 }

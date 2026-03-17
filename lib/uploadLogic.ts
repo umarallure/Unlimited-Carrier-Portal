@@ -14,10 +14,21 @@ export type ParsedRecord = {
 
 export function parseNumber(value: any): number | null {
   if (value === null || value === undefined) return null
-  const s = String(value).replace(/[^0-9.\-]/g, '').trim()
-  if (!s) return null
-  const n = Number(s)
-  return Number.isNaN(n) ? null : n
+  const raw = String(value).trim()
+  if (!raw) return null
+
+  // Treat values in parentheses as negative (e.g. "(123.45)" => -123.45).
+  const isParenNegative = /^\(.*\)$/.test(raw)
+  const inner = isParenNegative ? raw.slice(1, -1) : raw
+
+  // Strip currency symbols, commas, and any other non‑numeric characters except dot/minus.
+  const cleaned = inner.replace(/[^0-9.\-]/g, '').trim()
+  if (!cleaned) return null
+
+  const n = Number(cleaned)
+  if (Number.isNaN(n)) return null
+
+  return isParenNegative && n > 0 ? -n : n
 }
 
 /** Parse date value: convert empty strings to null for PostgreSQL date columns. */
@@ -41,7 +52,8 @@ export function buildAmamPolicyRows(records: ParsedRecord[], agencyCarrierId: st
       file_id: fileId,
       row_number: idx + 1,
       policy_number: normalizePolicyNumber(r.policyNumber),
-      writingagent: d['WritingAgent'] ?? null,
+      // Some AMAM exports label this column as "WritingAgent" and some as "Writing #"
+      writingagent: d['WritingAgent'] ?? d['Writing #'] ?? d['Writing#'] ?? null,
       agentname_raw: d['AgentName'] ?? null,
       company: d['Company'] ?? null,
       status_raw: d['Status'] ?? null,
@@ -83,7 +95,8 @@ export function buildAmamCommissionRows(records: ParsedRecord[], agencyCarrierId
       row_number: idx + 1,
       statement_date: d['RptDate'] ? d['RptDate'] : null,
       policy_number: normalizePolicyNumber(d['Policy'] ?? r.policyNumber),
-      writingagent: d['WritingAgent'] ?? null,
+      // Support both "WritingAgent" and "Writing #"/"Writing#"
+      writingagent: d['WritingAgent'] ?? d['Writing #'] ?? d['Writing#'] ?? null,
       insured_name: d['Insured'] ?? null,
       plan: d['Plan'] ?? null,
       issdate: d['IssDate'] ?? null,
@@ -244,6 +257,105 @@ export function buildAetnaCommissionRows(records: ParsedRecord[], agencyCarrierI
   })
 }
 
+/** AFLAC (Safe Harbor) policy CSV: same layout as Aetna (COMPANYCODE, POLICYNUMBER, STATUSCATEGORY, etc.). */
+export function buildAflacPolicyRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
+  return records.map((r, idx) => {
+    const d = r.data
+    return {
+      agency_carrier_id: agencyCarrierId,
+      file_id: fileId,
+      row_number: idx + 1,
+      policy_number: normalizePolicyNumber(d['POLICYNUMBER'] || r.policyNumber),
+      companycode: d['COMPANYCODE'] ?? null,
+      statuscategory: d['STATUSCATEGORY'] ?? null,
+      statusdisplaytext: d['STATUSDISPLAYTEXT'] ?? null,
+      product: d['PRODUCT'] ?? null,
+      app_type: d['APP TYPE'] ?? null,
+      apprecddate: parseDate(d['APPRECDDATE']),
+      appsignaturedate: parseDate(d['APPSIGNATUREDATE']),
+      origeffdate: parseDate(d['ORIGEFFDATE']),
+      paidtodate: parseDate(d['PAIDTODATE']),
+      issuedate: parseDate(d['ISSUEDATE']),
+      termdate: parseDate(d['TERMDATE']),
+      issuedpremium: parseNumber(d['ISSUEDPREMIUM']),
+      currentannualpremium: parseNumber(d['CURRENTANNUALPREMIUM']),
+      currentmodalpremium: parseNumber(d['CURRENTMODALPREMIUM']),
+      draftday: d['DRAFTDAY'] ?? null,
+      paymentmodedisplaytext: d['PAYMENTMODEDISPLAYTEXT'] ?? null,
+      paymentmethoddisplaytext: d['PAYMENTMETHODDISPLAYTEXT'] ?? null,
+      lastpaymentdate: parseDate(d['LASTPAYMENTDATE']),
+      lastpayamt: parseNumber(d['LASTPAYAMT']),
+      issuezip: d['ISSUEZIP'] ?? null,
+      replacementind: d['REPLACEMENTIND'] ?? null,
+      replcompanycode: d['REPLCOMPANYCODE'] ?? null,
+      replpolicynumber: d['REPLPOLICYNUMBER'] ?? null,
+      facevalue: parseNumber(d['FACEVALUE']),
+      issuestate: d['ISSUESTATE'] ?? null,
+      household_discount_pct: parseNumber(d['HOUSEHOLD DISCOUNT %']),
+      multiple_policy_discount_pct: parseNumber(d['MULTIPLE POLICY DISCOUNT %']),
+      longdescription: d['LONGDESCRIPTION'] ?? null,
+      insuredname: d['INSUREDNAME'] ?? null,
+      suffixtitle: d['SUFFIXTITLE'] ?? null,
+      sex: d['SEX'] ?? null,
+      birthdate: parseDate(d['BIRTHDATE']),
+      addressline1: d['ADDRESSLINE1'] ?? null,
+      addressline2: d['ADDRESSLINE2'] ?? null,
+      addressline3: d['ADDRESSLINE3'] ?? null,
+      city: d['CITY'] ?? null,
+      state: d['STATE'] ?? null,
+      postalcode: d['POSTALCODE'] ?? null,
+      phone1: d['PHONE1'] ?? null,
+      email: d['EMAIL'] ?? null,
+      issueage: d['ISSUEAGE'] != null ? Number(d['ISSUEAGE']) : null,
+      agentnumber: d['AGENTNUMBER'] ?? null,
+      agentcompletename: d['AGENTCOMPLETENAME'] ?? null,
+      splitlevel: d['SPLITLEVEL'] ?? null,
+      split_pct: d['SPLIT %'] ?? null,
+      original_status: d['STATUSDISPLAYTEXT'] ?? d['STATUSCATEGORY'] ?? null,
+      status_normalized: null,
+      source_file: fileName,
+      source_format: 'AFLAC_POLICY',
+    }
+  })
+}
+
+/** AFLAC (Safe Harbor) commission CSV: Commission Details sheet (COMPANY, POLICYNUMBER, COMMISSIONAMOUNT, etc.). */
+export function buildAflacCommissionRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
+  return records.map((r, idx) => {
+    const d = r.data
+    return {
+      agency_carrier_id: agencyCarrierId,
+      file_id: fileId,
+      row_number: idx + 1,
+      company: d['COMPANY'] ?? null,
+      commissiontype: d['COMMISSIONTYPE'] ?? null,
+      writingagentnumber: d['WRITINGAGENTNUMBER'] ?? null,
+      writingagentname: d['WRITINGAGENTNAME'] ?? null,
+      client: d['CLIENT'] ?? null,
+      policy_number: normalizePolicyNumber(d['POLICYNUMBER'] ?? r.policyNumber),
+      commissioncategory: d['COMMISSIONCATEGORY'] ?? null,
+      appdate: parseDate(d['APPDATE']),
+      state: d['STATE'] ?? null,
+      product: d['PRODUCT'] ?? null,
+      effectivedate: parseDate(d['EFFECTIVEDATE']),
+      premiumduedate: parseDate(d['PREMIUMDUEDATE']),
+      commissionablepremium: parseNumber(d['COMMISSIONABLEPREMIUM']),
+      split_pct: d['SPLIT%'] ?? null,
+      rate_pct: d['RATE%'] ?? null,
+      monthsadvanced: d['MONTHSADVANCED'] ?? null,
+      commissionamount: parseNumber(d['COMMISSIONAMOUNT']),
+      mode: d['MODE'] ?? null,
+      replpoleffdate: parseDate(d['REPLPOLEFFDATE']),
+      commissionpaiddate: parseDate(d['COMMISSIONPAIDDATE']),
+      longdescription: d['LONGDESCRIPTION'] ?? null,
+      statement_date: null,
+      transaction_type: null,
+      source_file: fileName,
+      source_format: 'AFLAC_COMMISSION',
+    }
+  })
+}
+
 export function buildTransamericaPolicyRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
   return records.map((r, idx) => {
     const d = r.data
@@ -279,22 +391,23 @@ export function buildTransamericaPolicyRows(records: ParsedRecord[], agencyCarri
 export function buildMohPolicyRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
   return records.map((r, idx) => {
     const d = r.data
+    const policyNumber = d['POLICY_NUMBER'] ?? r.policyNumber
     return {
       agency_carrier_id: agencyCarrierId,
       file_id: fileId,
       row_number: idx + 1,
-      policy_number: normalizePolicyNumber(d['POLICY_NUMBER'] ?? r.policyNumber),
+      policy_number: normalizePolicyNumber(policyNumber),
       
       // Basic policy info
       carrier_name: d['CARRIER_NAME'] ?? null,
-      policy_effective_dte: d['POLICY_EFFECTIVE_DTE'] ?? null,
-      policy_issue_dte: d['POLICY_ISSUE_DTE'] ?? null,
+      policy_effective_dte: d['POLICY_EFFECTIVE_DTE'] ?? d['POLICY_EFFECTIVE'] ?? null,
+      policy_issue_dte: d['POLICY_ISSUE_DTE'] ?? d['ISSUED'] ?? null,
       policy_term_dte: d['POLICY_TERM_DTE'] ?? null,
-      policy_status_nme: d['POLICY_STATUS_NME'] ?? null,
+      policy_status_nme: d['POLICY_STATUS_NME'] ?? d['STATUS_NAME'] ?? null,
       
       // Insured info (primary)
-      insured_nme: d['INSURED_NME'] ?? null,
-      insured_age_at_issue: parseNumber(d['INSURED_AGE_AT_ISSUE']),
+      insured_nme: d['INSURED_NME'] ?? d['INSURED_FULL_NME'] ?? null,
+      insured_age_at_issue: parseNumber(d['INSURED_AGE_AT_ISSUE'] ?? d['CASE_AGE']),
       insured_dob: d['INSURED_DOB'] ?? null,
       insured_gender: d['INSURED_GENDER'] ?? null,
       insured_address_line_1: d['INSURED_ADDRESS_LINE_1'] ?? null,
@@ -311,7 +424,7 @@ export function buildMohPolicyRows(records: ParsedRecord[], agencyCarrierId: str
       owner_gender: d['OWNER_GENDER'] ?? null,
       
       // Insured info (secondary)
-      insured2_nme: d['INSURED2_NME'] ?? null,
+      insured2_nme: d['INSURED2_NME'] ?? d['SECOND_INSD_FULL_NAME'] ?? null,
       insured2_age_at_issue: parseNumber(d['INSURED2_AGE_AT_ISSUE']),
       insured2_dob: d['INSURED2_DOB'] ?? null,
       insured2_gender: d['INSURED2_GENDER'] ?? null,
@@ -326,18 +439,18 @@ export function buildMohPolicyRows(records: ParsedRecord[], agencyCarrierId: str
       // Premium and billing
       bill_mode: d['BILL_MODE'] ?? null,
       premium: parseNumber(d['PREMIUM']),
-      annual_premium: parseNumber(d['ANNUAL_PREMIUM']),
+      annual_premium: parseNumber(d['ANNUAL_PREMIUM'] ?? d['ANNUALIZED_PREMIUM_AMT']),
       paid_to_dte: d['PAID_TO_DTE'] ?? null,
       
       // Application info
-      app_signed_dte: d['APP_SIGNED_DTE'] ?? null,
+      app_signed_dte: d['APP_SIGNED_DTE'] ?? d['APPLICATION_SIGNED'] ?? null,
       app_submission_method_nme: d['APP_SUBMISSION_METHOD_NME'] ?? null,
-      app_issue_state_cde: d['APP_ISSUE_STATE_CDE'] ?? null,
-      application_received_dte: d['APPLICATION_RECEIVED_DTE'] ?? null,
+      app_issue_state_cde: d['APP_ISSUE_STATE_CDE'] ?? d['SIGNED_STATE'] ?? null,
+      application_received_dte: d['APPLICATION_RECEIVED_DTE'] ?? d['CARRIER_RECEIVED'] ?? null,
       
       // Writing agent (primary)
-      wrt_agt_nme: d['WRT_AGT_NME'] ?? null,
-      wrt_agt_prod_num: d['WRT_AGT_PROD_NUM'] ?? null,
+      wrt_agt_nme: d['WRT_AGT_NME'] ?? d['WRITING_PRODUCER1_NAME'] ?? null,
+      wrt_agt_prod_num: d['WRT_AGT_PROD_NUM'] ?? d['WRITING_PRODUCER1_NUMBER'] ?? null,
       wrt_agt_npn: d['WRT_AGT_NPN'] ?? null,
       wrt_agt_comm_split: d['WRT_AGT_COMM_SPLIT'] ?? null,
       wrt_agt_address_line_1: d['WRT_AGT_ADDRESS_LINE_1'] ?? null,
@@ -349,8 +462,8 @@ export function buildMohPolicyRows(records: ParsedRecord[], agencyCarrierId: str
       wrt_agt_email_address: d['WRT_AGT_EMAIL_ADDRESS'] ?? null,
       
       // Writing agent (secondary)
-      wrt_agt2_nme: d['WRT_AGT2_NME'] ?? null,
-      wrt_agt2_prod_num: d['WRT_AGT2_PROD_NUM'] ?? null,
+      wrt_agt2_nme: d['WRT_AGT2_NME'] ?? d['WRITING_PRODUCER2_NAME'] ?? null,
+      wrt_agt2_prod_num: d['WRT_AGT2_PROD_NUM'] ?? d['WRITING_PRODUCER2_NUMBER'] ?? null,
       wrt_agt2_npn: d['WRT_AGT2_NPN'] ?? null,
       wrt_agt2_comm_split: d['WRT_AGT2_COMM_SPLIT'] ?? null,
       wrt_agt2_address_line_1: d['WRT_AGT2_ADDRESS_LINE_1'] ?? null,
@@ -362,14 +475,14 @@ export function buildMohPolicyRows(records: ParsedRecord[], agencyCarrierId: str
       wrt_agt2_email_address: d['WRT_AGT2_EMAIL_ADDRESS'] ?? null,
       
       // Product info
-      line_of_business_nme: d['LINE_OF_BUSINESS_NME'] ?? null,
+      line_of_business_nme: d['LINE_OF_BUSINESS_NME'] ?? d['LINE_OF_BUSINESS'] ?? null,
       product_type_nme: d['PRODUCT_TYPE_NME'] ?? null,
-      product_desc: d['PRODUCT_DESC'] ?? null,
+      product_desc: d['PRODUCT_DESC'] ?? d['PRODUCT_NAME'] ?? null,
       
       // Policy values
       surrender_value_amt: parseNumber(d['SURRENDER_VALUE_AMT']),
       cash_accumulation_value: parseNumber(d['CASH_ACCUMULATION_VALUE']),
-      face_amt: parseNumber(d['FACE_AMT']),
+      face_amt: parseNumber(d['FACE_AMT'] ?? d['FACE_AMOUNT']),
       flat_extra_amt: parseNumber(d['FLAT_EXTRA_AMT']),
       initial_interest_rate: parseNumber(d['INITIAL_INTEREST_RATE']),
       account_value: parseNumber(d['ACCOUNT_VALUE']),
@@ -446,6 +559,42 @@ export function buildLibertyPolicyRows(records: ParsedRecord[], agencyCarrierId:
 
       source_file: fileName,
       source_format: 'LIBERTY_POLICY',
+    }
+  })
+}
+
+/** Sentinel policy CSV: Policy Number, Client Name, Joint Client Name, Line Of Business, Product Description, Issue Date, Purchase Premium $, Balance $, Surrender $, Annual Premium $, Tax Qualified, Tax Account Type, Status, Reason, Writing Agent, Writing Agent Name, Split Agent, Split Agent Name, Servicing Agent, Servicing Agent Name */
+export function buildSentinelPolicyRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
+  return records.map((r, idx) => {
+    const d = r.data
+    return {
+      agency_carrier_id: agencyCarrierId,
+      file_id: fileId,
+      row_number: idx + 1,
+      policy_number: normalizePolicyNumber(d['Policy Number'] ?? r.policyNumber),
+
+      client_name: d['Client Name'] ?? null,
+      joint_client_name: d['Joint Client Name'] ?? null,
+      line_of_business: d['Line Of Business'] ?? null,
+      product_description: d['Product Description'] ?? null,
+      issue_date: d['Issue Date'] != null ? String(d['Issue Date']) : null,
+      purchase_premium: parseNumber(d['Purchase Premium $']),
+      balance_amount: parseNumber(d['Balance $']),
+      surrender_amount: parseNumber(d['Surrender $']),
+      annual_premium: parseNumber(d['Annual Premium $']),
+      tax_qualified: d['Tax Qualified'] ?? null,
+      tax_account_type: d['Tax Account Type'] ?? null,
+      status: d['Status'] ?? null,
+      status_reason: d['Reason'] ?? null,
+      writing_agent_code: d['Writing Agent'] ?? null,
+      writing_agent_name: d['Writing Agent Name'] ?? null,
+      split_agent_code: d['Split Agent'] ?? null,
+      split_agent_name: d['Split Agent Name'] ?? null,
+      servicing_agent_code: d['Servicing Agent'] ?? null,
+      servicing_agent_name: d['Servicing Agent Name'] ?? null,
+
+      source_file: fileName,
+      source_format: 'SENTINEL_POLICY',
     }
   })
 }
@@ -570,7 +719,7 @@ export function buildRNACommissionRows(records: ParsedRecord[], agencyCarrierId:
   }))
 }
 
-type TargetTable = 'aetna_policies' | 'aetna_commissions' | 'amam_policies' | 'amam_commissions' | 'transamerica_policies' | 'transamerica_commissions' | 'moh_policies' | 'moh_commissions' | 'corebridge_policies' | 'corebridge_commissions' | 'liberty_policies' | 'liberty_commissions' | 'rna_policies' | 'rna_commissions'
+type TargetTable = 'aetna_policies' | 'aetna_commissions' | 'amam_policies' | 'amam_commissions' | 'transamerica_policies' | 'transamerica_commissions' | 'moh_policies' | 'moh_commissions' | 'corebridge_policies' | 'corebridge_commissions' | 'liberty_policies' | 'liberty_commissions' | 'rna_policies' | 'rna_commissions' | 'aflac_policies' | 'aflac_commissions' | 'sentinel_policies' | 'sentinel_commissions'
 
 export function resolveTargetTable(carrierCode: string, fileType: FileKind): TargetTable {
   if (carrierCode === 'AETNA' && fileType === 'Policy') return 'aetna_policies'
@@ -587,6 +736,10 @@ export function resolveTargetTable(carrierCode: string, fileType: FileKind): Tar
   if (carrierCode === 'LIBERTY' && fileType === 'Commission') return 'liberty_commissions'
   if (carrierCode === 'RNA' && fileType === 'Policy') return 'rna_policies'
   if (carrierCode === 'RNA' && fileType === 'Commission') return 'rna_commissions'
+  if (carrierCode === 'AFLAC' && fileType === 'Policy') return 'aflac_policies'
+  if (carrierCode === 'AFLAC' && fileType === 'Commission') return 'aflac_commissions'
+  if (carrierCode === 'SENTINEL' && fileType === 'Policy') return 'sentinel_policies'
+  if (carrierCode === 'SENTINEL' && fileType === 'Commission') return 'sentinel_commissions'
   throw new Error(`Unsupported carrier/file type combination: ${carrierCode} / ${fileType}`)
 }
 
@@ -605,6 +758,10 @@ export function resolveSourceFormat(carrierCode: string, fileType: FileKind): st
   if (carrierCode === 'LIBERTY' && fileType === 'Commission') return 'LIBERTY_COMMISSION'
   if (carrierCode === 'RNA' && fileType === 'Policy') return 'RNA_POLICY'
   if (carrierCode === 'RNA' && fileType === 'Commission') return 'RNA_COMMISSION'
+  if (carrierCode === 'AFLAC' && fileType === 'Policy') return 'AFLAC_POLICY'
+  if (carrierCode === 'AFLAC' && fileType === 'Commission') return 'AFLAC_COMMISSION'
+  if (carrierCode === 'SENTINEL' && fileType === 'Policy') return 'SENTINEL_POLICY'
+  if (carrierCode === 'SENTINEL' && fileType === 'Commission') return 'SENTINEL_COMMISSION'
   return null
 }
 
@@ -650,6 +807,8 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   const fileNameLower = file.name.toLowerCase()
   const isRNAPolicyExcel = carrierCode === 'RNA' && fileType === 'Policy' && (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls'))
   const isRNACommissionCSV = carrierCode === 'RNA' && fileType === 'Commission' && fileNameLower.endsWith('.csv')
+  const isCorebridgeCommissionPdf = carrierCode === 'COREBRIDGE' && fileType === 'Commission' && fileNameLower.endsWith('.pdf')
+  const isSentinelCommissionPdf = carrierCode === 'SENTINEL' && fileType === 'Commission' && fileNameLower.endsWith('.pdf')
 
   console.log('[Upload Logic] Parsing file:', {
     fileName: file.name,
@@ -657,7 +816,37 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     fileType,
     isRNAPolicyExcel,
     isRNACommissionCSV,
+    isCorebridgeCommissionPdf,
+    isSentinelCommissionPdf,
   })
+
+  // Corebridge and Sentinel commission PDFs are parsed server-side by dedicated API routes
+  if (isCorebridgeCommissionPdf || isSentinelCommissionPdf) {
+    const url =
+      isCorebridgeCommissionPdf
+        ? '/api/corebridge/commission-from-pdf'
+        : '/api/sentinel/commission-from-pdf'
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileId: fileRow.id,
+        agencyCarrierId,
+        carrierCode,
+        storagePath: filePath,
+      }),
+    })
+
+    if (!resp.ok) {
+      const msg = await resp.text()
+      return { success: false, error: msg || 'Failed to parse Corebridge commission PDF.' }
+    }
+
+    const json = await resp.json()
+    const count = (json && typeof json.rowsInserted === 'number') ? json.rowsInserted : 0
+    return { success: true, count, fileId: fileRow.id, carrierCode, fileType }
+  }
 
   const parseResult = isRNAPolicyExcel
     ? (await parseRNAExcel(file) as { records: ParsedRecord[]; totalRecords: number })
@@ -686,6 +875,9 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   else if (carrierCode === 'LIBERTY' && fileType === 'Policy') rows = buildLibertyPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'RNA' && fileType === 'Policy') rows = buildRNAPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'RNA' && fileType === 'Commission') rows = buildRNACommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'AFLAC' && fileType === 'Policy') rows = buildAflacPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'AFLAC' && fileType === 'Commission') rows = buildAflacCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'SENTINEL' && fileType === 'Policy') rows = buildSentinelPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
 
   if (!rows.length) return { success: false, error: 'File parsed but no mappable records were found.' }
 
@@ -697,7 +889,9 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     targetTable === 'moh_policies' ||
     targetTable === 'corebridge_policies' ||
     targetTable === 'liberty_policies' ||
-    targetTable === 'rna_policies'
+    targetTable === 'rna_policies' ||
+    targetTable === 'aflac_policies' ||
+    targetTable === 'sentinel_policies'
   const isCommissionTable =
     targetTable === 'aetna_commissions' ||
     targetTable === 'amam_commissions' ||
@@ -705,8 +899,32 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     targetTable === 'moh_commissions' ||
     targetTable === 'corebridge_commissions' ||
     targetTable === 'liberty_commissions' ||
-    targetTable === 'rna_commissions'
+    targetTable === 'rna_commissions' ||
+    targetTable === 'aflac_commissions' ||
+    targetTable === 'sentinel_commissions'
   const now = new Date().toISOString()
+
+  // For commission tables we want one row per statement line (per file),
+  // not one row per policy. Before inserting the parsed rows for this file,
+  // clear any existing commission rows for the same file_id so re-uploads
+  // fully replace the prior contents.
+  if (isCommissionTable) {
+    const { error: deleteError } = await supabase
+      .from(targetTable)
+      .delete()
+      .eq('agency_carrier_id', agencyCarrierId)
+      .eq('file_id', fileRow.id)
+
+    if (deleteError) {
+      console.error('[Upload Logic] Failed to clear existing commission rows for file before insert:', {
+        targetTable,
+        fileId: fileRow.id,
+        agencyCarrierId,
+        error: deleteError,
+      })
+      return { success: false, error: deleteError.message || 'Failed to reset existing commission rows for this file.' }
+    }
+  }
 
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     let chunk = rows.slice(i, i + BATCH_SIZE).map(row => ({ ...row, updated_at: now }))
@@ -767,20 +985,13 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
         error = response.error
         result = response
       } else if (isCommissionTable) {
-        // Commission tables: upsert on (agency_carrier_id, policy_number)
-        // We intentionally do NOT deduplicate here so every statement line is applied.
-        // To avoid 'cannot affect row a second time', we upsert rows one-by-one.
-        for (const row of chunk) {
-          const response = await query.upsert([row], {
-            onConflict: 'agency_carrier_id,policy_number',
-            ignoreDuplicates: false,
-          })
-          if (response.error) {
-            error = response.error
-            result = response
-            break
-          }
-        }
+        // Commission tables: append all rows for this file (one row per
+        // statement line). We already cleared existing rows for this file
+        // above, so a simple insert is sufficient and preserves multiple
+        // transactions per policy.
+        const response = await query.insert(chunk)
+        error = response.error
+        result = response
       } else {
         // Other tables: insert (no unique constraint)
         const response = await query.insert(chunk)

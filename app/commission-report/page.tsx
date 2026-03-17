@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@/components/ui/table'
@@ -9,215 +9,134 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Calendar, Loader2, Search } from 'lucide-react'
 
-type CommissionRow = Record<string, any>
-type CarrierFilter = 'ALL' | 'AMAM' | 'AETNA'
-
-function looksLikeNumberOnly(val: unknown): boolean {
-  if (val == null) return true
-  const s = String(val).trim()
-  if (!s) return true
-  return /^\d+$/.test(s)
+type CommissionRow = {
+  id?: string
+  agency_carrier_id: string
+  carrier_id: string | null
+  carrier: string
+  policy_number: string
+  name: string | null
+  sales_agent: string | null
+  date: string
+  commission_rate: number | null
+  advance_amount: number | null
+  charge_back_amount: number | null
+  version_history?: any[]
+  source_table?: string | null
 }
+
+type CarrierRecord = {
+  id: string
+  name: string
+  code: string | null
+}
+
+type CarrierFilter = 'ALL' | 'AMAM' | 'AETNA'
 
 export default function CommissionReportPage() {
   const [rows, setRows] = useState<CommissionRow[]>([])
+  const [allRows, setAllRows] = useState<CommissionRow[]>([])
   const [loading, setLoading] = useState(true)
   const [carrierCode, setCarrierCode] = useState<CarrierFilter>('ALL')
   const [searchTerm, setSearchTerm] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
-  const [dealTrackerAgentNames, setDealTrackerAgentNames] = useState<Map<string, string>>(new Map())
-  const [dealTrackerAmounts, setDealTrackerAmounts] = useState<
-    Map<string, { deal_value: number | null; charge_back: number | null }>
-  >(new Map())
+  const [carrierCodeById, setCarrierCodeById] = useState<Map<string, string | null>>(new Map())
+  const [carrierCodeByName, setCarrierCodeByName] = useState<Map<string, string | null>>(new Map())
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+  const [expandedKey, setExpandedKey] = useState<string | null>(null)
 
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchAllCommissionRows = async () => {
       setLoading(true)
       try {
-        // Commission report is based on per-carrier commission uploads
-        if (carrierCode === 'ALL') {
-          const [amamRes, aetnaRes] = await Promise.all([
-            supabase.from<CommissionRow>('amam_commissions').select('*').order('created_at', { ascending: false }).limit(2000),
-            supabase.from<CommissionRow>('aetna_commissions').select('*').order('created_at', { ascending: false }).limit(2000),
-          ])
+        const PAGE_SIZE = 1000
+        let all: CommissionRow[] = []
+        let from = 0
 
-          if (amamRes.error) console.error('Error loading AMAM commission report:', amamRes.error)
-          if (aetnaRes.error) console.error('Error loading Aetna commission report:', aetnaRes.error)
-
-          const amamRows = (amamRes.data || []).map(r => ({ ...r, __carrier: 'AMAM' }))
-          const aetnaRows = (aetnaRes.data || []).map(r => ({ ...r, __carrier: 'AETNA' }))
-          const allRows = [...amamRows, ...aetnaRows]
-          setRows(allRows)
-
-          // Load deal_tracker financials (deal_value & charge_back) for Aetna policies
-          const aetnaForDt = allRows.filter(
-            r => r.__carrier === 'AETNA' && r.agency_carrier_id && r.policy_number
-          )
-          const dtAmountMap = new Map<string, { deal_value: number | null; charge_back: number | null }>()
-          if (aetnaForDt.length > 0) {
-            const byAc = new Map<string, string[]>()
-            for (const r of aetnaForDt) {
-              const acId = String(r.agency_carrier_id)
-              if (!byAc.has(acId)) byAc.set(acId, [])
-              byAc.get(acId)!.push(String(r.policy_number))
-            }
-            for (const [acId, policyNumbers] of byAc) {
-              const { data: dtRows, error: dtError } = await supabase
-                .from('deal_tracker')
-                .select('policy_number, deal_value, charge_back')
-                .eq('agency_carrier_id', acId)
-                .in('policy_number', policyNumbers)
-              if (dtError) {
-                console.warn('[Commission Report] deal_tracker fetch error:', dtError.message)
-                continue
-              }
-              for (const d of dtRows || []) {
-                dtAmountMap.set(`${acId}::${d.policy_number}`, {
-                  deal_value: d.deal_value as number | null,
-                  charge_back: d.charge_back as number | null,
-                })
-              }
-            }
-          }
-          setDealTrackerAmounts(dtAmountMap)
-
-          // Enrich AMAM sales agent from deal_tracker when commission has only agent number
-          const amamNeedName = amamRows.filter(
-            r => r.agency_carrier_id && r.policy_number && looksLikeNumberOnly(r.writingagent)
-          )
-          if (amamNeedName.length > 0) {
-            const byAc = new Map<string, string[]>()
-            for (const r of amamNeedName) {
-              const id = r.agency_carrier_id
-              if (!byAc.has(id)) byAc.set(id, [])
-              byAc.get(id)!.push(r.policy_number)
-            }
-            const nameMap = new Map<string, string>()
-            for (const [agencyCarrierId, policyNumbers] of byAc) {
-              const { data } = await supabase
-                .from('deal_tracker')
-                .select('policy_number, sales_agent')
-                .eq('agency_carrier_id', agencyCarrierId)
-                .in('policy_number', policyNumbers)
-              for (const d of data || []) {
-                if (d.policy_number && d.sales_agent?.trim())
-                  nameMap.set(`${agencyCarrierId}::${d.policy_number}`, d.sales_agent)
-              }
-            }
-            setDealTrackerAgentNames(nameMap)
-          } else {
-            setDealTrackerAgentNames(new Map())
-          }
-        } else {
-          const tableName = carrierCode === 'AMAM' ? 'amam_commissions' : 'aetna_commissions'
+        while (true) {
+          const to = from + PAGE_SIZE - 1
           const { data, error } = await supabase
-            .from<CommissionRow>(tableName)
+            .from<any, CommissionRow>('commission_tracker')
             .select('*')
-            .order('created_at', { ascending: false })
-            .limit(2000)
+            .order('date', { ascending: false })
+            .range(from, to)
 
           if (error) {
             console.error('Error loading commission report:', error)
-            setRows([])
-            setDealTrackerAgentNames(new Map())
-            setDealTrackerAmounts(new Map())
-          } else {
-            const tagged = (data || []).map(r => ({
-              ...r,
-              __carrier: carrierCode,
-            }))
-            setRows(tagged)
-
-            // Load deal_tracker financials only for Aetna when that carrier is selected
-            if (carrierCode === 'AETNA') {
-              const aetnaForDt = tagged.filter(
-                r => r.agency_carrier_id && r.policy_number
-              )
-              const dtAmountMap = new Map<
-                string,
-                { deal_value: number | null; charge_back: number | null }
-              >()
-              if (aetnaForDt.length > 0) {
-                const byAc = new Map<string, string[]>()
-                for (const r of aetnaForDt) {
-                  const acId = String(r.agency_carrier_id)
-                  if (!byAc.has(acId)) byAc.set(acId, [])
-                  byAc.get(acId)!.push(String(r.policy_number))
-                }
-                for (const [acId, policyNumbers] of byAc) {
-                  const { data: dtRows, error: dtError } = await supabase
-                    .from('deal_tracker')
-                    .select('policy_number, deal_value, charge_back')
-                    .eq('agency_carrier_id', acId)
-                    .in('policy_number', policyNumbers)
-                  if (dtError) {
-                    console.warn(
-                      '[Commission Report] deal_tracker fetch error (single carrier):',
-                      dtError.message
-                    )
-                    continue
-                  }
-                  for (const d of dtRows || []) {
-                    dtAmountMap.set(`${acId}::${d.policy_number}`, {
-                      deal_value: d.deal_value as number | null,
-                      charge_back: d.charge_back as number | null,
-                    })
-                  }
-                }
-              }
-              setDealTrackerAmounts(dtAmountMap)
-            } else {
-              setDealTrackerAmounts(new Map())
-            }
-
-            if (carrierCode === 'AMAM') {
-              const needName = tagged.filter(
-                r => r.agency_carrier_id && r.policy_number && looksLikeNumberOnly(r.writingagent)
-              )
-              if (needName.length > 0) {
-                const byAc = new Map<string, string[]>()
-                for (const r of needName) {
-                  const id = r.agency_carrier_id
-                  if (!byAc.has(id)) byAc.set(id, [])
-                  byAc.get(id)!.push(r.policy_number)
-                }
-                const nameMap = new Map<string, string>()
-                for (const [agencyCarrierId, policyNumbers] of byAc) {
-                  const { data: dtData } = await supabase
-                    .from('deal_tracker')
-                    .select('policy_number, sales_agent')
-                    .eq('agency_carrier_id', agencyCarrierId)
-                    .in('policy_number', policyNumbers)
-                  for (const d of dtData || []) {
-                    if (d.policy_number && d.sales_agent?.trim())
-                      nameMap.set(`${agencyCarrierId}::${d.policy_number}`, d.sales_agent)
-                  }
-                }
-                setDealTrackerAgentNames(nameMap)
-              } else {
-                setDealTrackerAgentNames(new Map())
-              }
-            } else {
-              setDealTrackerAgentNames(new Map())
-            }
+            all = []
+            break
           }
+
+          const chunk = data || []
+          all = all.concat(chunk)
+
+          if (chunk.length < PAGE_SIZE) {
+            break
+          }
+
+          from = to + 1
+        }
+
+        // Keep all normalized commission_tracker rows so we can:
+        // - Aggregate per policy for the main table (sum advance/chargeback),
+        // - And still show every individual transaction when a row is expanded.
+        setAllRows(all)
+
+        // Collapse to one display row per (agency_carrier, policy, carrier)
+        // using the most recent date row as the "header" for that policy.
+        const byKey = new Map<string, CommissionRow>()
+        const parseDate = (d: string): number => {
+          const dt = new Date(String(d).split('to')[0].trim().replace(/\./g, '-').replace(/\//g, '-'))
+          return isNaN(dt.getTime()) ? 0 : dt.getTime()
+        }
+        for (const row of all) {
+          const key = `${row.agency_carrier_id}::${row.policy_number}::${row.carrier}`
+          const existing = byKey.get(key)
+          if (!existing) {
+            byKey.set(key, row)
+            continue
+          }
+          if (parseDate(row.date) > parseDate(existing.date)) {
+            byKey.set(key, row)
+          }
+        }
+
+        setRows(Array.from(byKey.values()))
+
+        // Fetch carrier codes once for mapping name/id -> code
+        const { data: carriers, error: carriersError } = await supabase
+          .from<any, CarrierRecord>('carriers')
+          .select('id, name, code')
+
+        if (!carriersError && carriers) {
+          const byId = new Map<string, string | null>()
+          const byName = new Map<string, string | null>()
+          carriers.forEach(c => {
+            byId.set(c.id, c.code)
+            byName.set(c.name, c.code)
+          })
+          setCarrierCodeById(byId)
+          setCarrierCodeByName(byName)
         }
       } catch (err) {
         console.error('Error loading commission report:', err)
         setRows([])
-        setDealTrackerAgentNames(new Map())
+        setAllRows([])
       } finally {
         setLoading(false)
       }
     }
 
-    fetchData()
-  }, [carrierCode])
+    fetchAllCommissionRows()
+  }, [])
 
   const normalizeDate = (value: any): Date | null => {
     if (!value) return null
-    // Support values like '2025-12-07', '2025/12/07', or Excel-style '2025-12-07 to 2026-01-20'
+    // NOTE: We now display the raw YYYY-MM-DD string in the UI to avoid
+    // timezone shifting, but still use Date objects internally only for
+    // comparisons and sorting.
     const str = String(value).trim()
     if (!str) return null
     const rangePart = str.split('to')[0].trim()
@@ -226,30 +145,11 @@ export default function CommissionReportPage() {
   }
 
   const filtered = rows.filter(row => {
-    const name =
-      row['Name'] ??
-      row['name'] ??
-      row['INSURED_NAME'] ??
-      row['insured_name'] ??
-      row['client'] ??
-      ''
-    const policy = row['Policy Number'] ?? row['policy_number'] ?? ''
-    let salesAgent = row['Sales Agent'] ?? row['sales_agent'] ?? row['writingagentname'] ?? row['writingagent'] ?? ''
-    if (row['__carrier'] === 'AMAM' && row.agency_carrier_id && row.policy_number) {
-      const dtName = dealTrackerAgentNames.get(`${row.agency_carrier_id}::${row.policy_number}`)
-      if (dtName) salesAgent = dtName
-    }
+    const name = row.name ?? ''
+    const policy = row.policy_number ?? ''
+    const salesAgent = row.sales_agent ?? ''
 
-    const dateRaw =
-      row['Date'] ??
-      row['date'] ??
-      row['PAID_TO_DATE'] ??
-      row['paid_to_date'] ??
-      row['commissionpaiddate'] ??
-      row['statement_date'] ??
-      row['appdate'] ??
-      row['effectivedate']
-    const dt = normalizeDate(dateRaw)
+    const dt = normalizeDate(row.date)
 
     if (dateFrom) {
       const from = new Date(dateFrom)
@@ -258,6 +158,18 @@ export default function CommissionReportPage() {
     if (dateTo) {
       const to = new Date(dateTo)
       if (!dt || dt > to) return false
+    }
+
+    // Carrier filter using carrier codes when possible
+    const code =
+      (row.carrier_id && carrierCodeById.get(row.carrier_id)) ??
+      carrierCodeByName.get(row.carrier) ??
+      row.carrier.toUpperCase()
+
+    if (carrierCode === 'AMAM') {
+      if (code !== 'AMAM') return false
+    } else if (carrierCode === 'AETNA') {
+      if (code !== 'AETNA') return false
     }
 
     if (!searchTerm) return true
@@ -269,6 +181,17 @@ export default function CommissionReportPage() {
     )
   })
 
+  // Reset to first page when filters change
+  useEffect(() => {
+    setCurrentPage(1)
+    setExpandedKey(null)
+  }, [carrierCode, searchTerm, dateFrom, dateTo])
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const startIndex = (currentPage - 1) * pageSize
+  const endIndex = startIndex + pageSize
+  const paginated = filtered.slice(startIndex, endIndex)
+
   return (
     <div className="space-y-4 animate-in fade-in duration-500">
       <div className="flex items-center space-x-3">
@@ -278,7 +201,7 @@ export default function CommissionReportPage() {
         <div>
           <h1 className="text-3xl font-bold text-white">Commission Report</h1>
           <p className="text-gray-400">
-            Read-only view of {carrierCode === 'ALL' ? 'AMAM + Aetna' : carrierCode === 'AMAM' ? 'AMAM' : 'Aetna'} commission rows, formatted like your Excel report.
+            Read-only view of normalized commission rows from all carriers, formatted like your Excel report.
           </p>
         </div>
       </div>
@@ -378,108 +301,43 @@ export default function CommissionReportPage() {
                   <TableHead className="text-slate-300 font-semibold text-right">Commission Rate</TableHead>
                   <TableHead className="text-slate-300 font-semibold text-right">Advance</TableHead>
                   <TableHead className="text-slate-300 font-semibold text-right">Charge Back</TableHead>
+                  <TableHead className="text-slate-300 font-semibold text-center">Transactions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-8">
+                    <TableCell colSpan={9} className="text-center py-8">
                       <Loader2 className="w-8 h-8 animate-spin text-orange-400 mx-auto" />
                     </TableCell>
                   </TableRow>
                 ) : filtered.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center text-slate-400 py-8">
+                    <TableCell colSpan={9} className="text-center text-slate-400 py-8">
                       No commission rows found for the current filters.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filtered.map((row, idx) => {
-                    const name =
-                      row['Name'] ??
-                      row['name'] ??
-                      row['INSURED_NAME'] ??
-                      row['insured_name'] ??
-                      row['client'] ??
-                      '-'
-                    const dateRaw =
-                      row['Date'] ??
-                      row['date'] ??
-                      row['PAID_TO_DATE'] ??
-                      row['paid_to_date'] ??
-                      row['commissionpaiddate'] ??
-                      row['statement_date'] ??
-                      row['appdate'] ??
-                      row['effectivedate'] ??
-                      ''
-                    const policyNumber =
-                      row['Policy Number'] ??
-                      row['policy_number'] ??
-                      row['POLICY_NUMBER'] ??
-                      '-'
-                    const carrier =
-                      row['Carrier'] ??
-                      row['carrier'] ??
-                      row['__carrier'] ??
-                      (carrierCode === 'AMAM' ? 'AMAM' : carrierCode === 'AETNA' ? 'Aetna' : '')
-                    let salesAgent =
-                      row['Sales Agent'] ??
-                      row['sales_agent'] ??
-                      row['AGENT'] ??
-                      row['writingagentname'] ??
-                      row['writingagent'] ??
-                      '-'
-                    if (row['__carrier'] === 'AMAM' && row.agency_carrier_id && row.policy_number) {
-                      const dtName = dealTrackerAgentNames.get(`${row.agency_carrier_id}::${row.policy_number}`)
-                      if (dtName) salesAgent = dtName
-                    }
-                    const commissionRate =
-                      row['Commission Rate'] ??
-                      row['commission_rate'] ??
-                      row['RATE'] ??
-                      row['rate'] ??
-                      row['com_rate'] ??   // AMAM
-                      row['rate_pct'] ??   // Aetna
-                      null
-                    let advance =
-                      row['Advance'] ??
-                      row['advance'] ??
-                      row['ADVANCE'] ??
-                      (carrierCode === 'AETNA' ? row['commissionamount'] : null) ??
-                      null
-                    let chargeBack: number | null = null
+                  paginated.map((row, idx) => {
+                    const name = row.name || '-'
+                    const policyNumber = row.policy_number || '-'
+                    const carrierCodeDisplay =
+                      (row.carrier_id && carrierCodeById.get(row.carrier_id)) ??
+                      carrierCodeByName.get(row.carrier) ??
+                      row.carrier
+                    const salesAgent = row.sales_agent || '-'
+                    const commissionRate = row.commission_rate
 
-                    // Prefer aggregated amounts from deal_tracker for Aetna rows
-                    if (row.__carrier === 'AETNA' && row.agency_carrier_id && row.policy_number) {
-                      const key = `${row.agency_carrier_id}::${row.policy_number}`
-                      const dt = dealTrackerAmounts.get(key)
-                      if (dt) {
-                        advance = dt.deal_value
-                        chargeBack = dt.charge_back ?? null
-                      } else {
-                        // Fallback: derive from raw commission when no deal_tracker row yet
-                        const parsedAdvance =
-                          advance != null && advance !== ''
-                            ? parseFloat(String(advance).replace(/,/g, ''))
-                            : NaN
-                        if (!Number.isNaN(parsedAdvance) && parsedAdvance < 0) {
-                          advance = ''
-                          chargeBack = parsedAdvance
-                        }
-                      }
-                    } else {
-                      // Non-Aetna carriers: derive purely from raw commission
-                      const parsedAdvance =
-                        advance != null && advance !== ''
-                          ? parseFloat(String(advance).replace(/,/g, ''))
-                          : NaN
-                      if (!Number.isNaN(parsedAdvance) && parsedAdvance < 0) {
-                        advance = ''
-                        chargeBack = parsedAdvance
-                      }
-                    }
+                    const key = `${row.agency_carrier_id}::${row.policy_number}::${row.carrier}`
+                    const detailRows = allRows.filter(r =>
+                      r.agency_carrier_id === row.agency_carrier_id &&
+                      r.policy_number === row.policy_number &&
+                      r.carrier === row.carrier
+                    )
 
-                    const dt = normalizeDate(dateRaw)
+                    const advanceTotal = detailRows.reduce((sum, r) => sum + (r.advance_amount ?? 0), 0)
+                    const chargeBackTotal = detailRows.reduce((sum, r) => sum + (r.charge_back_amount ?? 0), 0)
+                    const transactionCount = detailRows.length || 1
 
                     const formatMoney = (v: any) => {
                       if (v == null || v === '') return ''
@@ -492,26 +350,103 @@ export default function CommissionReportPage() {
                     }
 
                     return (
-                      <TableRow key={row.id || `${policyNumber}-${idx}`} className="border-b border-slate-800 hover:bg-slate-800/40">
-                        <TableCell className="text-slate-100">{name}</TableCell>
-                        <TableCell className="text-slate-300">
-                          {dt ? dt.toLocaleDateString() : String(dateRaw || '-')}
-                        </TableCell>
-                        <TableCell className="text-slate-300 font-mono text-sm">{policyNumber}</TableCell>
-                        <TableCell className="text-slate-300">{carrier}</TableCell>
-                        <TableCell className="text-slate-300">{salesAgent}</TableCell>
-                        <TableCell className="text-slate-300 text-right">
-                          {commissionRate != null && commissionRate !== ''
-                            ? String(commissionRate)
-                            : ''}
-                        </TableCell>
-                        <TableCell className="text-slate-300 text-right">
-                          {advance != null && advance !== '' ? formatMoney(advance) : ''}
-                        </TableCell>
-                        <TableCell className="text-slate-300 text-right">
-                          {chargeBack != null && chargeBack !== '' ? formatMoney(chargeBack) : ''}
-                        </TableCell>
-                      </TableRow>
+                      <Fragment key={row.id || `${policyNumber}-${idx}`}>
+                        <TableRow className="border-b border-slate-800 hover:bg-slate-800/40">
+                          <TableCell className="text-slate-100">{name}</TableCell>
+                          <TableCell className="text-slate-300">
+                            {row.date || '-'}
+                          </TableCell>
+                          <TableCell className="text-slate-300 font-mono text-sm">{policyNumber}</TableCell>
+                          <TableCell className="text-slate-300">{carrierCodeDisplay}</TableCell>
+                          <TableCell className="text-slate-300">{salesAgent}</TableCell>
+                          <TableCell className="text-slate-300 text-right">
+                            {commissionRate != null ? String(commissionRate) : ''}
+                          </TableCell>
+                          <TableCell className="text-slate-300 text-right">
+                            {advanceTotal !== 0 ? formatMoney(advanceTotal) : ''}
+                          </TableCell>
+                          <TableCell className="text-slate-300 text-right">
+                            {chargeBackTotal !== 0 ? formatMoney(chargeBackTotal) : ''}
+                          </TableCell>
+                          <TableCell className="text-center text-slate-300 text-sm whitespace-nowrap">
+                            {transactionCount > 1 ? (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedKey(prev => (prev === key ? null : key))}
+                                className="inline-flex items-center px-2 py-1.5 rounded-md text-orange-400 hover:text-orange-300 hover:bg-slate-800 transition-colors"
+                                title="View individual commission transactions for this policy"
+                              >
+                                <span className="font-mono mr-1">{transactionCount}</span>
+                                <span>{expandedKey === key ? 'Hide' : 'Details'}</span>
+                              </button>
+                            ) : (
+                              <span className="text-slate-500">1</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                        {expandedKey === key && transactionCount > 1 && (
+                          <TableRow className="border-b border-slate-900 bg-slate-950/60">
+                            <TableCell colSpan={9} className="p-0">
+                              <div className="px-4 py-3 border-t border-slate-800">
+                                <div className="text-xs font-semibold text-slate-300 mb-2">
+                                  Individual commission transactions for policy {policyNumber}
+                                </div>
+                                <div className="overflow-x-auto rounded-md border border-slate-800 bg-slate-950/80">
+                                  <Table>
+                                    <TableHeader>
+                                      <TableRow className="border-b border-slate-800">
+                                        <TableHead className="text-slate-300 text-xs">Date</TableHead>
+                                        <TableHead className="text-slate-300 text-xs">Name</TableHead>
+                                        <TableHead className="text-slate-300 text-xs">Sales Agent</TableHead>
+                                        <TableHead className="text-slate-300 text-xs text-right">Commission Rate</TableHead>
+                                        <TableHead className="text-slate-300 text-xs text-right">Advance</TableHead>
+                                        <TableHead className="text-slate-300 text-xs text-right">Charge Back</TableHead>
+                                        <TableHead className="text-slate-300 text-xs">Source</TableHead>
+                                      </TableRow>
+                                    </TableHeader>
+                                    <TableBody>
+                                      {detailRows
+                                        .slice()
+                                        .sort((a, b) => {
+                                          const da = normalizeDate(a.date)?.getTime() ?? 0
+                                          const db = normalizeDate(b.date)?.getTime() ?? 0
+                                          return da - db
+                                        })
+                                        .map((tx, i) => {
+                                          return (
+                                            <TableRow key={tx.id || `${key}-tx-${i}`} className="border-b border-slate-900/60">
+                                              <TableCell className="text-slate-300 text-xs">
+                                                {tx.date || '-'}
+                                              </TableCell>
+                                              <TableCell className="text-slate-200 text-xs">
+                                                {tx.name || '-'}
+                                              </TableCell>
+                                              <TableCell className="text-slate-300 text-xs">
+                                                {tx.sales_agent || '-'}
+                                              </TableCell>
+                                              <TableCell className="text-slate-300 text-right text-xs">
+                                                {tx.commission_rate != null ? String(tx.commission_rate) : ''}
+                                              </TableCell>
+                                              <TableCell className="text-slate-300 text-right text-xs">
+                                                {tx.advance_amount != null ? formatMoney(tx.advance_amount) : ''}
+                                              </TableCell>
+                                              <TableCell className="text-slate-300 text-right text-xs">
+                                                {tx.charge_back_amount != null ? formatMoney(tx.charge_back_amount) : ''}
+                                              </TableCell>
+                                              <TableCell className="text-slate-400 text-xs">
+                                                {tx.source_table || ''}
+                                              </TableCell>
+                                            </TableRow>
+                                          )
+                                        })}
+                                    </TableBody>
+                                  </Table>
+                                </div>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </Fragment>
                     )
                   })
                 )}
@@ -520,6 +455,73 @@ export default function CommissionReportPage() {
           </div>
         </CardContent>
       </Card>
+
+      {filtered.length > 0 && (
+        <div className="flex items-center justify-between px-4 py-3 border border-slate-800 bg-slate-900/50 rounded-lg">
+          <div className="text-sm text-slate-400">
+            Showing {filtered.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, filtered.length)} of {filtered.length} rows
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 text-sm text-slate-400">
+              <span>Rows per page:</span>
+              <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
+                <SelectTrigger className="h-8 w-24 bg-slate-950 border-slate-800 text-white text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-slate-800 border-slate-700">
+                  <SelectItem value="25" className="text-white">25</SelectItem>
+                  <SelectItem value="50" className="text-white">50</SelectItem>
+                  <SelectItem value="100" className="text-white">100</SelectItem>
+                  <SelectItem value="250" className="text-white">250</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-400">
+                Page {currentPage} of {totalPages}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage(1)}
+                  disabled={currentPage === 1}
+                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                >
+                  First
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                >
+                  Next
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={currentPage === totalPages}
+                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                >
+                  Last
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

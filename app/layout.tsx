@@ -16,8 +16,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${inter.className} flex h-screen bg-background`}>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${inter.className} flex h-screen bg-background`} suppressHydrationWarning>
         <AppShell>{children}</AppShell>
       </body>
     </html>

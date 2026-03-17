@@ -1,73 +1,23 @@
-const { chromium } = require('playwright');
-const fs = require('fs');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '../..', '.env.local') });
+require('dotenv').config({ path: path.join(__dirname, '../..', '.env') });
+
+const { GologinApi } = require('gologin');
+const fs = require('fs');
 
 function env(name, fallback) {
   return process.env[name] && String(process.env[name]).trim() ? String(process.env[name]).trim() : fallback;
 }
 
-// Generic HTTP proxy config (e.g. Webshare)
-const PROXY_HOST = env('CARRIER_PROXY_HOST', '');
-const PROXY_PORT = env('CARRIER_PROXY_PORT', '');
-const PROXY_USER = env('CARRIER_PROXY_USER', '');
-const PROXY_PASS = env('CARRIER_PROXY_PASS', '');
-const USE_PROXY = env('CARRIER_USE_PROXY', '1') === '1';
-
-const STORAGE_FILE = env('CARRIER_STORAGE_FILE', path.join(__dirname, 'carrier-auth.json'));
+// Token: GOLOGIN_TOKEN or GL_API_TOKEN (same as official SDK example)
+const GOLOGIN_TOKEN = env('GOLOGIN_TOKEN', '') || env('GL_API_TOKEN', '');
+const GOLOGIN_PROFILE_ID = env('GOLOGIN_PROFILE_ID', '') || env('GOLOGIN_PROFILEID', '');
+const PROXY_USER = env('CARRIER_PROXY_USER', '') || env('PROXY_USER', 'user-LMX_P_N0PoY');
+const PROXY_PASS = env('CARRIER_PROXY_PASS', '') || env('PROXY_PASS', '5_vQlWT3~XfrM6S');
+const CARRIER_PROXY_HOST = env('CARRIER_PROXY_HOST', '') || env('PROXY_HOST', '');
+const CARRIER_PROXY_PORT = env('CARRIER_PROXY_PORT', '') || env('PROXY_PORT', '');
+const CARRIER_PROXY_MODE = env('CARRIER_PROXY_MODE', '');
 const DOWNLOAD_DIR = path.join(process.cwd(), 'carrier-downloads');
-
-async function createContextWithSession() {
-  const headless = env('HEADLESS', '0') === '1';
-  if (!fs.existsSync(STORAGE_FILE)) {
-    throw new Error(`No saved session found at ${STORAGE_FILE}. Run "npm run carrier:login" first and log in manually.`);
-  }
-
-  let browser;
-
-  if (USE_PROXY && PROXY_HOST && PROXY_PORT) {
-    const server = `http://${PROXY_HOST}:${PROXY_PORT}`;
-    console.log(`Using HTTP proxy for scrape: ${server}`);
-    browser = await chromium.launch({
-      headless,
-      proxy: {
-        server,
-        username: PROXY_USER || undefined,
-        password: PROXY_PASS || undefined,
-      },
-    });
-  } else {
-    console.log('Launching browser without proxy for scrape.');
-    browser = await chromium.launch({
-      headless,
-    });
-  }
-
-  const context = await browser.newContext({
-    storageState: STORAGE_FILE,
-    acceptDownloads: true,
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
-    viewport: { width: 1365, height: 768 },
-  });
-
-  const page = await context.newPage();
-
-  const HOME_URL = env(
-    'CARRIER_HOME_URL',
-    'https://www.aetnaseniorproducts.com/ssibrokerwebsecure/broker/home.html',
-  );
-
-  await page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
-
-  // If we got bounced back to login, the session is invalid/expired
-  if (page.url().includes('/login') || page.url().includes('aimmanageaccount/login')) {
-    throw new Error(
-      'Saved session appears to be expired (redirected to login). Run "npm run carrier:login" again.',
-    );
-  }
-
-  return { browser, context, page };
-}
 
 async function ensureDownloadDir() {
   if (!fs.existsSync(DOWNLOAD_DIR)) {
@@ -75,10 +25,96 @@ async function ensureDownloadDir() {
   }
 }
 
+async function createBrowserWithSession() {
+  const headless = env('HEADLESS', '0') === '1';
+
+  if (!GOLOGIN_TOKEN || !GOLOGIN_PROFILE_ID) {
+    throw new Error(
+      'Set GOLOGIN_TOKEN and GOLOGIN_PROFILE_ID. Use the same profile you used for carrier:login (session is stored in the profile).',
+    );
+  }
+
+  const GL = GologinApi({
+    token: GOLOGIN_TOKEN,
+    profile_id: GOLOGIN_PROFILE_ID,
+    writeCookiesFromServer: true,
+    extra_params: headless ? ['--headless'] : [],
+  });
+
+  const skipProxy = env('GOLOGIN_SKIP_PROXY', '0') === '1';
+  if (skipProxy) {
+    await GL.changeProfileProxy(GOLOGIN_PROFILE_ID, { mode: 'none' });
+  } else if (CARRIER_PROXY_HOST && CARRIER_PROXY_PORT && CARRIER_PROXY_MODE) {
+    await GL.changeProfileProxy(GOLOGIN_PROFILE_ID, {
+      mode: CARRIER_PROXY_MODE,
+      host: CARRIER_PROXY_HOST,
+      port: Number(CARRIER_PROXY_PORT),
+      username: PROXY_USER,
+      password: PROXY_PASS,
+    });
+  }
+  // Otherwise the proxy set in your GoLogin profile is used as-is.
+
+  const skipProxyCheck = env('GOLOGIN_SKIP_PROXY_CHECK', '0') === '1';
+  const proxyCheckTimeout = Number(env('GOLOGIN_PROXY_CHECK_TIMEOUT_MS', '30000'));
+  const proxyCheckAttempts = Number(env('GOLOGIN_PROXY_CHECK_ATTEMPTS', '5'));
+
+  const launchOptions = {
+    profileId: GOLOGIN_PROFILE_ID,
+    proxyCheckTimeout,
+    proxyCheckAttempts,
+  };
+  if (skipProxyCheck) {
+    launchOptions.timezone = { timezone: 'America/New_York', country: 'US', city: '', ll: [0, 0], accuracy: 0 };
+  }
+
+  console.log(headless ? 'Launching GoLogin profile headless (session loaded from profile).' : 'Launching GoLogin profile (session loaded from profile).');
+  const { browser } = await GL.launch(launchOptions);
+
+  const proxyAuth = { username: PROXY_USER, password: PROXY_PASS };
+
+  // Use newPage() and authenticate before any navigation (same as working login script)
+  const page = await browser.newPage();
+  await page.authenticate(proxyAuth);
+
+  // Apply proxy auth to any new tabs/pages (e.g. from clicks)
+  browser.on('targetcreated', async (target) => {
+    if (target.type() === 'page') {
+      try {
+        const p = await target.page();
+        if (p) await p.authenticate(proxyAuth);
+      } catch (_) {}
+    }
+  });
+
+  await page.setViewport({ width: 1365, height: 768 });
+
+  const HOME_URL = env(
+    'CARRIER_HOME_URL',
+    'https://www.aetnaseniorproducts.com/ssibrokerwebsecure/broker/home.html',
+  );
+
+  try {
+    await page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  } catch (err) {
+    console.warn('Non-fatal navigation error on HOME_URL (continuing anyway):', err.message || err);
+  }
+
+  if (page.url().includes('/login') || page.url().includes('aimmanageaccount/login')) {
+    await browser.close();
+    await GL.exit();
+    throw new Error(
+      'Session in GoLogin profile appears expired (redirected to login). Run "npm run carrier:login" again.',
+    );
+  }
+
+  return { browser, page, GL };
+}
+
 async function scrapePolicies() {
   await ensureDownloadDir();
 
-  const { browser, context, page } = await createContextWithSession();
+  const { browser, page, GL } = await createBrowserWithSession();
 
   try {
     const POLICIES_URL = env('CARRIER_POLICIES_URL', '');
@@ -89,11 +125,19 @@ async function scrapePolicies() {
     }
     console.log(`Opening policies page: ${POLICIES_URL}`);
 
-    await page.goto(POLICIES_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    try {
+      await page.goto(POLICIES_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    } catch (err) {
+      console.warn('Non-fatal navigation error on POLICIES_URL (page may still be loaded):', err.message || err);
+    }
 
-    // Example selector for policy rows/links – replace with what you see in the DOM
+    const client = await page.target().createCDPSession();
+    await client.send('Page.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: DOWNLOAD_DIR,
+    });
+
     const policyLinks = await page.$$('[data-test="policy-row-link"]');
-
     console.log(`Found ${policyLinks.length} policy rows.`);
 
     for (let i = 0; i < policyLinks.length; i += 1) {
@@ -101,37 +145,37 @@ async function scrapePolicies() {
       console.log(`Processing policy ${i + 1}/${policyLinks.length}`);
 
       await link.click();
-      await page.waitForLoadState('domcontentloaded');
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(() => {});
 
-      // Example download button selector – replace with the real selector
-      const downloadPromise = page.waitForEvent('download');
-      await page.click('[data-test="download-policy"]');
-      const download = await downloadPromise;
+      const downloadBtn = await page.$('[data-test="download-policy"]');
+      if (downloadBtn) {
+        await downloadBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
 
-      const suggestedFilename = download.suggestedFilename();
-      const targetPath = path.join(DOWNLOAD_DIR, suggestedFilename);
-      await download.saveAs(targetPath);
-
-      console.log(`Saved policy to ${targetPath}`);
-
-      // Go back to the list and add a small random delay
       await page.goBack({ waitUntil: 'domcontentloaded' });
       const delay = 1000 + Math.random() * 2000;
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
 
-    await context.close();
     await browser.close();
+    await GL.exit();
   } catch (err) {
     console.error('Error during policy scraping:', err);
-    await context.close();
-    await browser.close();
+    try {
+      await browser.close();
+      await GL.exit();
+    } catch {
+      // ignore
+    }
     process.exit(1);
   }
 }
 
 scrapePolicies().catch((err) => {
   console.error('Top-level scrape error:', err);
+  if (err.message && err.message.includes('Proxy Error')) {
+    console.error('\nTip: Try GOLOGIN_PROXY_CHECK_TIMEOUT_MS and GOLOGIN_PROXY_CHECK_ATTEMPTS, or GOLOGIN_SKIP_PROXY=1.');
+  }
   process.exit(1);
 });
-

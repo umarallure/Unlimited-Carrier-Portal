@@ -36,9 +36,18 @@ export function useDealTrackerUpload() {
       hasPendingRows: !!pendingRowsPayload,
     })
 
-    // Only process supported carriers (Aetna, AMAM, MOH, RNA, Transamerica, Liberty, Corebridge) for Policy and Commission files
+    const upperCode = (carrierCode || '').toUpperCase()
+    // Only process supported carriers (Aetna, AMAM, MOH, RNA, Transamerica, Liberty, Corebridge, AFLAC, Sentinel) for Policy and Commission files
     const shouldProcess =
-      (carrierCode === 'AETNA' || carrierCode === 'AMAM' || carrierCode === 'MOH' || carrierCode === 'RNA' || carrierCode === 'TRANSAMERICA' || carrierCode === 'LIBERTY' || carrierCode === 'COREBRIDGE') &&
+      (upperCode === 'AETNA' ||
+        upperCode === 'AMAM' ||
+        upperCode === 'MOH' ||
+        upperCode === 'RNA' ||
+        upperCode === 'TRANSAMERICA' ||
+        upperCode === 'LIBERTY' ||
+        upperCode === 'COREBRIDGE' ||
+        upperCode === 'AFLAC' ||
+        upperCode === 'SENTINEL') &&
       (fileType === 'Policy' || fileType === 'Commission')
     if (!shouldProcess) {
       console.log('[Deal Tracker Hook] Skipping - conditions not met:', {

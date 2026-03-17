@@ -330,9 +330,11 @@ export default function CarriersPage() {
                             </TableRow>
                         ) : (
                             paginatedCarriers.map((carrier) => (
-                                <TableRow key={carrier.id} className="border-b border-slate-800 hover:bg-slate-900/80 transition-colors cursor-pointer"
-                                    onClick={() => window.location.href = `/carriers/${carrier.id}`}>
-                                    <TableCell className="font-medium text-slate-100 hover:text-orange-400 transition-colors">
+                                <TableRow
+                                    key={carrier.id}
+                                    className="border-b border-slate-800 hover:bg-slate-900/80 transition-colors"
+                                >
+                                    <TableCell className="font-medium text-slate-100">
                                         {carrier.name}
                                     </TableCell>
                                     <TableCell className="text-slate-400">
@@ -349,7 +351,10 @@ export default function CarriersPage() {
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
-                                                onClick={() => openDialog(carrier)}
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    openDialog(carrier)
+                                                }}
                                                 className="hover:bg-slate-800 text-slate-200"
                                             >
                                                 <Pencil className="h-4 w-4" />
@@ -358,7 +363,10 @@ export default function CarriersPage() {
                                                 variant="ghost"
                                                 size="icon"
                                                 className="hover:bg-red-900/40 text-red-300"
-                                                onClick={() => handleDeleteCarrier(carrier.id)}
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    handleDeleteCarrier(carrier.id)
+                                                }}
                                             >
                                                 <Trash2 className="h-4 w-4" />
                                             </Button>

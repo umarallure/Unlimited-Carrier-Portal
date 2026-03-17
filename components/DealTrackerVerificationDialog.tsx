@@ -13,11 +13,30 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Input } from '@/components/ui/input'
-import { Loader2, CheckCircle, AlertCircle, PlusCircle, RefreshCw } from 'lucide-react'
+import { Loader2, CheckCircle, AlertCircle, PlusCircle, RefreshCw, ChevronDown, ChevronRight, GitCompare, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DealTrackerPreviewEntry } from '@/lib/dealTracker'
 
-type FilterMode = 'all' | 'new' | 'updated' | 'multiple'
+type FilterMode = 'all' | 'new' | 'updated' | 'changed' | 'multiple'
+
+const FIELD_LABELS: Record<string, string> = {
+  name: 'Name',
+  policy_status: 'Policy Status',
+  carrier_status: 'Carrier Status (raw)',
+  ghl_stage: 'GHL Stage',
+  ghl_name: 'GHL Name',
+  deal_value: 'Deal Value',
+  cc_value: 'CC Value',
+  charge_back: 'Charge Back',
+  sales_agent: 'Sales Agent',
+  writing_number: 'Writing #',
+  call_center: 'Call Center',
+  phone_number: 'Phone',
+  deal_creation_date: 'Deal Date',
+  effective_date: 'Effective Date',
+  notes: 'Notes',
+  status: 'Status',
+}
 
 type DdfMatchRow = {
   insured_name: string | null
@@ -78,12 +97,14 @@ export function DealTrackerVerificationDialog({
   const isLoading = !!(open && loadingMessage && entries.length === 0)
   const [openDdfRowKey, setOpenDdfRowKey] = useState<string | null>(null)
   const [ddfMatches, setDdfMatches] = useState<Record<string, { loading: boolean; error: string | null; matches: DdfMatchRow[] }>>({})
+  const [expandedChangesRowKey, setExpandedChangesRowKey] = useState<string | null>(null)
 
   // Keep editable state in sync with props when dialog opens or entries change
   useEffect(() => {
     if (open && entries.length > 0) {
       setEditableEntries(entries.map(e => ({ ...e })))
       setFilter('all')
+      setExpandedChangesRowKey(null)
     }
   }, [open, entries])
 
@@ -120,17 +141,20 @@ export function DealTrackerVerificationDialog({
 
   const newCount = editableEntries.filter(e => e.isNew).length
   const updatedCount = editableEntries.filter(e => e.isUpdated && !e.isNew).length
+  const changedCount = editableEntries.filter(e => e.isUpdated && !e.isNew && (e.changedFields?.length ?? 0) > 0).length
 
-  // Names that appear more than once (same person, multiple policies) for highlighting
+  // Names that appear more than once among NEW rows (same person, multiple policies) for highlighting
   const duplicateNames = (() => {
     const count = new Map<string, number>()
     editableEntries.forEach(e => {
+      if (!e.isNew) return
       const n = (e.name || '').trim().toLowerCase()
       if (n) count.set(n, (count.get(n) || 0) + 1)
     })
     return new Set([...count.entries()].filter(([, c]) => c > 1).map(([name]) => name))
   })()
   const multipleRowsCount = editableEntries.filter(e => {
+    if (!e.isNew) return false
     const n = (e.name || '').trim().toLowerCase()
     return n && duplicateNames.has(n)
   }).length
@@ -140,12 +164,15 @@ export function DealTrackerVerificationDialog({
       ? editableEntries.filter(e => e.isNew)
       : filter === 'updated'
         ? editableEntries.filter(e => e.isUpdated && !e.isNew)
-        : filter === 'multiple'
-          ? editableEntries.filter(e => {
-              const n = (e.name || '').trim().toLowerCase()
-              return n && duplicateNames.has(n)
-            })
-          : editableEntries
+        : filter === 'changed'
+          ? editableEntries.filter(e => e.isUpdated && !e.isNew && (e.changedFields?.length ?? 0) > 0)
+          : filter === 'multiple'
+            ? editableEntries.filter(e => {
+                if (!e.isNew) return false
+                const n = (e.name || '').trim().toLowerCase()
+                return n && duplicateNames.has(n)
+              })
+            : editableEntries
 
   const loadDdfMatches = useCallback(async (rowKey: string, carrier: string | null, name: string | null) => {
     const trimmedName = (name || '').trim()
@@ -205,7 +232,8 @@ export function DealTrackerVerificationDialog({
 
         {/* Filter tabs */}
         {!isLoading && (
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
             <span className="text-slate-400 text-sm mr-2">Show:</span>
             <Button
               type="button"
@@ -238,6 +266,17 @@ export function DealTrackerVerificationDialog({
             </Button>
             <Button
               type="button"
+              variant={filter === 'changed' ? 'default' : 'outline'}
+              size="sm"
+              className={filter === 'changed' ? 'bg-amber-600 hover:bg-amber-700' : 'border-slate-600 text-slate-300'}
+              onClick={() => setFilter('changed')}
+              title="Rows where at least one field value changed (click a row to see what changed)"
+            >
+              <GitCompare className="w-3.5 h-3.5 mr-1" />
+              Changed ({changedCount})
+            </Button>
+            <Button
+              type="button"
               variant={filter === 'multiple' ? 'default' : 'outline'}
               size="sm"
               className={filter === 'multiple' ? 'bg-amber-700 hover:bg-amber-800' : 'border-slate-600 text-slate-300'}
@@ -246,6 +285,59 @@ export function DealTrackerVerificationDialog({
               <AlertCircle className="w-3.5 h-3.5 mr-1" />
               Multiple ({multipleRowsCount})
             </Button>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="border-slate-600 text-slate-200 hover:bg-slate-800"
+                onClick={() => {
+                  const template = editableEntries[0]
+                  const base: DealTrackerPreviewEntry = {
+                    agency_carrier_id: template?.agency_carrier_id ?? '',
+                    name: null,
+                    tasks: null,
+                    ghl_name: template?.ghl_name ?? null,
+                    ghl_stage: template?.ghl_stage ?? null,
+                    policy_status: null,
+                    deal_creation_date: null,
+                    policy_number: '',
+                    carrier: template?.carrier ?? '',
+                    carrier_id: template?.carrier_id ?? null,
+                    deal_value: null,
+                    cc_value: null,
+                    charge_back: null,
+                    notes: null,
+                    status: null,
+                    last_updated: new Date().toISOString(),
+                    sales_agent: null,
+                    writing_number: null,
+                    commission_type: null,
+                    effective_date: null,
+                    call_center: null,
+                    phone_number: null,
+                    cc_pmt_ws: null,
+                    cc_cb_ws: null,
+                    carrier_status: null,
+                    policy_type: null,
+                    daily_deal_flow_fetched: false,
+                    daily_deal_flow_fetched_at: null,
+                    source_policy_table: null,
+                    source_policy_id: null,
+                    source_commission_table: null,
+                    source_commission_id: null,
+                    isNew: true,
+                    isUpdated: false,
+                  }
+                  setEditableEntries(prev => [...prev, base])
+                  setFilter('new')
+                }}
+              >
+                <PlusCircle className="w-3.5 h-3.5 mr-1" />
+                Add row
+              </Button>
+            </div>
           </div>
         )}
 
@@ -283,7 +375,9 @@ export function DealTrackerVerificationDialog({
                   <TableHead className="text-slate-200 font-semibold min-w-[120px]">Name</TableHead>
                   <TableHead className="text-slate-200 font-semibold w-28">Policy #</TableHead>
                   <TableHead className="text-slate-200 font-semibold min-w-[100px]">Policy Status</TableHead>
+                  <TableHead className="text-slate-200 font-semibold min-w-[110px]">GHL Stage</TableHead>
                   <TableHead className="text-slate-200 font-semibold min-w-[100px]" title="Raw status from carrier file (no mapping)">Carrier Status (raw)</TableHead>
+                  <TableHead className="text-slate-200 font-semibold min-w-[90px]" title="Rule-based: NOT yet paid / Charge Back / Paid from deal value">Status</TableHead>
                   <TableHead className="text-slate-200 font-semibold w-24">Deal Value</TableHead>
                   <TableHead className="text-slate-200 font-semibold w-24">CC Value</TableHead>
                   <TableHead className="text-slate-200 font-semibold min-w-[100px]">Sales Agent</TableHead>
@@ -299,17 +393,27 @@ export function DealTrackerVerificationDialog({
               <TableBody>
                 {filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={15} className="text-center text-slate-500 py-8">
+                    <TableCell colSpan={17} className="text-center text-slate-500 py-8">
                       No entries match the current filter. Switch to &quot;All&quot; to see all rows.
                     </TableCell>
                   </TableRow>
                 ) : filteredEntries.map((entry, idx) => {
                   const globalIndex = editableEntries.findIndex(e => e.policy_number === entry.policy_number && e.agency_carrier_id === entry.agency_carrier_id)
                   const isUpdated = entry.isUpdated && !entry.isNew
+                  const changed = entry.changedFields ?? []
                   const isDuplicateName = (entry.name || '').trim().toLowerCase() && duplicateNames.has((entry.name || '').trim().toLowerCase())
                   const rowKey = `${entry.agency_carrier_id}-${entry.policy_number}-${globalIndex}`
                   const ddfState = ddfMatches[rowKey] || { loading: false, error: null, matches: [] }
                   const isExpanded = openDdfRowKey === rowKey
+                  const changesExpanded = expandedChangesRowKey === rowKey
+                  const hasChanges = changed.length > 0
+                  const cellChanged = (field: string) => isUpdated && changed.includes(field)
+                  const formatChangeValue = (v: unknown): string => {
+                    if (v == null) return '—'
+                    if (typeof v === 'number') return String(v)
+                    const s = String(v).trim()
+                    return s || '—'
+                  }
                   return (
                     <React.Fragment key={rowKey}>
                     <TableRow
@@ -321,18 +425,47 @@ export function DealTrackerVerificationDialog({
                       )}
                     >
                       <TableCell className="align-middle py-1">
-                        <div className="flex flex-col gap-0.5">
+                        <div className="flex flex-col gap-1">
                           {entry.isNew ? (
                             <Badge className="bg-green-600 hover:bg-green-700 text-white font-semibold text-xs w-fit">New</Badge>
                           ) : entry.isUpdated ? (
                             <Badge className="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs w-fit">Updated</Badge>
                           ) : null}
+                          {hasChanges && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-950/40 text-xs flex items-center gap-0.5 w-fit"
+                              onClick={() => setExpandedChangesRowKey(k => k === rowKey ? null : rowKey)}
+                              title="Show what changed"
+                            >
+                              {changesExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                              <GitCompare className="w-3 h-3" />
+                              <span>Changes</span>
+                            </Button>
+                          )}
                           {isDuplicateName && (
                             <Badge variant="outline" className="border-amber-500 text-amber-400 text-xs w-fit" title="Same insured name appears on multiple rows (multiple policies)">Multiple</Badge>
                           )}
+                          <div className="flex">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-1.5 text-red-400 hover:text-red-300 hover:bg-red-950/40 text-xs w-fit"
+                              onClick={() =>
+                                setEditableEntries(prev => prev.filter((_, i) => i !== globalIndex))
+                              }
+                              title="Remove this row from this upload (will not be saved/updated)"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              <span className="ml-0.5">Remove</span>
+                            </Button>
+                          </div>
                         </div>
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('name') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           value={entry.name ?? ''}
                           onChange={e => updateEntry(globalIndex, 'name', e.target.value.trim() || null)}
@@ -340,8 +473,19 @@ export function DealTrackerVerificationDialog({
                           placeholder="-"
                         />
                       </TableCell>
-                      <TableCell className="font-mono text-slate-300 text-sm py-1 align-middle">{entry.policy_number}</TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1 align-middle', cellChanged('policy_number') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
+                        {entry.isNew ? (
+                          <Input
+                            value={entry.policy_number ?? ''}
+                            onChange={e => updateEntry(globalIndex, 'policy_number', e.target.value.trim())}
+                            className="h-8 bg-slate-900 border-slate-600 text-slate-100 text-sm font-mono"
+                            placeholder="Policy #"
+                          />
+                        ) : (
+                          <span className="font-mono text-slate-300 text-sm">{entry.policy_number}</span>
+                        )}
+                      </TableCell>
+                      <TableCell className={cn('p-1', cellChanged('policy_status') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           value={entry.policy_status ?? ''}
                           onChange={e => updateEntry(globalIndex, 'policy_status', e.target.value.trim() || null)}
@@ -349,10 +493,21 @@ export function DealTrackerVerificationDialog({
                           placeholder="-"
                         />
                       </TableCell>
-                      <TableCell className="p-1 text-slate-300 text-sm" title="Raw status from carrier file">
+                      <TableCell className={cn('p-1', cellChanged('ghl_stage') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
+                        <Input
+                          value={entry.ghl_stage ?? ''}
+                          onChange={e => updateEntry(globalIndex, 'ghl_stage', e.target.value.trim() || null)}
+                          className="h-8 bg-slate-900 border-slate-600 text-slate-100 text-sm"
+                          placeholder="-"
+                        />
+                      </TableCell>
+                      <TableCell className={cn('p-1 text-slate-300 text-sm', cellChanged('carrier_status') && 'bg-amber-500/20 border-l-2 border-amber-500')} title="Raw status from carrier file">
                         {entry.carrier_status ?? '-'}
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1 text-slate-300 text-sm align-middle', cellChanged('status') && 'bg-amber-500/20 border-l-2 border-amber-500')} title="Rule-based from deal value: NOT yet paid / Charge Back / Paid">
+                        <span className="font-medium">{entry.status ?? '—'}</span>
+                      </TableCell>
+                      <TableCell className={cn('p-1', cellChanged('deal_value') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           type="number"
                           step="0.01"
@@ -365,7 +520,7 @@ export function DealTrackerVerificationDialog({
                           placeholder="-"
                         />
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('cc_value') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           type="number"
                           step="0.01"
@@ -375,7 +530,7 @@ export function DealTrackerVerificationDialog({
                           placeholder="-"
                         />
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('sales_agent') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           value={entry.sales_agent ?? ''}
                           onChange={e => updateEntry(globalIndex, 'sales_agent', e.target.value.trim() || null)}
@@ -383,7 +538,7 @@ export function DealTrackerVerificationDialog({
                           placeholder="-"
                         />
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('writing_number') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           value={entry.writing_number ?? ''}
                           onChange={e => updateEntry(globalIndex, 'writing_number', e.target.value.trim() || null)}
@@ -417,7 +572,7 @@ export function DealTrackerVerificationDialog({
                           )}
                         </div>
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('call_center') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           value={entry.call_center ?? ''}
                           onChange={e => updateEntry(globalIndex, 'call_center', e.target.value.trim() || null)}
@@ -425,7 +580,7 @@ export function DealTrackerVerificationDialog({
                           placeholder="-"
                         />
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('phone_number') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           value={entry.phone_number ?? ''}
                           onChange={e => updateEntry(globalIndex, 'phone_number', e.target.value.trim() || null)}
@@ -433,7 +588,7 @@ export function DealTrackerVerificationDialog({
                           placeholder="-"
                         />
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('deal_creation_date') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           type="date"
                           value={toDateInputValue(entry.deal_creation_date)}
@@ -441,7 +596,7 @@ export function DealTrackerVerificationDialog({
                           className="h-8 bg-slate-900 border-slate-600 text-slate-100 text-sm"
                         />
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('effective_date') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           type="date"
                           value={toDateInputValue(entry.effective_date)}
@@ -449,7 +604,7 @@ export function DealTrackerVerificationDialog({
                           className="h-8 bg-slate-900 border-slate-600 text-slate-100 text-sm"
                         />
                       </TableCell>
-                      <TableCell className="p-1">
+                      <TableCell className={cn('p-1', cellChanged('notes') && 'bg-amber-500/20 border-l-2 border-amber-500')}>
                         <Input
                           value={entry.notes ?? ''}
                           onChange={e => updateEntry(globalIndex, 'notes', e.target.value.trim() || null)}
@@ -458,9 +613,31 @@ export function DealTrackerVerificationDialog({
                         />
                       </TableCell>
                     </TableRow>
+                    {changesExpanded && hasChanges && (
+                      <TableRow className="bg-slate-950/80 border-slate-700">
+                        <TableCell colSpan={17} className="py-3 px-4 border-t-0">
+                          <div className="text-xs font-medium text-slate-400 mb-2">What changed (previous → current)</div>
+                          <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+                            {(entry.changedFields ?? []).map(field => {
+                              const label = FIELD_LABELS[field] ?? field.replace(/_/g, ' ')
+                              const oldVal = entry.previousValues?.[field]
+                              const newVal = (entry as unknown as Record<string, unknown>)[field]
+                              return (
+                                <div key={field} className="flex items-center gap-2 text-slate-200">
+                                  <span className="text-slate-500 shrink-0">{label}:</span>
+                                  <span className="text-red-300/90 line-through">{formatChangeValue(oldVal)}</span>
+                                  <span className="text-slate-500">→</span>
+                                  <span className="text-green-300/90 font-medium">{formatChangeValue(newVal)}</span>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
                     {isExpanded && (
                       <TableRow key={`${rowKey}-ddf`}>
-                        <TableCell colSpan={14} className="bg-slate-950/60 border-t border-slate-700 py-2">
+                        <TableCell colSpan={17} className="bg-slate-950/60 border-t border-slate-700 py-2">
                           {ddfState.loading && (
                             <div className="flex items-center gap-2 text-xs text-slate-300">
                               <Loader2 className="h-4 w-4 animate-spin text-slate-400" />

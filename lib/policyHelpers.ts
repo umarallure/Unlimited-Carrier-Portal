@@ -90,7 +90,10 @@ export async function fetchPolicyRecords(
     const { data, error } = await query;
 
     if (error) {
-        throw error;
+        // Avoid breaking the carrier page when the table/migration
+        // is missing; just log and return an empty list.
+        console.warn('fetchPolicyRecords error:', error);
+        return [];
     }
 
     return data || [];

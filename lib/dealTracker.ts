@@ -59,9 +59,135 @@ export interface DealTrackerEntry {
   source_commission_id: string | null
 }
 
+/** Fields we compare to detect "what changed" for the verification dialog highlight */
+export const DEAL_TRACKER_COMPARABLE_FIELDS = [
+  'name', 'policy_status', 'ghl_stage', 'carrier_status', 'deal_value', 'cc_value', 'charge_back',
+  'sales_agent', 'writing_number', 'call_center', 'phone_number',
+  'deal_creation_date', 'effective_date', 'notes', 'status',
+] as const
+
 export interface DealTrackerPreviewEntry extends DealTrackerEntry {
   isNew: boolean
   isUpdated: boolean
+  /** Set for updated rows: list of field names that differ from existing row (for UI highlight) */
+  changedFields?: string[]
+  /** Set for updated rows: previous values for changed fields only (for "what changed" view) */
+  previousValues?: Partial<Record<string, unknown>>
+}
+
+/**
+ * Compare old and new row and return field names whose values changed (for highlighting in verification dialog).
+ */
+export function getChangedFields(
+  oldRow: Record<string, unknown> | null | undefined,
+  newRow: Record<string, unknown> | null | undefined
+): string[] {
+  if (!oldRow || !newRow) return []
+  const changed: string[] = []
+  for (const key of DEAL_TRACKER_COMPARABLE_FIELDS) {
+    const a = oldRow[key]
+    const b = newRow[key]
+    if (valueEqual(a, b)) continue
+    changed.push(key)
+  }
+  return changed
+}
+
+/**
+ * Return changed field names and previous values for those fields (for "what changed" detail view).
+ */
+export function getChangedFieldsAndPrevious(
+  oldRow: Record<string, unknown> | null | undefined,
+  newRow: Record<string, unknown> | null | undefined
+): { changedFields: string[]; previousValues: Partial<Record<string, unknown>> } {
+  const changedFields = getChangedFields(oldRow, newRow)
+  const previousValues: Partial<Record<string, unknown>> = {}
+  if (oldRow && changedFields.length > 0) {
+    for (const key of changedFields) {
+      previousValues[key] = oldRow[key]
+    }
+  }
+  return { changedFields, previousValues }
+}
+
+/**
+ * Derive changed field names from version_history (for deal tracker page highlight).
+ * version_history is [{ at, snapshot }, ...] with oldest first; we compare latest snapshot to current row.
+ * Status is rule-based from deal_value/charge_back; we only mark it "changed" when that derived value
+ * actually differs, so we don't highlight Status for every row (snapshot often has raw DB status vs enriched derived).
+ */
+export function getChangedFieldsFromHistory(entry: { version_history?: Array<{ snapshot?: Record<string, unknown> }> } & Record<string, unknown>): string[] {
+  const vh = Array.isArray(entry?.version_history) ? entry.version_history : []
+  if (vh.length === 0) return []
+  const prev = vh[vh.length - 1]?.snapshot
+  if (!prev || typeof prev !== 'object') return []
+  let changed = getChangedFields(prev as Record<string, unknown>, entry as Record<string, unknown>)
+  if (changed.includes('status')) {
+    const derivedPrev = statusFromDealValueAndChargeback(prev.deal_value as number | null | undefined, prev.charge_back as number | null | undefined)
+    const derivedCur = statusFromDealValueAndChargeback(entry.deal_value as number | null | undefined, entry.charge_back as number | null | undefined)
+    if (valueEqual(derivedPrev, derivedCur)) changed = changed.filter(f => f !== 'status')
+  }
+  return changed
+}
+
+/** Policy status is mapped from carrier_status; it should only change when carrier_status (raw) changes. */
+export function carrierStatusUnchanged(
+  existing: { carrier_status?: string | null } | null | undefined,
+  newCarrierStatus: string | null | undefined
+): boolean {
+  return valueEqual(existing?.carrier_status, newCarrierStatus)
+}
+
+/**
+ * Normalize string for comparison: trim and collapse internal whitespace so
+ * "Issued  Paid" and "Issued Paid" match.
+ */
+function normalizeTextForCompare(v: unknown): string {
+  if (v == null) return ''
+  return String(v).trim().replace(/\s+/g, ' ')
+}
+
+/** Parse date string to { y, m, d } for comparison; no timezone. Returns null if not a known format. */
+function parseDateParts(s: string): { y: number; m: number; d: number } | null {
+  const t = s.trim()
+  const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t)
+  if (iso) {
+    const y = parseInt(iso[1], 10)
+    const m = parseInt(iso[2], 10) - 1
+    const d = parseInt(iso[3], 10)
+    if (m >= 0 && m <= 11 && d >= 1 && d <= 31) return { y, m, d }
+  }
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(t)
+  if (us) {
+    const m = parseInt(us[1], 10) - 1
+    const d = parseInt(us[2], 10)
+    const y = parseInt(us[3], 10)
+    if (m >= 0 && m <= 11 && d >= 1 && d <= 31) return { y, m, d }
+  }
+  return null
+}
+
+function valueEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (a == null && b == null) return true
+  if (a == null || b == null) return false
+  if (typeof a === 'number' && typeof b === 'number') return a === b
+  if (typeof a === 'number' || typeof b === 'number') {
+    const an = typeof a === 'number' ? a : parseFloat(String(a))
+    const bn = typeof b === 'number' ? b : parseFloat(String(b))
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an === bn
+  }
+  const sa = normalizeTextForCompare(a)
+  const sb = normalizeTextForCompare(b)
+  if (sa === sb) return true
+  // Case-insensitive compare for text (avoids "Issued Paid" vs "Issued paid" or "NOT yet paid" vs "Not Yet payed")
+  if (sa.toLowerCase() === sb.toLowerCase()) return true
+  // Date comparison: same calendar day = equal (so "2025-09-09" and "09/09/2025" are not a "change").
+  // Parse as date parts so timezone and format don't affect result.
+  const pa = sa ? parseDateParts(sa) : null
+  const pb = sb ? parseDateParts(sb) : null
+  if (pa && pb && pa.y === pb.y && pa.m === pb.m && pa.d === pb.d) return true
+  return false
 }
 
 type DailyDealFlowInfo = {
@@ -79,9 +205,9 @@ export async function bulkFetchStatusMappings(
   carrierCode: string | null
 ): Promise<Map<string, string>> {
   const statusMap = new Map<string, string>()
-  
+
   console.log('[Deal Tracker] Bulk fetching status mappings for carrier_id:', carrierId)
-  
+
   // Fetch all mappings for this carrier_id
   const { data: mappings, error } = await supabase
     .from('carrier_status_mapping')
@@ -112,6 +238,62 @@ export async function bulkFetchStatusMappings(
   }
 
   return statusMap
+}
+
+/**
+ * Bulk fetch GHL stage mappings for a carrier.
+ * Maps raw carrier status -> ghl_stage using carrier_ghl_stage_mappings table.
+ * For now we take the first mapping per status (there may be multiple rows per status).
+ */
+export async function bulkFetchGhlStageMappings(
+  carrierId: string,
+  carrierCode: string | null
+): Promise<Map<string, string>> {
+  const ghlMap = new Map<string, string>()
+
+  console.log('[Deal Tracker] Bulk fetching GHL stage mappings for carrier_id:', carrierId)
+
+  // Primary: by carrier_id
+  const { data: mappings, error } = await supabase
+    .from('carrier_ghl_stage_mappings')
+    .select('carrier_status_in_carrier_portal, ghl_stage')
+    .eq('carrier_id', carrierId)
+
+  if (!error && mappings && mappings.length > 0) {
+    mappings.forEach(m => {
+      const status = m.carrier_status_in_carrier_portal
+      const stage = m.ghl_stage
+      if (!status || !stage) return
+      // Only set first mapping per status; additional rows are ignored for now.
+      if (!ghlMap.has(status)) {
+        ghlMap.set(status, stage)
+      }
+    })
+    console.log('[Deal Tracker] Loaded', mappings.length, 'GHL mappings by carrier_id (unique statuses:', ghlMap.size, ')')
+  }
+
+  // Fallback: by carrier_code
+  if (ghlMap.size === 0 && carrierCode) {
+    console.log('[Deal Tracker] No GHL mappings by carrier_id, trying carrier_code:', carrierCode)
+    const { data: fallbackMappings, error: fallbackError } = await supabase
+      .from('carrier_ghl_stage_mappings')
+      .select('carrier_status_in_carrier_portal, ghl_stage')
+      .eq('carrier_code', carrierCode)
+
+    if (!fallbackError && fallbackMappings && fallbackMappings.length > 0) {
+      fallbackMappings.forEach(m => {
+        const status = m.carrier_status_in_carrier_portal
+        const stage = m.ghl_stage
+        if (!status || !stage) return
+        if (!ghlMap.has(status)) {
+          ghlMap.set(status, stage)
+        }
+      })
+      console.log('[Deal Tracker] Loaded', fallbackMappings.length, 'GHL mappings by carrier_code (unique statuses:', ghlMap.size, ')')
+    }
+  }
+
+  return ghlMap
 }
 
 /**
@@ -979,12 +1161,14 @@ export async function processAetnaCommissionsForDealTracker(
     }
   }
 
-  // Bulk fetch status mappings and daily_deal_flow for new entries (if needed)
+  // Bulk fetch status mappings, GHL mappings, and daily_deal_flow for new entries (if needed)
   let statusMappingMap = new Map<string, string>()
+  let ghlStageMappingMap = new Map<string, string>()
   let dailyDealFlowMap = new Map<string, DailyDealFlowInfo>()
   
   if (missingPolicyNumbers.length > 0) {
     statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+    ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
     const policyNamesForDDF = Array.from(policiesMap.values())
       .map(p => p.insuredname)
       .filter(name => name && name.trim().length > 0)
@@ -1050,6 +1234,10 @@ export async function processAetnaCommissionsForDealTracker(
         isNew: false,
         isUpdated: true,
       }
+      const newSnapshot = { ...existing, deal_value: dealValue, cc_value: ccValue, charge_back: effectiveChargeBack, status: derivedStatus, sales_agent: commission.writingagentname || existing.sales_agent, writing_number: commission.writingagentnumber || existing.writing_number, commission_type: commission.commissiontype || existing.commission_type } as Record<string, unknown>
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as Record<string, unknown>, newSnapshot)
+      entry.changedFields = changedFields
+      entry.previousValues = previousValues
       previewEntries.push(entry)
     } else {
       // Check if policy exists (to create new deal_tracker entry)
@@ -1059,6 +1247,7 @@ export async function processAetnaCommissionsForDealTracker(
         // Policy exists but no deal_tracker entry - create new one
         const originalStatus = policy.statusdisplaytext || policy.statuscategory
         const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+        const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
 
         // Get daily_deal_flow info from bulk fetch map
         const normalizedName = normalizeNameForSearch(policy.insuredname || '')
@@ -1073,7 +1262,7 @@ export async function processAetnaCommissionsForDealTracker(
           name: policy.insuredname || null,
           tasks: null,
           ghl_name: null,
-          ghl_stage: null,
+          ghl_stage: mappedGhlStage,
           policy_status: mappedStatus,
           deal_creation_date: policy.apprecddate || policy.issuedate || null,
           policy_number: commission.policy_number,
@@ -1241,10 +1430,16 @@ export async function processAetnaFilesForDealTracker(
     })
   }
 
-  // OPTIMIZATION: Bulk fetch status mappings once (instead of querying for each policy)
-  console.log('[Deal Tracker] Bulk fetching status mappings...')
+  // OPTIMIZATION: Bulk fetch status + GHL mappings once (instead of querying for each policy)
+  console.log('[Deal Tracker] Bulk fetching status + GHL mappings...')
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
-  console.log('[Deal Tracker] Status mappings loaded:', statusMappingMap.size, 'mappings')
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
+  console.log(
+    '[Deal Tracker] Status mappings loaded:',
+    statusMappingMap.size,
+    'status mappings; GHL mappings:',
+    ghlStageMappingMap.size
+  )
 
   // BULK FETCH DDF only for policies that don't already have call_center/phone (skip re-lookup for already-filled rows)
   const policiesNeedingDdf = policies.filter(p => {
@@ -1277,6 +1472,7 @@ export async function processAetnaFilesForDealTracker(
     // Map policy status using cached mapping (NO database query!)
     const originalStatus = policy.statusdisplaytext || policy.statuscategory
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
     if (i < 3) {
       console.log(`[Deal Tracker] Status mapping for policy ${i + 1}:`, {
         original: originalStatus,
@@ -1358,28 +1554,46 @@ export async function processAetnaFilesForDealTracker(
     // 1) draft_date from daily_deal_flow (when available)
     // 2) commission.effectivedate (when we have a commission)
     // 3) existing.effective_date (so policy-only runs don't clear it)
+    // Do NOT overwrite an existing effective_date; only set when we don't already have one.
+    const existingEffectiveDate = existing?.effective_date ?? null
     const effectiveDate =
-      effectiveDateFromDdf ||
-      (commission?.effectivedate ?? null) ||
-      (existing?.effective_date ?? null)
+      (existingEffectiveDate != null && existingEffectiveDate !== '')
+        ? existingEffectiveDate
+        : (effectiveDateFromDdf || (commission?.effectivedate ?? null))
 
     const derivedStatus = statusFromDealValue(dealValue)
+    const chargeBackForEntry = existing?.charge_back ?? null
+    // Rule-based status only changes with commission/financials; on policy-only upload keep existing status when financials unchanged
+    const statusForEntry =
+      existing && financialsUnchanged(existing, dealValue, chargeBackForEntry)
+        ? (existing.status ?? derivedStatus)
+        : derivedStatus
+
+    const carrierStatusForPolicy = policy.statusdisplaytext || policy.statuscategory || null
+    const statusUnchanged = existing && carrierStatusUnchanged(existing, carrierStatusForPolicy)
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: policy.insuredname || null,
       tasks: null,
-      ghl_name: null,
-      ghl_stage: null,
-      policy_status: mappedStatus,
-      deal_creation_date: policy.apprecddate || policy.issuedate || null,
+      ghl_name: existing?.ghl_name ?? null,
+      // Only remap when carrier status changed or policy is new.
+      ghl_stage: statusUnchanged
+        ? (existing?.ghl_stage ?? null)
+        : (mappedGhlStage ?? null),
+      policy_status: statusUnchanged
+        ? (existing?.policy_status ?? mappedStatus ?? carrierStatusForPolicy)
+        : (mappedStatus ?? carrierStatusForPolicy),
+      // Preserve existing deal_creation_date when present
+      deal_creation_date: existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null),
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
-      charge_back: existing?.charge_back ?? null,
-      notes: null,
-      status: derivedStatus,
+      charge_back: chargeBackForEntry,
+      notes: existing?.notes ?? null,
+      status: statusForEntry,
       last_updated: new Date().toISOString(),
       sales_agent: policy.agentcompletename || commission?.writingagentname || null,
       writing_number: policy.agentnumber || commission?.writingagentnumber || null,
@@ -1400,7 +1614,11 @@ export async function processAetnaFilesForDealTracker(
       isNew: !existing,
       isUpdated: !!existing,
     }
-
+    if (existing) {
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as unknown as Record<string, unknown>, entry as unknown as Record<string, unknown>)
+      entry.changedFields = changedFields
+      entry.previousValues = previousValues
+    }
     previewEntries.push(entry)
   }
 
@@ -1511,6 +1729,7 @@ export async function processAmamFilesForDealTracker(
   }
 
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   // Only fetch DDF for policies that don't already have call_center/phone (skip re-lookup for already-filled rows)
   const policiesNeedingDdfAmam = policies.filter(p => {
     const ex = existingMap.get(p.policy_number)
@@ -1533,6 +1752,7 @@ export async function processAmamFilesForDealTracker(
     const insuredName = buildAmamInsuredName(policy)
     const originalStatus = policy.status_raw || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
 
     // Use existing call_center/phone if already set (no re-lookup); else look up DDF
     const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
@@ -1555,34 +1775,70 @@ export async function processAmamFilesForDealTracker(
       console.log('[Deal Tracker] AMAM policy sample', entryIndex + 1, '| insuredName:', insuredName, '| normalized:', normalizeNameForSearch(insuredName), '| ddfFound:', !!(callCenter || phoneNumber), '| call_center:', callCenter ?? '(empty)', '| phone:', phoneNumber ?? '(empty)')
     }
 
-    const dealValue = commission?.advance != null
-      ? (typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance)
-      : null
-    const ccValue = dealValue != null ? dealValue / 2 : null
-    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
-    const effectiveDate = effectiveDateFromDdf || null
+    // Deal value: from commission when present; otherwise preserve existing (policy-only must not wipe financials)
+    let dealValue: number | null = null
+    let ccValue: number | null = null
+    if (commission?.advance != null) {
+      const parsed = typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance
+      if (Number.isFinite(parsed)) {
+        dealValue = parsed
+        ccValue = parsed / 2
+      }
+    }
+    if (dealValue == null && existing) {
+      dealValue = existing.deal_value != null
+        ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value)
+        : null
+      ccValue = existing.cc_value != null
+        ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value)
+        : (dealValue != null ? dealValue / 2 : null)
+      if (Number.isNaN(dealValue as number)) dealValue = null
+      if (Number.isNaN(ccValue as number)) ccValue = null
+    }
+    // Preserve existing deal_creation_date when present; for NEW policies,
+    // take the deal date from AMAM's recvdate_raw (receipt date), falling
+    // back to policydate_raw / app_date_raw only if recvdate_raw is missing.
+    const dealCreationDate =
+      existing?.deal_creation_date ??
+      (policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null)
+    const existingEffectiveDate = existing?.effective_date ?? null
+    const effectiveDate =
+      (existingEffectiveDate != null && existingEffectiveDate !== '')
+        ? existingEffectiveDate
+        : (effectiveDateFromDdf || (commission?.issdate ?? null))
 
     const derivedStatus = statusFromDealValue(dealValue)
+    const statusForEntry =
+      existing && financialsUnchanged(existing, dealValue, null)
+        ? (existing.status ?? derivedStatus)
+        : derivedStatus
+
+    const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: null,
-      ghl_stage: null,
-      policy_status: mappedStatus,
+      ghl_name: existing?.ghl_name ?? null,
+      ghl_stage: statusUnchanged
+        ? (existing?.ghl_stage ?? null)
+        : (mappedGhlStage ?? null),
+      policy_status: statusUnchanged
+        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
+        : (mappedStatus ?? originalStatus),
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
-      notes: null,
-      status: derivedStatus,
+      notes: existing?.notes ?? null,
+      status: statusForEntry,
       last_updated: new Date().toISOString(),
       sales_agent: policy.agentname_raw || null,
-      writing_number: commission?.writingagent ?? null,
+      writing_number: commission?.writingagent ?? policy.writingagent ?? existing?.writing_number ?? null,
       commission_type: commission?.action ?? null,
-      effective_date: commission?.issdate ?? null,
+      effective_date: effectiveDate,
       call_center: callCenter,
       phone_number: phoneNumber,
       cc_pmt_ws: null,
@@ -1597,6 +1853,11 @@ export async function processAmamFilesForDealTracker(
       source_commission_id: commission?.id ?? null,
       isNew: !existing,
       isUpdated: !!existing,
+    }
+    if (existing) {
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as unknown as Record<string, unknown>, entry as unknown as Record<string, unknown>)
+      entry.changedFields = changedFields
+      entry.previousValues = previousValues
     }
     previewEntries.push(entry)
   }
@@ -1651,7 +1912,15 @@ export async function processAmamFilesForDealTrackerFromRows(
 
   stepStart = Date.now()
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
-  console.log('[Deal Tracker] FromRows: status mappings took', Math.round((Date.now() - stepStart) / 1000), 's')
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
+  console.log(
+    '[Deal Tracker] FromRows: mappings took',
+    Math.round((Date.now() - stepStart) / 1000),
+    's | status:',
+    statusMappingMap.size,
+    '| GHL:',
+    ghlStageMappingMap.size
+  )
 
   const policiesNeedingDdfAmam = policyRows.filter((p: any) => {
     const ex = existingMap.get(p.policy_number)
@@ -1677,6 +1946,7 @@ export async function processAmamFilesForDealTrackerFromRows(
     const insuredName = buildAmamInsuredName(policy)
     const originalStatus = policy.status_raw || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
     const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
     let callCenter: string | null
     let phoneNumber: string | null
@@ -1691,27 +1961,45 @@ export async function processAmamFilesForDealTrackerFromRows(
       phoneNumber = ddfInfo?.phone_number ?? null
       effectiveDateFromDdf = ddfInfo?.draft_date ?? null
     }
-    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
-    const effectiveDate = effectiveDateFromDdf || null
-    const derivedStatus = statusFromDealValue(null)
-    previewEntries.push({
+    const dealCreationDate =
+      existing?.deal_creation_date ??
+      (policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null)
+    const existingEffectiveDate = existing?.effective_date ?? null
+    const effectiveDate =
+      (existingEffectiveDate != null && existingEffectiveDate !== '')
+        ? existingEffectiveDate
+        : effectiveDateFromDdf
+    const preserveDealValue = existing?.deal_value != null ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value) : null
+    const preserveCcValue = existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : (preserveDealValue != null ? preserveDealValue / 2 : null)
+    const dealValueFromRows = Number.isFinite(preserveDealValue) ? preserveDealValue : null
+    const ccValueFromRows = Number.isFinite(preserveCcValue) ? preserveCcValue : null
+    const derivedStatus = statusFromDealValue(dealValueFromRows)
+    const statusForEntry = existing ? (existing.status ?? derivedStatus) : derivedStatus
+
+    const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+
+    const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: null,
-      ghl_stage: null,
-      policy_status: mappedStatus,
+      ghl_name: existing?.ghl_name ?? null,
+      ghl_stage: statusUnchanged
+        ? (existing?.ghl_stage ?? null)
+        : (mappedGhlStage ?? null),
+      policy_status: statusUnchanged
+        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
+        : (mappedStatus ?? originalStatus),
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
-      deal_value: null,
-      cc_value: null,
-      notes: null,
-      status: derivedStatus,
+      deal_value: dealValueFromRows,
+      cc_value: ccValueFromRows,
+      notes: existing?.notes ?? null,
+      status: statusForEntry,
       last_updated: new Date().toISOString(),
       sales_agent: policy.agentname_raw || null,
-      writing_number: null,
+      writing_number: policy.writingagent ?? existing?.writing_number ?? null,
       commission_type: null,
       effective_date: effectiveDate,
       call_center: callCenter,
@@ -1728,7 +2016,13 @@ export async function processAmamFilesForDealTrackerFromRows(
       source_commission_id: null,
       isNew: !existing,
       isUpdated: !!existing,
-    })
+    }
+    if (existing) {
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as unknown as Record<string, unknown>, entry as unknown as Record<string, unknown>)
+      entry.changedFields = changedFields
+      entry.previousValues = previousValues
+    }
+    previewEntries.push(entry)
   }
   console.log('[Deal Tracker] FromRows: policy preview built in', Math.round((Date.now() - totalStart) / 1000), 's total')
   return previewEntries
@@ -1844,9 +2138,11 @@ export async function processAmamCommissionsForDealTracker(
   }
 
   let statusMappingMap = new Map<string, string>()
+  let ghlStageMappingMap = new Map<string, string>()
   let dailyDealFlowMap = new Map<string, DailyDealFlowInfo>()
   if (missingPolicyNumbers.length > 0) {
     statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+    ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   }
   if (allPolicyNumbersNeedingDDF.length > 0) {
     const policyNamesForDDF = Array.from(policiesMap.values())
@@ -1868,9 +2164,44 @@ export async function processAmamCommissionsForDealTracker(
     const policyNumber = commission.policy_number
     const existing = existingMap.get(policyNumber)
     const totalAmount = commissionAmountsMap.get(policyNumber)
-    const dealValue = totalAmount !== undefined && totalAmount !== null
+    let dealValue: number | null = totalAmount !== undefined && totalAmount !== null
       ? totalAmount
       : (commission.advance != null ? (typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance) : null)
+    let chargeBack: number | null = existing?.charge_back ?? null
+
+    // Business rule: when updating an existing policy, deal_value should never become negative.
+    // If the net commission amount for this batch is negative, treat it as a charge back instead
+    // and preserve the prior deal_value.
+    // Also, when the net commission is exactly 0, treat it like "no commission" and keep existing
+    // deal_value/charge_back so rule-based Status does not change.
+    if (existing && dealValue != null) {
+      const numericDeal = typeof dealValue === 'number' ? dealValue : parseFloat(String(dealValue))
+      if (!Number.isNaN(numericDeal) && numericDeal < 0) {
+        const existingDeal =
+          existing.deal_value != null
+            ? (typeof existing.deal_value === 'number'
+                ? existing.deal_value
+                : parseFloat(String(existing.deal_value)))
+            : null
+        dealValue = existingDeal
+        const existingCb =
+          chargeBack != null
+            ? (typeof chargeBack === 'number' ? chargeBack : parseFloat(String(chargeBack)))
+            : 0
+        const newCb = existingCb + numericDeal
+        chargeBack = Number.isNaN(newCb) ? numericDeal : newCb
+      } else if (!Number.isNaN(numericDeal) && numericDeal === 0) {
+        const existingDeal =
+          existing.deal_value != null
+            ? (typeof existing.deal_value === 'number'
+                ? existing.deal_value
+                : parseFloat(String(existing.deal_value)))
+            : null
+        dealValue = Number.isNaN(existingDeal as number) ? null : existingDeal
+        chargeBack = existing.charge_back ?? null
+      }
+    }
+
     const ccValue = dealValue != null ? dealValue / 2 : null
 
     if (existing) {
@@ -1878,6 +2209,7 @@ export async function processAmamCommissionsForDealTracker(
       let phoneNumber = existing.phone_number
       let dailyDealFlowFetched = existing.daily_deal_flow_fetched
       let dailyDealFlowFetchedAt = existing.daily_deal_flow_fetched_at
+      let effectiveDateFromDdf: string | null = null
       const policy = policiesMap.get(policyNumber)
       if (policy && (callCenter == null && phoneNumber == null)) {
         const insuredName = buildAmamInsuredName(policy)
@@ -1888,15 +2220,26 @@ export async function processAmamCommissionsForDealTracker(
           phoneNumber = ddfInfo.phone_number ?? null
           dailyDealFlowFetched = !!(callCenter || phoneNumber)
           dailyDealFlowFetchedAt = (callCenter || phoneNumber) ? new Date().toISOString() : null
+          effectiveDateFromDdf = ddfInfo.draft_date ?? null
         }
       }
-      previewEntries.push({
+      const policyForWriting = policiesMap.get(policyNumber)
+      const existingEffectiveDate = existing.effective_date ?? null
+      const effectiveDate =
+        (existingEffectiveDate != null && existingEffectiveDate !== '')
+          ? existingEffectiveDate
+          : (effectiveDateFromDdf ||
+             (commission.issdate !== null && commission.issdate !== undefined ? commission.issdate : null))
+      const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
+      const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
         deal_value: dealValue,
         cc_value: ccValue,
-        writing_number: commission.writingagent ?? existing.writing_number,
+        charge_back: chargeBack,
+        status: derivedStatus ?? existing.status,
+        writing_number: commission.writingagent ?? policyForWriting?.writingagent ?? existing.writing_number,
         commission_type: commission.action ?? existing.commission_type,
-        effective_date: commission.issdate !== null && commission.issdate !== undefined ? commission.issdate : existing.effective_date,
+        effective_date: effectiveDate,
         call_center: callCenter,
         phone_number: phoneNumber,
         daily_deal_flow_fetched: dailyDealFlowFetched,
@@ -1905,7 +2248,11 @@ export async function processAmamCommissionsForDealTracker(
         source_commission_id: commission.id,
         isNew: false,
         isUpdated: true,
-      })
+      }
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as unknown as Record<string, unknown>, updatedEntry as unknown as Record<string, unknown>)
+      updatedEntry.changedFields = changedFields
+      updatedEntry.previousValues = previousValues
+      previewEntries.push(updatedEntry)
       continue
     }
 
@@ -1915,11 +2262,15 @@ export async function processAmamCommissionsForDealTracker(
     const insuredName = buildAmamInsuredName(policy)
     const originalStatus = policy.status_raw || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
     const normalizedName = normalizeNameForSearch(insuredName)
     const ddfInfo = dailyDealFlowMap.get(normalizedName)
     const callCenter = ddfInfo?.call_center ?? null
     const phoneNumber = ddfInfo?.phone_number ?? null
     const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
+    const effectiveDate =
+      (ddfInfo?.draft_date ?? null) ||
+      (commission.issdate ?? null)
 
     if (newEntryLogCount < 3) {
       console.log('[Deal Tracker] AMAM commission new-entry sample', newEntryLogCount + 1, '| insuredName:', insuredName, '| normalized:', normalizedName, '| ddfFound:', !!(callCenter || phoneNumber), '| call_center:', callCenter ?? '(empty)', '| phone:', phoneNumber ?? '(empty)')
@@ -1932,7 +2283,7 @@ export async function processAmamCommissionsForDealTracker(
       name: insuredName || null,
       tasks: null,
       ghl_name: null,
-      ghl_stage: null,
+      ghl_stage: mappedGhlStage,
       policy_status: mappedStatus,
       deal_creation_date: dealCreationDate,
       policy_number: policyNumber,
@@ -1944,9 +2295,9 @@ export async function processAmamCommissionsForDealTracker(
       status: derivedStatus,
       last_updated: new Date().toISOString(),
       sales_agent: policy.agentname_raw || null,
-      writing_number: commission.writingagent || null,
+      writing_number: commission.writingagent || policy.writingagent || null,
       commission_type: commission.action || null,
-      effective_date: commission.issdate || null,
+      effective_date: effectiveDate,
       call_center: callCenter,
       phone_number: phoneNumber,
       cc_pmt_ws: null,
@@ -2056,7 +2407,47 @@ export async function processAmamCommissionsForDealTrackerFromRows(
     const policyNumber = commission.policy_number
     const existing = existingMap.get(policyNumber)
     const totalAmount = commissionAmountsMap.get(policyNumber)
-    const dealValue = totalAmount !== undefined && totalAmount !== null ? totalAmount : (commission.advance != null ? (typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance) : null)
+    let dealValue: number | null =
+      totalAmount !== undefined && totalAmount !== null
+        ? totalAmount
+        : (commission.advance != null
+            ? (typeof commission.advance === 'string' ? parseFloat(commission.advance) : commission.advance)
+            : null)
+    let chargeBack: number | null = existing?.charge_back ?? null
+
+    // Business rule: when updating an existing policy, deal_value should never become negative.
+    // If the net commission amount for this batch is negative, treat it as a charge back instead
+    // and preserve the prior deal_value.
+    // Also, when the net commission is exactly 0, treat it like "no commission" and keep existing
+    // deal_value/charge_back so rule-based Status does not change.
+    if (existing && dealValue != null) {
+      const numericDeal = typeof dealValue === 'number' ? dealValue : parseFloat(String(dealValue))
+      if (!Number.isNaN(numericDeal) && numericDeal < 0) {
+        const existingDeal =
+          existing.deal_value != null
+            ? (typeof existing.deal_value === 'number'
+                ? existing.deal_value
+                : parseFloat(String(existing.deal_value)))
+            : null
+        dealValue = existingDeal
+        const existingCb =
+          chargeBack != null
+            ? (typeof chargeBack === 'number' ? chargeBack : parseFloat(String(chargeBack)))
+            : 0
+        const newCb = existingCb + numericDeal
+        chargeBack = Number.isNaN(newCb) ? numericDeal : newCb
+      } else if (!Number.isNaN(numericDeal) && numericDeal === 0) {
+        const existingDeal =
+          existing.deal_value != null
+            ? (typeof existing.deal_value === 'number'
+                ? existing.deal_value
+                : parseFloat(String(existing.deal_value)))
+            : null
+        dealValue = Number.isNaN(existingDeal as number) ? null : existingDeal
+        chargeBack = existing.charge_back ?? null
+      }
+    }
+
     const ccValue = dealValue != null ? dealValue / 2 : null
 
     if (existing) {
@@ -2064,6 +2455,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       let phoneNumber = existing.phone_number
       let dailyDealFlowFetched = existing.daily_deal_flow_fetched
       let dailyDealFlowFetchedAt = existing.daily_deal_flow_fetched_at
+      let effectiveDateFromDdf: string | null = null
       const policy = policiesMap.get(policyNumber)
       if (policy && (callCenter == null && phoneNumber == null)) {
         const insuredName = buildAmamInsuredName(policy)
@@ -2074,15 +2466,26 @@ export async function processAmamCommissionsForDealTrackerFromRows(
           phoneNumber = ddfInfo.phone_number ?? null
           dailyDealFlowFetched = !!(callCenter || phoneNumber)
           dailyDealFlowFetchedAt = (callCenter || phoneNumber) ? new Date().toISOString() : null
+          effectiveDateFromDdf = ddfInfo.draft_date ?? null
         }
       }
-      previewEntries.push({
+      const policyForWriting = policiesMap.get(policyNumber)
+      const existingEffectiveDate = existing.effective_date ?? null
+      const effectiveDate =
+        (existingEffectiveDate != null && existingEffectiveDate !== '')
+          ? existingEffectiveDate
+          : (effectiveDateFromDdf ||
+             (commission.issdate !== null && commission.issdate !== undefined ? commission.issdate : null))
+      const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
+      const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
         deal_value: dealValue,
         cc_value: ccValue,
-        writing_number: commission.writingagent ?? existing.writing_number,
+        charge_back: chargeBack,
+        status: derivedStatus ?? existing.status,
+        writing_number: commission.writingagent ?? policyForWriting?.writingagent ?? existing.writing_number,
         commission_type: commission.action ?? existing.commission_type,
-        effective_date: commission.issdate !== null && commission.issdate !== undefined ? commission.issdate : existing.effective_date,
+        effective_date: effectiveDate,
         call_center: callCenter,
         phone_number: phoneNumber,
         daily_deal_flow_fetched: dailyDealFlowFetched,
@@ -2091,7 +2494,11 @@ export async function processAmamCommissionsForDealTrackerFromRows(
         source_commission_id: null,
         isNew: false,
         isUpdated: true,
-      })
+      }
+      const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as unknown as Record<string, unknown>, updatedEntry as unknown as Record<string, unknown>)
+      updatedEntry.changedFields = changedFields
+      updatedEntry.previousValues = previousValues
+      previewEntries.push(updatedEntry)
       continue
     }
 
@@ -2106,6 +2513,9 @@ export async function processAmamCommissionsForDealTrackerFromRows(
     const callCenter = ddfInfo?.call_center ?? null
     const phoneNumber = ddfInfo?.phone_number ?? null
     const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
+    const effectiveDate =
+      (ddfInfo?.draft_date ?? null) ||
+      (commission.issdate ?? null)
     previewEntries.push({
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
@@ -2123,9 +2533,9 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
       sales_agent: policy.agentname_raw || null,
-      writing_number: commission.writingagent || null,
+      writing_number: commission.writingagent || policy.writingagent || null,
       commission_type: commission.action || null,
-      effective_date: commission.issdate || null,
+      effective_date: effectiveDate,
       call_center: callCenter,
       phone_number: phoneNumber,
       cc_pmt_ws: null,
@@ -2148,19 +2558,30 @@ export async function processAmamCommissionsForDealTrackerFromRows(
 /**
  * Derive policy_status from deal_value per business rules:
  * Rule-based Status helper (for `status` column, NOT `policy_status`).
- * - deal_value null or 0 -> "NOT yet paid"
+ * - deal_value null or 0 -> "NOT yet payed"
  * - deal_value negative -> "Charge Back"
- * - deal_value positive -> "Paid"
+ * - deal_value positive -> "Payed"
  */
 export function statusFromDealValue(
   dealValue: number | null | undefined,
 ): string | null {
-  if (dealValue == null) return 'NOT yet paid'
+  if (dealValue == null) return 'NOT yet payed'
   const num = typeof dealValue === 'number' ? dealValue : parseFloat(String(dealValue))
-  if (Number.isNaN(num)) return 'NOT yet paid'
+  if (Number.isNaN(num)) return 'NOT yet payed'
   if (num < 0) return 'Charge Back'
-  if (num === 0) return 'NOT yet paid'
-  return 'Paid'
+  if (num === 0) return 'NOT yet payed'
+  return 'Payed'
+}
+
+/** True when deal_value and charge_back are unchanged (for preserving rule-based status on policy-only uploads). */
+export function financialsUnchanged(
+  existing: { deal_value?: number | string | null; charge_back?: number | string | null } | null | undefined,
+  newDealValue: number | null | undefined,
+  newChargeBack: number | null | undefined
+): boolean {
+  if (!existing) return false
+  const n = (v: unknown) => (v != null && (typeof v === 'number' ? Number.isFinite(v) : !Number.isNaN(parseFloat(String(v))))) ? (typeof v === 'number' ? v : parseFloat(String(v))) : null
+  return n(existing.deal_value) === n(newDealValue) && n(existing.charge_back) === n(newChargeBack)
 }
 
 /**
@@ -2202,7 +2623,7 @@ export async function saveDealTrackerEntries(
   // Clean entries: remove preview-only and auto-managed fields
   const now = new Date().toISOString()
   let cleanEntries = entries.map(entry => {
-    const { isNew, isUpdated, id, created_at, updated_at, ...dbEntry } = entry as any
+    const { isNew, isUpdated, changedFields, previousValues, id, created_at, updated_at, ...dbEntry } = entry as any
     return {
       ...dbEntry,
       updated_at: now,
@@ -2244,10 +2665,73 @@ export async function saveDealTrackerEntries(
     })
   }
 
-  // Derive rule-based status from deal_value and charge_back (NOT yet paid / Charge Back / Paid)
+  // Do NOT blindly recompute `status` on every save.
+  // Business rule: `status` should only change when commissions change financials (deal_value / charge_back).
+  // If a policy-only upload runs (no commission source) and financials are unchanged, preserve existing DB status.
+  const existingFinanceMap = new Map<string, { deal_value: number | null; charge_back: number | null; status: string | null }>()
+  const byAgency = new Map<string, string[]>()
+  for (const e of cleanEntries) {
+    if (!e.agency_carrier_id || !e.policy_number) continue
+    const list = byAgency.get(e.agency_carrier_id) ?? []
+    list.push(e.policy_number)
+    byAgency.set(e.agency_carrier_id, list)
+  }
+
+  for (const [agencyCarrierId, policyNumbersAll] of byAgency.entries()) {
+    // Dedup policy numbers
+    const uniq = Array.from(new Set(policyNumbersAll)).filter(Boolean)
+    const CHUNK = 500
+    for (let i = 0; i < uniq.length; i += CHUNK) {
+      const nums = uniq.slice(i, i + CHUNK)
+      const { data: rows } = await supabase
+        .from('deal_tracker')
+        .select('agency_carrier_id, policy_number, deal_value, charge_back, status')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', nums)
+      if (rows) {
+        for (const row of rows as any[]) {
+          const key = `${row.agency_carrier_id}\0${row.policy_number}`
+          const dv = row.deal_value != null ? (typeof row.deal_value === 'number' ? row.deal_value : parseFloat(String(row.deal_value))) : null
+          const cb = row.charge_back != null ? (typeof row.charge_back === 'number' ? row.charge_back : parseFloat(String(row.charge_back))) : null
+          existingFinanceMap.set(key, {
+            deal_value: Number.isFinite(dv as number) ? (dv as number) : null,
+            charge_back: Number.isFinite(cb as number) ? (cb as number) : null,
+            status: row.status ?? null,
+          })
+        }
+      }
+    }
+  }
+
+  const sameNum = (a: any, b: any) => {
+    const an = a != null ? (typeof a === 'number' ? a : parseFloat(String(a))) : null
+    const bn = b != null ? (typeof b === 'number' ? b : parseFloat(String(b))) : null
+    const ax = an != null && Number.isFinite(an) ? an : null
+    const bx = bn != null && Number.isFinite(bn) ? bn : null
+    return ax === bx
+  }
+
   cleanEntries = cleanEntries.map(e => {
+    if (!e.agency_carrier_id || !e.policy_number) return e
+    const key = `${e.agency_carrier_id}\0${e.policy_number}`
+    const prev = existingFinanceMap.get(key)
+
     const dv = e.deal_value != null ? (typeof e.deal_value === 'number' ? e.deal_value : parseFloat(String(e.deal_value))) : null
     const cb = e.charge_back != null ? (typeof e.charge_back === 'number' ? e.charge_back : parseFloat(String(e.charge_back))) : null
+    const isCommissionFlow = !!(e.source_commission_table || e.source_commission_id)
+
+    // Rule-based status may only change when commission/financials change. If this save has no
+    // commission source (policy-only upload) and the row already exists, always preserve existing status.
+    if (!isCommissionFlow && prev) {
+      return { ...e, status: prev.status }
+    }
+
+    const financialsChanged =
+      prev == null ? true : (!sameNum(prev.deal_value, dv) || !sameNum(prev.charge_back, cb))
+    if (isCommissionFlow && !financialsChanged && prev) {
+      return { ...e, status: prev.status }
+    }
+
     const status = statusFromDealValueAndChargeback(dv, cb)
     return { ...e, status }
   })
@@ -2280,6 +2764,81 @@ export async function saveDealTrackerEntries(
       const preserved = existingMap.get(`${e.agency_carrier_id}\0${e.policy_number}`)
       if (preserved == null) return e
       return { ...e, effective_date: preserved }
+    })
+  }
+
+  // Preserve notes when incoming is null/empty (do not overwrite existing notes with dash/empty)
+  const needsNotesPreserve = cleanEntries.filter(
+    e => e.agency_carrier_id && e.policy_number && (e.notes == null || String(e.notes).trim() === '')
+  )
+  if (needsNotesPreserve.length > 0) {
+    const keySet = new Set(needsNotesPreserve.map(e => `${e.agency_carrier_id}\0${e.policy_number}`))
+    const agencyCarrierIds = [...new Set(needsNotesPreserve.map(e => e.agency_carrier_id))]
+    const existingNotesMap = new Map<string, string | null>()
+    const CHUNK = 100
+    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
+      const ids = agencyCarrierIds.slice(i, i + CHUNK)
+      const { data: rows } = await supabase
+        .from('deal_tracker')
+        .select('agency_carrier_id, policy_number, notes')
+        .in('agency_carrier_id', ids)
+      if (rows) {
+        for (const row of rows) {
+          const key = `${row.agency_carrier_id}\0${row.policy_number}`
+          if (keySet.has(key) && row.notes != null && String(row.notes).trim() !== '') {
+            existingNotesMap.set(key, row.notes)
+          }
+        }
+      }
+    }
+    cleanEntries = cleanEntries.map(e => {
+      if (!e.agency_carrier_id || !e.policy_number) return e
+      if (e.notes != null && String(e.notes).trim() !== '') return e
+      const preserved = existingNotesMap.get(`${e.agency_carrier_id}\0${e.policy_number}`)
+      if (preserved == null) return e
+      return { ...e, notes: preserved }
+    })
+  }
+
+  // Preserve GHL name and stage when incoming is null/empty/dash (policy/commission files don't have GHL; keep existing)
+  const isEmptyOrDash = (v: unknown) => v == null || String(v).trim() === '' || String(v).trim() === '-'
+  const needsGhlPreserve = cleanEntries.filter(
+    e => e.agency_carrier_id && e.policy_number && (isEmptyOrDash(e.ghl_name) || isEmptyOrDash(e.ghl_stage))
+  )
+  if (needsGhlPreserve.length > 0) {
+    const keySet = new Set(needsGhlPreserve.map(e => `${e.agency_carrier_id}\0${e.policy_number}`))
+    const agencyCarrierIds = [...new Set(needsGhlPreserve.map(e => e.agency_carrier_id))]
+    const existingGhlMap = new Map<string, { ghl_name: string | null; ghl_stage: string | null }>()
+    const CHUNK = 100
+    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
+      const ids = agencyCarrierIds.slice(i, i + CHUNK)
+      const { data: rows } = await supabase
+        .from('deal_tracker')
+        .select('agency_carrier_id, policy_number, ghl_name, ghl_stage')
+        .in('agency_carrier_id', ids)
+      if (rows) {
+        for (const row of rows as any[]) {
+          const key = `${row.agency_carrier_id}\0${row.policy_number}`
+          if (keySet.has(key)) {
+            const gname = row.ghl_name != null ? String(row.ghl_name).trim() : null
+            const gstage = row.ghl_stage != null ? String(row.ghl_stage).trim() : null
+            existingGhlMap.set(key, {
+              ghl_name: gname && gname !== '-' ? row.ghl_name : null,
+              ghl_stage: gstage && gstage !== '-' ? row.ghl_stage : null,
+            })
+          }
+        }
+      }
+    }
+    cleanEntries = cleanEntries.map(e => {
+      if (!e.agency_carrier_id || !e.policy_number) return e
+      const preserved = existingGhlMap.get(`${e.agency_carrier_id}\0${e.policy_number}`)
+      if (preserved == null) return e
+      return {
+        ...e,
+        ghl_name: isEmptyOrDash(e.ghl_name) && preserved.ghl_name != null ? preserved.ghl_name : e.ghl_name,
+        ghl_stage: isEmptyOrDash(e.ghl_stage) && preserved.ghl_stage != null ? preserved.ghl_stage : e.ghl_stage,
+      }
     })
   }
 
@@ -2326,7 +2885,7 @@ async function saveDealTrackerEntriesIndividual(
 
   for (const entry of entries) {
     try {
-      const { isNew, isUpdated, id, created_at, updated_at, ...dbEntry } = entry as any
+      const { isNew, isUpdated, changedFields, previousValues, id, created_at, updated_at, ...dbEntry } = entry as any
       
       const { data: existing, error: checkError } = await supabase
         .from('deal_tracker')
@@ -2372,9 +2931,13 @@ async function saveDealTrackerEntriesIndividual(
   return { inserted, updated, failed }
 }
 
+/** Deals created within this window (ms) are shown in the "New" tab. */
+const NEW_DEAL_WINDOW_MS = 24 * 60 * 60 * 1000 // 24 hours
+
 /**
  * Get all deal tracker entries.
  * When limit > 1000, fetches in pages (Supabase returns at most 1000 rows per request).
+ * Sets isNew: true for rows whose created_at is within NEW_DEAL_WINDOW_MS so the Deal Tracker "New" tab works.
  */
 export async function getDealTrackerEntries(filters?: {
   agency_carrier_id?: string
@@ -2417,10 +2980,15 @@ export async function getDealTrackerEntries(filters?: {
     return q
   }
 
-  const enrichStatus = (row: any) => ({
-    ...row,
-    status: statusFromDealValueAndChargeback(row?.deal_value, row?.charge_back) ?? row?.status,
-  })
+  const enrichStatus = (row: any) => {
+    const createdMs = row?.created_at ? new Date(row.created_at).getTime() : 0
+    const isNew = !!row?.created_at && Date.now() - createdMs < NEW_DEAL_WINDOW_MS
+    return {
+      ...row,
+      status: statusFromDealValueAndChargeback(row?.deal_value, row?.charge_back) ?? row?.status,
+      isNew,
+    }
+  }
 
   // Supabase caps at 1000 rows per request; paginate when we need more
   if (requestedLimit > SUPABASE_PAGE_SIZE) {

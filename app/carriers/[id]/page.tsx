@@ -3,34 +3,49 @@
 import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
-import { parseFile } from '@/lib/fileParser'
-import { upsertPolicyRecords, fetchPolicyRecords, createUploadedFileRecord, updateUploadedFileStatus } from '@/lib/policyHelpers'
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { fetchPolicyRecords } from '@/lib/policyHelpers'
+import { executeUpload, type FileKind } from '@/lib/uploadLogic'
+import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
+import { useCommissionReportUpload } from '@/lib/useCommissionReportUpload'
+import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
+import { CommissionReportDialog } from '@/components/CommissionReportDialog'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ArrowLeft, Upload, CheckCircle, AlertCircle, Loader2, FileText, CloudUpload } from 'lucide-react'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 export default function CarrierDetailPage() {
     const params = useParams()
     const router = useRouter()
     const carrierId = params.id as string
 
+    const dealTracker = useDealTrackerUpload()
+    const commissionReport = useCommissionReportUpload({
+        onAfterSave: () => dealTracker.confirmAndSave(),
+    })
+
     const [carrier, setCarrier] = useState<any>(null)
     const [loading, setLoading] = useState(true)
     const [file, setFile] = useState<File | null>(null)
     const [fileType, setFileType] = useState<'Policy' | 'Commission'>('Policy')
     const [uploading, setUploading] = useState(false)
-    const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
+    const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
     const [policyRecords, setPolicyRecords] = useState<any[]>([])
     const [recordsLoading, setRecordsLoading] = useState(false)
     const [selectedFileType, setSelectedFileType] = useState<'Policy' | 'Commission' | 'All'>('All')
     const [currentPage, setCurrentPage] = useState(1)
     const [pageSize, setPageSize] = useState(25)
+    const [lastUploadContext, setLastUploadContext] = useState<{
+        agencyCarrierId: string
+        fileId: string
+        carrierCode: string
+        fileType: FileKind
+    } | null>(null)
 
     useEffect(() => {
         fetchCarrierDetails()
@@ -113,50 +128,60 @@ export default function CarrierDetailPage() {
             return
         }
 
+        const agencyCarrierId: string = agencyCarrier.id
+        const agencyName: string = agencyCarrier.agencies?.name ?? 'Agency'
+        const carrierName: string = carrier.name ?? 'Carrier'
+        const carrierCode: string = carrier.code ?? carrierName
+
         setUploading(true)
         setMessage(null)
 
         try {
-            // Create upload record
-            const uploadRecord = await createUploadedFileRecord(
-                agencyCarrier.id,
-                file.name,
-                fileType
-            )
+            const result = await executeUpload({
+                agencyCarrierId,
+                agencyName,
+                carrierName,
+                carrierCode,
+                file,
+                fileType,
+            })
 
-            // Parse the file
-            const parseResult = await parseFile(file)
-
-            if (parseResult.records.length === 0) {
-                await updateUploadedFileStatus(uploadRecord.id, 'failed', 0, 'No records found in file')
-                setMessage({ type: 'error', text: 'No records found in the file.' })
+            if (!result.success) {
+                const errorMsg = result.error || 'Upload failed'
+                setMessage({ type: 'error', text: errorMsg })
                 setUploading(false)
                 return
             }
 
-            // Upsert records to database
-            const result = await upsertPolicyRecords(
-                agencyCarrier.id,
-                fileType,
-                parseResult.records,
-                uploadRecord.id
-            )
-
-            // Update upload status
-            await updateUploadedFileStatus(
-                uploadRecord.id,
-                'completed',
-                parseResult.totalRecords
-            )
-
+            const count = (result as { count?: number }).count ?? 0
             setMessage({
                 type: 'success',
-                text: `Successfully uploaded ${parseResult.totalRecords} records! (${result.inserted} new, ${result.updated} updated${result.failed > 0 ? `, ${result.failed} failed` : ''})`
+                text: `Successfully uploaded ${count} record(s).`,
             })
+
+            if (
+                (carrierCode === 'AETNA' ||
+                    carrierCode === 'AMAM' ||
+                    carrierCode === 'MOH' ||
+                    carrierCode === 'RNA' ||
+                    carrierCode === 'TRANSAMERICA' ||
+                    carrierCode === 'LIBERTY' ||
+                    carrierCode === 'COREBRIDGE') &&
+                (fileType === 'Policy' || fileType === 'Commission') &&
+                'fileId' in result
+            ) {
+                setLastUploadContext({
+                    agencyCarrierId,
+                    fileId: result.fileId,
+                    carrierCode,
+                    fileType,
+                })
+                await dealTracker.processAfterUpload(agencyCarrierId, result.fileId, carrierCode, fileType)
+            }
 
             // Clear file input
             setFile(null)
-            const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+            const fileInput = document.querySelector('#file-upload') as HTMLInputElement | null
             if (fileInput) fileInput.value = ''
 
             // Refresh records
@@ -164,26 +189,7 @@ export default function CarrierDetailPage() {
         } catch (error: any) {
             console.error('Upload error:', error)
             const errorMsg = error.message || 'Upload failed'
-            let detailedMsg = errorMsg
-
-            // Add helpful diagnostic info based on common errors
-            if (errorMsg.includes('policy_records') || errorMsg.includes('Day 1') || error.code === '42P01') {
-                detailedMsg = (
-                    <div className="flex flex-col space-y-2">
-                        <span className="font-bold">Database Error: Table not found</span>
-                        <span>The 'policy_records' table seems to be missing.</span>
-                        <div className="bg-red-950/50 p-2 rounded text-xs font-mono mt-1">
-                            {errorMsg}
-                            {error.code && <div>Code: {error.code}</div>}
-                        </div>
-                        <span className="text-sm underline cursor-pointer mt-2" onClick={() => window.open('/records', '_blank')}>
-                            Did you run the migration SQL? Click here to check records.
-                        </span>
-                    </div>
-                ) as any
-            }
-
-            setMessage({ type: 'error', text: detailedMsg })
+            setMessage({ type: 'error', text: errorMsg })
         } finally {
             setUploading(false)
         }
@@ -284,7 +290,7 @@ export default function CarrierDetailPage() {
                         <div className="border-2 border-dashed border-slate-700 rounded-xl p-8 text-center hover:border-orange-500/70 transition-colors bg-slate-900">
                             <Input
                                 type="file"
-                                accept=".csv,.xlsx,.xls"
+                                accept=".csv,.xlsx,.xls,.pdf"
                                 onChange={handleFileChange}
                                 className="hidden"
                                 id="file-upload"
@@ -486,6 +492,50 @@ export default function CarrierDetailPage() {
                     )}
                 </CardContent>
             </Card>
+
+            {/* Deal Tracker Verification Dialog */}
+            <DealTrackerVerificationDialog
+                open={dealTracker.showVerification}
+                onOpenChange={dealTracker.setShowVerification}
+                entries={dealTracker.verificationEntries}
+                loadingMessage={dealTracker.previewLoadingMessage}
+                saveProgressLogs={dealTracker.saveProgressLogs}
+                onConfirm={dealTracker.confirmAndSave}
+                onCancel={dealTracker.cancelVerification}
+                fileType={lastUploadContext?.fileType}
+                onNext={
+                    lastUploadContext?.fileType === 'Commission' &&
+                    (lastUploadContext?.carrierCode === 'AETNA' ||
+                        lastUploadContext?.carrierCode === 'AMAM' ||
+                        lastUploadContext?.carrierCode === 'MOH' ||
+                        lastUploadContext?.carrierCode === 'COREBRIDGE')
+                        ? () => {
+                              dealTracker.setShowVerification(false)
+                              if (lastUploadContext) {
+                                  commissionReport.openCommissionReport(
+                                      lastUploadContext.agencyCarrierId,
+                                      lastUploadContext.fileId,
+                                      lastUploadContext.carrierCode
+                                  )
+                              }
+                          }
+                        : undefined
+                }
+            />
+
+            {/* Commission Report Dialog */}
+            <CommissionReportDialog
+                open={commissionReport.showCommissionReport}
+                onOpenChange={commissionReport.setShowCommissionReport}
+                rows={commissionReport.commissionRows}
+                loading={commissionReport.loading}
+                saving={commissionReport.saving}
+                carrierCode={lastUploadContext?.carrierCode ?? 'AETNA'}
+                onSave={async (editedRows) => {
+                    await commissionReport.saveCommissionReport(editedRows)
+                }}
+                onCancel={commissionReport.cancelCommissionReport}
+            />
         </div>
     )
 }

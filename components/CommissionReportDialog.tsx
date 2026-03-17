@@ -12,7 +12,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Input } from '@/components/ui/input'
-import { Loader2 } from 'lucide-react'
+import { Loader2, PlusCircle, X } from 'lucide-react'
 import type { CommissionDisplayRow } from '@/lib/useCommissionReportUpload'
 
 interface CommissionReportDialogProps {
@@ -68,10 +68,43 @@ export function CommissionReportDialog({
       <DialogContent className="bg-slate-900 border-slate-700 max-w-6xl max-h-[90vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="text-white">
-            Commission Report — {carrierCode === 'AMAM' ? 'AMAM' : 'Aetna'}
+            Commission Report —{' '}
+            {carrierCode === 'AMAM'
+              ? 'AMAM'
+              : carrierCode === 'MOH'
+                ? 'MOH'
+                : carrierCode === 'COREBRIDGE'
+                  ? 'Corebridge'
+                  : 'Aetna'}
           </DialogTitle>
-          <DialogDescription className="text-slate-400">
-            Review and edit commission rows, then Save. Data will appear on the Commission Report page.
+          <DialogDescription className="text-slate-400 flex items-center justify-between gap-2">
+            <span>Review and edit commission rows, then Save. Data will appear on the Commission Report page.</span>
+            {!loading && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="border-slate-600 text-slate-200 hover:bg-slate-800"
+                onClick={() => {
+                  const template = editableRows[0]
+                  const base: CommissionDisplayRow = {
+                    id: undefined,
+                    name: '',
+                    date: '',
+                    policy_number: '',
+                    carrier: template?.carrier ?? (carrierCode || ''),
+                    sales_agent: '',
+                    commission_rate: '',
+                    advance: '',
+                    charge_back: '',
+                  }
+                  setEditableRows(prev => [...prev, base])
+                }}
+              >
+                <PlusCircle className="w-3.5 h-3.5 mr-1" />
+                Add row
+              </Button>
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -94,6 +127,7 @@ export function CommissionReportDialog({
                   <TableHead className="text-slate-300 font-semibold text-right">Commission Rate</TableHead>
                   <TableHead className="text-slate-300 font-semibold text-right">Advance</TableHead>
                   <TableHead className="text-slate-300 font-semibold text-right">Charge Back</TableHead>
+                  <TableHead className="text-slate-300 font-semibold text-center w-20">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -155,6 +189,18 @@ export function CommissionReportDialog({
                         onChange={(e) => updateRow(idx, 'charge_back', e.target.value)}
                         className="h-8 bg-slate-800 border-slate-600 text-white text-sm text-right"
                       />
+                    </TableCell>
+                    <TableCell className="p-1 text-center">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-950/40 text-xs"
+                        onClick={() => setEditableRows(prev => prev.filter((_, i) => i !== idx))}
+                        title="Remove this commission row from this file"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
