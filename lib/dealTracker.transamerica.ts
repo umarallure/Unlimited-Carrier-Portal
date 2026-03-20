@@ -11,6 +11,7 @@ import {
   financialsUnchanged,
   carrierStatusUnchanged,
 } from './dealTracker'
+import { resolveGhlStage } from './ghlStageResolver'
 
 /**
  * Build insured/owner name from Transamerica policy for DDF lookup.
@@ -129,8 +130,6 @@ export async function processTransamericaFilesForDealTracker(
     const insuredName = buildTransamericaInsuredName(policy)
     const originalStatus = policy.status || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
-
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
     let effectiveDateFromDdf: string | null = null
@@ -155,14 +154,25 @@ export async function processTransamericaFilesForDealTracker(
 
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
 
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions still trigger.
+    // Manual stages are protected inside resolveGhlStage().
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue,
+      commissionType: null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: statusUnchanged
-        ? (existing?.ghl_stage ?? null)
-        : (mappedGhlStage ?? null),
+      ghl_stage: mappedGhlStage,
       policy_status: statusUnchanged
         ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
         : (mappedStatus ?? originalStatus),

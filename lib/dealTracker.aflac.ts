@@ -17,6 +17,7 @@ import {
   financialsUnchanged,
   carrierStatusUnchanged,
 } from './dealTracker'
+import { resolveGhlStage } from './ghlStageResolver'
 
 /**
  * Process AFLAC policy files and create deal tracker entries.
@@ -141,8 +142,6 @@ export async function processAflacFilesForDealTracker(
 
     const originalStatus = policy.statusdisplaytext || policy.statuscategory
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
-
     const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
     let callCenter: string | null
     let phoneNumber: string | null
@@ -216,14 +215,25 @@ export async function processAflacFilesForDealTracker(
 
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
 
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions still trigger.
+    // Manual stages are protected inside resolveGhlStage().
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue,
+      commissionType: commission?.commissiontype || null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: policy.insuredname || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: statusUnchanged
-        ? (existing?.ghl_stage ?? null)
-        : (mappedGhlStage ?? null),
+      ghl_stage: mappedGhlStage,
       policy_status: statusUnchanged
         ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
         : (mappedStatus ?? originalStatus),
@@ -385,7 +395,7 @@ export async function processAflacCommissionsForDealTracker(
   }
 
   let statusMappingMap = new Map<string, string>()
-  let ghlStageMappingMap = new Map<string, string>()
+  let ghlStageMappingMap = new Map<string, string[]>()
   let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
   if (missingPolicyNumbers.length > 0) {
     statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
@@ -462,12 +472,21 @@ export async function processAflacCommissionsForDealTracker(
       if (policy) {
         const originalStatus = policy.statusdisplaytext || policy.statuscategory
         const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-        const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
         const normalizedName = normalizeNameForSearch(policy.insuredname || '')
         const ddfInfo = dailyDealFlowMap.get(normalizedName)
         const callCenter = ddfInfo?.call_center ?? null
         const phoneNumber = ddfInfo?.phone_number ?? null
         const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+
+        const mappedGhlStage = resolveGhlStage({
+          carrierStatus: originalStatus,
+          allMappings: ghlStageMappingMap,
+          effectiveDate: effectiveDateFromDdf,
+          dealValue,
+          commissionType: commission.commissiontype || null,
+          existingGhlStage: null,
+          carrierCode,
+        })
 
         const entry: DealTrackerPreviewEntry = {
           agency_carrier_id: agencyCarrierId,

@@ -12,6 +12,7 @@ import {
   financialsUnchanged,
   carrierStatusUnchanged,
 } from './dealTracker'
+import { resolveGhlStage } from './ghlStageResolver'
 
 /**
  * Build insured name from MOH policy fields for DDF lookup.
@@ -181,8 +182,6 @@ export async function processMohFilesForDealTracker(
     const insuredName = buildMohInsuredName(policy)
     const originalStatus = policy.policy_status_nme || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
-
     // Use existing call_center/phone if already set; else use DDF
     const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
     let callCenter: string | null
@@ -268,14 +267,26 @@ export async function processMohFilesForDealTracker(
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
 
     const shouldPreserveMappedStatus = existing && carrierStatusUnchanged(existing, originalStatus)
-    const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions still trigger.
+    // Manual stages are protected inside resolveGhlStage().
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue,
+      commissionType: commission?.activity_type ?? null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: shouldPreserveMappedStatus ? (existing?.ghl_stage ?? mappedGhlStage) : mappedGhlStage,
+      ghl_stage: mappedGhlStage,
       policy_status: shouldPreserveMappedStatus ? (existing?.policy_status ?? mappedStatus) : mappedStatus,
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
@@ -483,8 +494,6 @@ export async function processMohCommissionsForDealTracker(
     const insuredName = policy ? buildMohInsuredName(policy) : (comm.insureds_name ?? null)
     const originalStatus = policy?.policy_status_nme || existing?.policy_status || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
-
     const totalAmount = commissionAmountsMap.get(policyNumber)
     let dealValue: number | null = totalAmount != null ? totalAmount : null
     let chargeBack: number | null = existing?.charge_back ?? null
@@ -570,14 +579,25 @@ export async function processMohCommissionsForDealTracker(
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
 
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions still trigger.
+    // Manual stages are protected inside resolveGhlStage().
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue,
+      commissionType: comm.activity_type ?? null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: statusUnchanged
-        ? (existing?.ghl_stage ?? null)
-        : (mappedGhlStage ?? null),
+      ghl_stage: mappedGhlStage,
       policy_status: statusUnchanged
         ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
         : (mappedStatus ?? originalStatus),

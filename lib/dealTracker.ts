@@ -5,6 +5,7 @@
 
 import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
+import { resolveGhlStage } from './ghlStageResolver'
 
 // External Supabase client for daily_deal_flow (from another database)
 let externalSupabaseClient: ReturnType<typeof createClient> | null = null
@@ -242,18 +243,18 @@ export async function bulkFetchStatusMappings(
 
 /**
  * Bulk fetch GHL stage mappings for a carrier.
- * Maps raw carrier status -> ghl_stage using carrier_ghl_stage_mappings table.
- * For now we take the first mapping per status (there may be multiple rows per status).
+ * Maps raw carrier status -> ALL possible ghl_stages using carrier_ghl_stage_mappings table.
+ * Returns a Map<string, string[]> so the resolver can pick the correct stage
+ * based on context (time, commission, previous stage, grace period).
  */
 export async function bulkFetchGhlStageMappings(
   carrierId: string,
   carrierCode: string | null
-): Promise<Map<string, string>> {
-  const ghlMap = new Map<string, string>()
+): Promise<Map<string, string[]>> {
+  const ghlMap = new Map<string, string[]>()
 
   console.log('[Deal Tracker] Bulk fetching GHL stage mappings for carrier_id:', carrierId)
 
-  // Primary: by carrier_id
   const { data: mappings, error } = await supabase
     .from('carrier_ghl_stage_mappings')
     .select('carrier_status_in_carrier_portal, ghl_stage')
@@ -264,15 +265,13 @@ export async function bulkFetchGhlStageMappings(
       const status = m.carrier_status_in_carrier_portal
       const stage = m.ghl_stage
       if (!status || !stage) return
-      // Only set first mapping per status; additional rows are ignored for now.
-      if (!ghlMap.has(status)) {
-        ghlMap.set(status, stage)
-      }
+      const existing = ghlMap.get(status) ?? []
+      if (!existing.includes(stage)) existing.push(stage)
+      ghlMap.set(status, existing)
     })
     console.log('[Deal Tracker] Loaded', mappings.length, 'GHL mappings by carrier_id (unique statuses:', ghlMap.size, ')')
   }
 
-  // Fallback: by carrier_code
   if (ghlMap.size === 0 && carrierCode) {
     console.log('[Deal Tracker] No GHL mappings by carrier_id, trying carrier_code:', carrierCode)
     const { data: fallbackMappings, error: fallbackError } = await supabase
@@ -285,9 +284,9 @@ export async function bulkFetchGhlStageMappings(
         const status = m.carrier_status_in_carrier_portal
         const stage = m.ghl_stage
         if (!status || !stage) return
-        if (!ghlMap.has(status)) {
-          ghlMap.set(status, stage)
-        }
+        const existing = ghlMap.get(status) ?? []
+        if (!existing.includes(stage)) existing.push(stage)
+        ghlMap.set(status, existing)
       })
       console.log('[Deal Tracker] Loaded', fallbackMappings.length, 'GHL mappings by carrier_code (unique statuses:', ghlMap.size, ')')
     }
@@ -1161,14 +1160,16 @@ export async function processAetnaCommissionsForDealTracker(
     }
   }
 
-  // Bulk fetch status mappings, GHL mappings, and daily_deal_flow for new entries (if needed)
+  // Bulk fetch status mappings, GHL mappings, and daily_deal_flow.
+  // GHL mappings are needed for BOTH existing-entry updates and new entries so
+  // commission financial changes (e.g. 0 -> positive) can move stages correctly.
   let statusMappingMap = new Map<string, string>()
-  let ghlStageMappingMap = new Map<string, string>()
+  let ghlStageMappingMap = new Map<string, string[]>()
   let dailyDealFlowMap = new Map<string, DailyDealFlowInfo>()
+  ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   
   if (missingPolicyNumbers.length > 0) {
     statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
-    ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
     const policyNamesForDDF = Array.from(policiesMap.values())
       .map(p => p.insuredname)
       .filter(name => name && name.trim().length > 0)
@@ -1218,8 +1219,18 @@ export async function processAetnaCommissionsForDealTracker(
       // Update existing entry - policy_status stays from mapping; status considers deal_value and charge_back
       const effectiveChargeBack = chargeBack ?? existing.charge_back ?? null
       const derivedStatus = statusFromDealValueAndChargeback(dealValue, effectiveChargeBack)
+      const mappedGhlStage = resolveGhlStage({
+        carrierStatus: existing.carrier_status ?? null,
+        allMappings: ghlStageMappingMap,
+        effectiveDate: existing.effective_date || (commission.effectivedate ?? null),
+        dealValue,
+        commissionType: commission.commissiontype || existing.commission_type || null,
+        existingGhlStage: existing.ghl_stage ?? null,
+        carrierCode,
+      })
       const entry: DealTrackerPreviewEntry = {
         ...existing,
+        ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: effectiveChargeBack,
@@ -1234,7 +1245,17 @@ export async function processAetnaCommissionsForDealTracker(
         isNew: false,
         isUpdated: true,
       }
-      const newSnapshot = { ...existing, deal_value: dealValue, cc_value: ccValue, charge_back: effectiveChargeBack, status: derivedStatus, sales_agent: commission.writingagentname || existing.sales_agent, writing_number: commission.writingagentnumber || existing.writing_number, commission_type: commission.commissiontype || existing.commission_type } as Record<string, unknown>
+      const newSnapshot = {
+        ...existing,
+        ghl_stage: mappedGhlStage ?? existing.ghl_stage,
+        deal_value: dealValue,
+        cc_value: ccValue,
+        charge_back: effectiveChargeBack,
+        status: derivedStatus,
+        sales_agent: commission.writingagentname || existing.sales_agent,
+        writing_number: commission.writingagentnumber || existing.writing_number,
+        commission_type: commission.commissiontype || existing.commission_type,
+      } as Record<string, unknown>
       const { changedFields, previousValues } = getChangedFieldsAndPrevious(existing as Record<string, unknown>, newSnapshot)
       entry.changedFields = changedFields
       entry.previousValues = previousValues
@@ -1247,7 +1268,6 @@ export async function processAetnaCommissionsForDealTracker(
         // Policy exists but no deal_tracker entry - create new one
         const originalStatus = policy.statusdisplaytext || policy.statuscategory
         const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-        const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
 
         // Get daily_deal_flow info from bulk fetch map
         const normalizedName = normalizeNameForSearch(policy.insuredname || '')
@@ -1255,6 +1275,16 @@ export async function processAetnaCommissionsForDealTracker(
         const callCenter = ddfInfo?.call_center || null
         const phoneNumber = ddfInfo?.phone_number || null
         const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+
+        const mappedGhlStage = resolveGhlStage({
+          carrierStatus: originalStatus || null,
+          allMappings: ghlStageMappingMap,
+          effectiveDate: effectiveDateFromDdf || (commission.effectivedate ?? null),
+          dealValue,
+          commissionType: commission.commissiontype || null,
+          existingGhlStage: null,
+          carrierCode,
+        })
 
         const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
         const entry: DealTrackerPreviewEntry = {
@@ -1472,7 +1502,6 @@ export async function processAetnaFilesForDealTracker(
     // Map policy status using cached mapping (NO database query!)
     const originalStatus = policy.statusdisplaytext || policy.statuscategory
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
     if (i < 3) {
       console.log(`[Deal Tracker] Status mapping for policy ${i + 1}:`, {
         original: originalStatus,
@@ -1572,15 +1601,25 @@ export async function processAetnaFilesForDealTracker(
     const carrierStatusForPolicy = policy.statusdisplaytext || policy.statuscategory || null
     const statusUnchanged = existing && carrierStatusUnchanged(existing, carrierStatusForPolicy)
 
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions (based on draft/effective_date) still trigger.
+    // Manual-audited stages are protected inside resolveGhlStage().
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: carrierStatusForPolicy,
+      allMappings: ghlStageMappingMap,
+      effectiveDate: effectiveDate,
+      dealValue,
+      commissionType: commission?.commissiontype || existing?.commission_type || null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: policy.insuredname || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      // Only remap when carrier status changed or policy is new.
-      ghl_stage: statusUnchanged
-        ? (existing?.ghl_stage ?? null)
-        : (mappedGhlStage ?? null),
+      ghl_stage: mappedGhlStage,
       policy_status: statusUnchanged
         ? (existing?.policy_status ?? mappedStatus ?? carrierStatusForPolicy)
         : (mappedStatus ?? carrierStatusForPolicy),
@@ -1752,7 +1791,6 @@ export async function processAmamFilesForDealTracker(
     const insuredName = buildAmamInsuredName(policy)
     const originalStatus = policy.status_raw || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
 
     // Use existing call_center/phone if already set (no re-lookup); else look up DDF
     const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
@@ -1815,14 +1853,24 @@ export async function processAmamFilesForDealTracker(
 
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
 
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions still trigger.
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue,
+      commissionType: commission?.action || existing?.commission_type || null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: statusUnchanged
-        ? (existing?.ghl_stage ?? null)
-        : (mappedGhlStage ?? null),
+      ghl_stage: mappedGhlStage,
       policy_status: statusUnchanged
         ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
         : (mappedStatus ?? originalStatus),
@@ -1946,7 +1994,6 @@ export async function processAmamFilesForDealTrackerFromRows(
     const insuredName = buildAmamInsuredName(policy)
     const originalStatus = policy.status_raw || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
     const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
     let callCenter: string | null
     let phoneNumber: string | null
@@ -1978,14 +2025,24 @@ export async function processAmamFilesForDealTrackerFromRows(
 
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
 
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions still trigger.
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue: dealValueFromRows,
+      commissionType: existing?.commission_type || null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: statusUnchanged
-        ? (existing?.ghl_stage ?? null)
-        : (mappedGhlStage ?? null),
+      ghl_stage: mappedGhlStage,
       policy_status: statusUnchanged
         ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
         : (mappedStatus ?? originalStatus),
@@ -2138,11 +2195,14 @@ export async function processAmamCommissionsForDealTracker(
   }
 
   let statusMappingMap = new Map<string, string>()
-  let ghlStageMappingMap = new Map<string, string>()
+  let ghlStageMappingMap = new Map<string, string[]>()
   let dailyDealFlowMap = new Map<string, DailyDealFlowInfo>()
+  // GHL stage mapping is required for BOTH existing and new entries during
+  // commission-only uploads (deal_value/cc/status changes should promote stages).
+  // Status mapping is only required when we create new entries.
+  ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   if (missingPolicyNumbers.length > 0) {
     statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
-    ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   }
   if (allPolicyNumbersNeedingDDF.length > 0) {
     const policyNamesForDDF = Array.from(policiesMap.values())
@@ -2231,8 +2291,23 @@ export async function processAmamCommissionsForDealTracker(
           : (effectiveDateFromDdf ||
              (commission.issdate !== null && commission.issdate !== undefined ? commission.issdate : null))
       const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
+      const carrierStatusForGhl = policyForWriting?.status_raw ?? existing.carrier_status ?? null
+
+      // Re-resolve GHL stage based on updated financials, even when we are
+      // only uploading a commission file.
+      const mappedGhlStage = resolveGhlStage({
+        carrierStatus: carrierStatusForGhl,
+        allMappings: ghlStageMappingMap,
+        effectiveDate,
+        dealValue,
+        commissionType: commission.action || existing.commission_type || null,
+        existingGhlStage: existing.ghl_stage ?? null,
+        carrierCode,
+      })
+
       const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
+        ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: chargeBack,
@@ -2262,7 +2337,6 @@ export async function processAmamCommissionsForDealTracker(
     const insuredName = buildAmamInsuredName(policy)
     const originalStatus = policy.status_raw || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
     const normalizedName = normalizeNameForSearch(insuredName)
     const ddfInfo = dailyDealFlowMap.get(normalizedName)
     const callCenter = ddfInfo?.call_center ?? null
@@ -2271,6 +2345,16 @@ export async function processAmamCommissionsForDealTracker(
     const effectiveDate =
       (ddfInfo?.draft_date ?? null) ||
       (commission.issdate ?? null)
+
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue,
+      commissionType: commission.action || null,
+      existingGhlStage: null,
+      carrierCode,
+    })
 
     if (newEntryLogCount < 3) {
       console.log('[Deal Tracker] AMAM commission new-entry sample', newEntryLogCount + 1, '| insuredName:', insuredName, '| normalized:', normalizedName, '| ddfFound:', !!(callCenter || phoneNumber), '| call_center:', callCenter ?? '(empty)', '| phone:', phoneNumber ?? '(empty)')

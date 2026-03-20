@@ -12,6 +12,7 @@ import {
   financialsUnchanged,
   carrierStatusUnchanged,
 } from './dealTracker'
+import { resolveGhlStage } from './ghlStageResolver'
 
 /**
  * Normalize RNA policy number for consistent matching with existing deal_tracker rows.
@@ -186,8 +187,6 @@ export async function processRNAFilesForDealTracker(
     // Use current_contract_status_reason for policy_status (and GHL) mapping instead of current_contract_status
     const originalStatus = policy.current_contract_status_reason || null
     const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const mappedGhlStage = ghlStageMappingMap.get(originalStatus || '') || null
-
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
     let effectiveDateFromDdf: string | null = null
@@ -234,16 +233,30 @@ export async function processRNAFilesForDealTracker(
         ? effectiveDateExisting
         : (effectiveDateFromDdf || null)
 
-    const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+    // Re-resolve GHL stage even when raw carrier status is unchanged so that
+    // time-based transitions (draft/effective date) still trigger.
+    // Manual stages are protected inside resolveGhlStage().
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      dealValue,
+      commissionType: commission?.activity_type ?? null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
+    // Used to decide whether we should keep an existing policy_status when
+    // only re-processing financials/deal values (commission upload must not
+    // overwrite carrier/policy status unless deal-derived mapping changed).
+    const statusUnchanged = existing && financialsUnchanged(existing, dealValue, null)
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: statusUnchanged
-        ? (existing?.ghl_stage ?? null)
-        : (mappedGhlStage ?? null),
+      ghl_stage: mappedGhlStage,
       policy_status: statusUnchanged
         ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
         : (mappedStatus ?? originalStatus),
