@@ -265,14 +265,12 @@ export default function DealTrackerComparePage() {
       'status',
       'sales_agent',
       'writing_number',
-      'commission_type',
       'effective_date',
       'call_center',
       'phone_number',
       'cc_pmt_ws',
       'cc_cb_ws',
       'carrier_status',
-      'policy_type',
       // keys are always checked implicitly via lookup, but include them too
       'policy_number',
       'carrier',
@@ -529,13 +527,16 @@ export default function DealTrackerComparePage() {
           }
         }
 
-        const exact = diffs.length === 0
+        // Hard ignore `policy_type` and `commission_type` diffs even if it somehow gets into `diffs`
+        // (e.g. stale bundle / future field list changes).
+        const diffsFiltered = diffs.filter(d => d.field !== 'policy_type' && d.field !== 'commission_type')
+        const exact = diffsFiltered.length === 0
         resultsOut.push({
           policy_number: fr.policy_number,
           carrier: fr.carrier,
           matchKind: exact ? 'exact' : 'different',
           exact,
-          diffs,
+          diffs: diffsFiltered,
         })
       }
 
@@ -576,6 +577,7 @@ export default function DealTrackerComparePage() {
           <p className="text-slate-400 max-w-3xl">
             Upload your exported Deal Tracker Excel/CSV, then we compare each row vs the Supabase
             <code className="ml-2">deal_tracker</code> table by <code>Policy Number</code> + <code>Carrier</code>.
+            {' '}We ignore <code>policy_type</code> and <code>commission_type</code> differences during matching.
           </p>
         </div>
       </div>
