@@ -37,7 +37,7 @@ export function useDealTrackerUpload() {
     })
 
     const upperCode = (carrierCode || '').toUpperCase()
-    // Only process supported carriers (Aetna, AMAM, MOH, RNA, Transamerica, Liberty, Corebridge, AFLAC, Sentinel) for Policy and Commission files
+    // Only process supported carriers for Policy and Commission files
     const shouldProcess =
       (upperCode === 'AETNA' ||
         upperCode === 'AMAM' ||
@@ -47,7 +47,8 @@ export function useDealTrackerUpload() {
         upperCode === 'LIBERTY' ||
         upperCode === 'COREBRIDGE' ||
         upperCode === 'AFLAC' ||
-        upperCode === 'SENTINEL') &&
+        upperCode === 'SENTINEL' ||
+        upperCode === 'AHL') &&
       (fileType === 'Policy' || fileType === 'Commission')
     if (!shouldProcess) {
       console.log('[Deal Tracker Hook] Skipping - conditions not met:', {

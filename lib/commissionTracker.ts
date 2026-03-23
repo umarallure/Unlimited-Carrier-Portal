@@ -43,7 +43,7 @@ function toNumberOrNull(v: any): number | null {
  * normalized table stay consistent.
  */
 function buildCommissionRowsFromSource(
-  sourceTable: 'amam_commissions' | 'aetna_commissions',
+  sourceTable: 'amam_commissions' | 'aetna_commissions' | 'ahl_commissions',
   rawRows: any[],
   agencyCarrierId: string,
   carrierId: string | null,
@@ -102,7 +102,7 @@ function buildCommissionRowsFromSource(
       row['Advance'] ??
       row['advance'] ??
       row['ADVANCE'] ??
-      (sourceTable === 'aetna_commissions' ? row['commissionamount'] : null) ??
+      ((sourceTable === 'aetna_commissions' || sourceTable === 'ahl_commissions') ? row['commissionamount'] : null) ??
       null
 
     let chargeBack: number | null = null
@@ -145,9 +145,10 @@ export async function syncCommissionTrackerForAgencyCarrier(
   const isAetna = upperCode === 'AETNA'
   const isAmam = upperCode === 'AMAM'
   const isCorebridge = upperCode === 'COREBRIDGE'
+  const isAhl = upperCode === 'AHL'
 
-  if (!isAetna && !isAmam && !isCorebridge) {
-    // For now we only normalize AMAM + AETNA + COREBRIDGE into commission_tracker
+  if (!isAetna && !isAmam && !isCorebridge && !isAhl) {
+    // For now we only normalize AMAM + AETNA + AHL + COREBRIDGE into commission_tracker
     return
   }
 
@@ -276,7 +277,7 @@ export async function syncCommissionTrackerForAgencyCarrier(
     return
   }
 
-  const sourceTable = isAetna ? 'aetna_commissions' : 'amam_commissions'
+  const sourceTable = isAetna ? 'aetna_commissions' : isAhl ? 'ahl_commissions' : 'amam_commissions'
 
   // Load all commissions for this agency_carrier (bounded)
   const { data: rawRows, error: rawError } = await supabase

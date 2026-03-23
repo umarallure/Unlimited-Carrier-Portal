@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 'use client'
 
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { parseFile } from '@/lib/fileParser'
 import {
@@ -16,6 +16,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Loader2, Search, RefreshCw } from 'lucide-react'
 
 type CompareFieldKey =
@@ -64,6 +66,47 @@ type CompareRowResult = {
   exact: boolean
   diffs: DiffCell[]
 }
+
+const TRACKED_FIELDS_STORAGE_KEY = 'deal_tracker_compare_tracked_fields_v1'
+
+const TRACKABLE_FIELDS: Array<{ key: CompareFieldKey; label: string }> = [
+  { key: 'name', label: 'Name' },
+  { key: 'tasks', label: 'Tasks' },
+  { key: 'ghl_name', label: 'GHL Name' },
+  { key: 'ghl_stage', label: 'GHL Stage' },
+  { key: 'policy_status', label: 'Policy Status' },
+  { key: 'deal_creation_date', label: 'Deal Creation Date' },
+  { key: 'deal_value', label: 'Deal Value' },
+  { key: 'cc_value', label: 'CC Value' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'status', label: 'Status' },
+  { key: 'sales_agent', label: 'Sales Agent' },
+  { key: 'writing_number', label: 'Writing #' },
+  { key: 'effective_date', label: 'Effective Date' },
+  { key: 'call_center', label: 'Call Center' },
+  { key: 'phone_number', label: 'Phone Number' },
+  { key: 'cc_pmt_ws', label: 'CC PMT WS' },
+  { key: 'cc_cb_ws', label: 'CC CB WS' },
+  { key: 'carrier_status', label: 'Carrier Status' },
+  { key: 'policy_number', label: 'Policy Number' },
+  { key: 'carrier', label: 'Carrier' },
+]
+
+const DEFAULT_TRACKED_FIELDS: CompareFieldKey[] = [
+  'name',
+  'ghl_stage',
+  'deal_value',
+  'status',
+  'effective_date',
+  'policy_number',
+  'policy_status',
+  'cc_value',
+  'sales_agent',
+  'call_center',
+  'carrier',
+  'phone_number',
+  'carrier_status',
+]
 
 const FILE_HEADER_TO_DB_FIELD: Partial<Record<string, CompareFieldKey>> = {
   'Name': 'name',
@@ -250,33 +293,34 @@ export default function DealTrackerComparePage() {
   const [search, setSearch] = useState('')
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
   const [matchFilter, setMatchFilter] = useState<'all' | 'exact' | 'missing' | 'different' | 'db_only'>('all')
+  const [trackedFields, setTrackedFields] = useState<CompareFieldKey[]>(DEFAULT_TRACKED_FIELDS)
+  const [resultCarrierFilter, setResultCarrierFilter] = useState<string>('all')
 
-  const compareFields: CompareFieldKey[] = useMemo(
-    () => [
-      'name',
-      'tasks',
-      'ghl_name',
-      'ghl_stage',
-      'policy_status',
-      'deal_creation_date',
-      'deal_value',
-      'cc_value',
-      'notes',
-      'status',
-      'sales_agent',
-      'writing_number',
-      'effective_date',
-      'call_center',
-      'phone_number',
-      'cc_pmt_ws',
-      'cc_cb_ws',
-      'carrier_status',
-      // keys are always checked implicitly via lookup, but include them too
-      'policy_number',
-      'carrier',
-    ],
-    []
-  )
+  const compareFields: CompareFieldKey[] = useMemo(() => {
+    const keys = new Set<CompareFieldKey>(trackedFields)
+    // Always keep matching keys in compare logic.
+    keys.add('policy_number')
+    keys.add('carrier')
+    return TRACKABLE_FIELDS.map(f => f.key).filter(k => keys.has(k))
+  }, [trackedFields])
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(TRACKED_FIELDS_STORAGE_KEY)
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return
+      const valid = parsed.filter((v): v is CompareFieldKey =>
+        TRACKABLE_FIELDS.some(f => f.key === v)
+      )
+      if (!valid.length) return
+      setTrackedFields(valid)
+    } catch (_) {}
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem(TRACKED_FIELDS_STORAGE_KEY, JSON.stringify(trackedFields))
+  }, [trackedFields])
 
   const compareFieldSelect = useMemo(() => {
     const base = new Set(compareFields)
@@ -310,10 +354,18 @@ export default function DealTrackerComparePage() {
       return r.matchKind === 'different' || r.matchKind === 'ambiguous_in_db'
     }
 
-    const base = results.filter(filterFn)
+    const carrierFiltered = resultCarrierFilter === 'all'
+      ? results
+      : results.filter(r => normalizeCarrierForKey(r.carrier) === normalizeCarrierForKey(resultCarrierFilter))
+    const base = carrierFiltered.filter(filterFn)
     if (!q) return base
     return base.filter(r => (r.policy_number || '').toLowerCase().includes(q) || (r.carrier || '').toLowerCase().includes(q))
-  }, [results, search, matchFilter])
+  }, [results, search, matchFilter, resultCarrierFilter])
+
+  const resultCarrierOptions = useMemo(() => {
+    return Array.from(new Set(results.map(r => r.carrier).filter(Boolean)))
+      .sort((a, b) => a.localeCompare(b))
+  }, [results])
 
   const totalPages = Math.max(1, Math.ceil(filteredResults.length / pageSize))
   const paginated = filteredResults.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize)
@@ -619,6 +671,70 @@ export default function DealTrackerComparePage() {
             </div>
           </div>
 
+          <Tabs defaultValue="upload" className="mt-6">
+            <TabsList className="bg-slate-950 border border-slate-800">
+              <TabsTrigger value="upload">Upload</TabsTrigger>
+              <TabsTrigger value="compare_settings">Compare Settings</TabsTrigger>
+            </TabsList>
+            <TabsContent value="upload">
+              <div className="text-xs text-slate-500">
+                Use your file + carrier filter, then click Compare.
+              </div>
+            </TabsContent>
+            <TabsContent value="compare_settings">
+              <div className="rounded-md border border-slate-800 bg-slate-950 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div className="text-sm text-slate-300">
+                    Choose which columns should count as "changed". Default excludes <code>notes</code>.
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-slate-700 text-slate-300 hover:bg-slate-800"
+                      onClick={() => setTrackedFields(DEFAULT_TRACKED_FIELDS)}
+                    >
+                      Reset Defaults
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-slate-700 text-slate-300 hover:bg-slate-800"
+                      onClick={() => setTrackedFields(TRACKABLE_FIELDS.map(f => f.key))}
+                    >
+                      Select All
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-2">
+                  {TRACKABLE_FIELDS.map(field => {
+                    const checked = trackedFields.includes(field.key)
+                    const lockedKey = field.key === 'policy_number' || field.key === 'carrier'
+                    return (
+                      <label
+                        key={field.key}
+                        className={`flex items-center gap-2 text-sm ${lockedKey ? 'text-slate-500' : 'text-slate-300'}`}
+                      >
+                        <Checkbox
+                          checked={checked}
+                          disabled={lockedKey}
+                          onCheckedChange={(isChecked) => {
+                            if (lockedKey) return
+                            setTrackedFields(prev => {
+                              if (isChecked) return Array.from(new Set([...prev, field.key]))
+                              return prev.filter(k => k !== field.key)
+                            })
+                          }}
+                        />
+                        <span>{field.label}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
+
           <div className="mt-6 flex items-center gap-3 flex-wrap">
             <Button
               onClick={runCompare}
@@ -725,6 +841,19 @@ export default function DealTrackerComparePage() {
                     DB-only
                   </Button>
                 </div>
+                <Select value={resultCarrierFilter} onValueChange={setResultCarrierFilter}>
+                  <SelectTrigger className="bg-slate-950 border-slate-800 text-white w-56">
+                    <SelectValue placeholder="Filter carrier" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-slate-800 border-slate-700">
+                    <SelectItem value="all" className="text-white">All carriers</SelectItem>
+                    {resultCarrierOptions.map(c => (
+                      <SelectItem key={c} value={c} className="text-white">
+                        {c}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <Input
                   value={search}
                   onChange={e => setSearch(e.target.value)}
@@ -736,6 +865,7 @@ export default function DealTrackerComparePage() {
                   className="border-slate-700 text-slate-300 hover:bg-slate-800"
                   onClick={() => {
                     setPage(1)
+                    setResultCarrierFilter('all')
                   }}
                 >
                   <RefreshCw className="w-4 h-4 mr-2" />

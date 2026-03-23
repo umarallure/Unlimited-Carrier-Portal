@@ -719,7 +719,7 @@ export function buildRNACommissionRows(records: ParsedRecord[], agencyCarrierId:
   }))
 }
 
-type TargetTable = 'aetna_policies' | 'aetna_commissions' | 'amam_policies' | 'amam_commissions' | 'transamerica_policies' | 'transamerica_commissions' | 'moh_policies' | 'moh_commissions' | 'corebridge_policies' | 'corebridge_commissions' | 'liberty_policies' | 'liberty_commissions' | 'rna_policies' | 'rna_commissions' | 'aflac_policies' | 'aflac_commissions' | 'sentinel_policies' | 'sentinel_commissions'
+type TargetTable = 'aetna_policies' | 'aetna_commissions' | 'amam_policies' | 'amam_commissions' | 'transamerica_policies' | 'transamerica_commissions' | 'moh_policies' | 'moh_commissions' | 'corebridge_policies' | 'corebridge_commissions' | 'liberty_policies' | 'liberty_commissions' | 'rna_policies' | 'rna_commissions' | 'aflac_policies' | 'aflac_commissions' | 'sentinel_policies' | 'sentinel_commissions' | 'ahl_policies' | 'ahl_commissions'
 
 export function resolveTargetTable(carrierCode: string, fileType: FileKind): TargetTable {
   if (carrierCode === 'AETNA' && fileType === 'Policy') return 'aetna_policies'
@@ -740,6 +740,8 @@ export function resolveTargetTable(carrierCode: string, fileType: FileKind): Tar
   if (carrierCode === 'AFLAC' && fileType === 'Commission') return 'aflac_commissions'
   if (carrierCode === 'SENTINEL' && fileType === 'Policy') return 'sentinel_policies'
   if (carrierCode === 'SENTINEL' && fileType === 'Commission') return 'sentinel_commissions'
+  if (carrierCode === 'AHL' && fileType === 'Policy') return 'ahl_policies'
+  if (carrierCode === 'AHL' && fileType === 'Commission') return 'ahl_commissions'
   throw new Error(`Unsupported carrier/file type combination: ${carrierCode} / ${fileType}`)
 }
 
@@ -762,6 +764,8 @@ export function resolveSourceFormat(carrierCode: string, fileType: FileKind): st
   if (carrierCode === 'AFLAC' && fileType === 'Commission') return 'AFLAC_COMMISSION'
   if (carrierCode === 'SENTINEL' && fileType === 'Policy') return 'SENTINEL_POLICY'
   if (carrierCode === 'SENTINEL' && fileType === 'Commission') return 'SENTINEL_COMMISSION'
+  if (carrierCode === 'AHL' && fileType === 'Policy') return 'AHL_POLICY'
+  if (carrierCode === 'AHL' && fileType === 'Commission') return 'AHL_COMMISSION'
   return null
 }
 
@@ -877,6 +881,8 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   else if (carrierCode === 'RNA' && fileType === 'Commission') rows = buildRNACommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'AFLAC' && fileType === 'Policy') rows = buildAflacPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'AFLAC' && fileType === 'Commission') rows = buildAflacCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'AHL' && fileType === 'Policy') rows = buildAflacPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name).map(r => ({ ...r, source_format: 'AHL_POLICY' }))
+  else if (carrierCode === 'AHL' && fileType === 'Commission') rows = buildAflacCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name).map(r => ({ ...r, source_format: 'AHL_COMMISSION' }))
   else if (carrierCode === 'SENTINEL' && fileType === 'Policy') rows = buildSentinelPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
 
   if (!rows.length) return { success: false, error: 'File parsed but no mappable records were found.' }
@@ -891,7 +897,8 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     targetTable === 'liberty_policies' ||
     targetTable === 'rna_policies' ||
     targetTable === 'aflac_policies' ||
-    targetTable === 'sentinel_policies'
+    targetTable === 'sentinel_policies' ||
+    targetTable === 'ahl_policies'
   const isCommissionTable =
     targetTable === 'aetna_commissions' ||
     targetTable === 'amam_commissions' ||
@@ -901,7 +908,8 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     targetTable === 'liberty_commissions' ||
     targetTable === 'rna_commissions' ||
     targetTable === 'aflac_commissions' ||
-    targetTable === 'sentinel_commissions'
+    targetTable === 'sentinel_commissions' ||
+    targetTable === 'ahl_commissions'
   const now = new Date().toISOString()
 
   // For commission tables we want one row per statement line (per file),

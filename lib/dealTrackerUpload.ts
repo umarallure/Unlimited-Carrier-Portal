@@ -26,6 +26,7 @@ import { processLibertyFilesForDealTracker } from './dealTracker.liberty'
 import { processCorebridgeCommissionsForDealTracker, processCorebridgeFilesForDealTracker } from './dealTracker.corebridge'
 import { processSentinelFilesForDealTracker, processSentinelCommissionsForDealTracker } from './dealTracker.sentinel'
 import { processAflacFilesForDealTracker, processAflacCommissionsForDealTracker } from './dealTracker.aflac'
+import { processAhlFilesForDealTracker, processAhlCommissionsForDealTracker } from './dealTracker.ahl'
 import { supabase } from './supabaseClient'
 import { syncCommissionTrackerForAgencyCarrier } from './commissionTracker'
 
@@ -72,7 +73,8 @@ export async function processDealTrackerAfterUpload(
   const isCorebridge = upperCode === 'COREBRIDGE'
   const isAflac = upperCode === 'AFLAC'
   const isSentinel = upperCode === 'SENTINEL'
-  if (!isAetna && !isAmam && !isMoh && !isRNA && !isTransamerica && !isLiberty && !isCorebridge && !isAflac && !isSentinel) {
+  const isAhl = upperCode === 'AHL'
+  if (!isAetna && !isAmam && !isMoh && !isRNA && !isTransamerica && !isLiberty && !isCorebridge && !isAflac && !isSentinel && !isAhl) {
     console.log('[Deal Tracker] Skipping - carrier not supported for deal tracker:', carrierCode)
     return { success: true }
   }
@@ -166,6 +168,15 @@ export async function processDealTrackerAfterUpload(
       } else if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing Sentinel commission file for deal tracker...')
         previewEntries = await processSentinelCommissionsForDealTracker(agencyCarrierId, fileId)
+      }
+    } else if (isAhl) {
+      if (fileType === 'Policy') {
+        console.log('[Deal Tracker] Processing AHL policy file for deal tracker...')
+        previewEntries = await processAhlFilesForDealTracker(agencyCarrierId, fileId)
+      } else if (fileType === 'Commission') {
+        console.log('[Deal Tracker] Processing AHL commission file for deal tracker...')
+        previewEntries = await processAhlCommissionsForDealTracker(agencyCarrierId, fileId)
+        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
       }
     }
 
