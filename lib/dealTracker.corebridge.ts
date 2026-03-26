@@ -297,6 +297,11 @@ export async function processCorebridgeCommissionsForDealTracker(
   const existingMap = new Map<string, any>()
   existingEntries?.forEach((entry: any) => existingMap.set(entry.policy_number, entry))
 
+  console.log('[Deal Tracker Corebridge] Total commissions from DB for this file:', commissions.length)
+  commissions.forEach((c: any) => {
+    console.log('[Deal Tracker Corebridge]   DB row:', c.policy_number, '| comm_type:', c.comm_type, '| amount:', c.commission_amount)
+  })
+
   // Aggregate commission amounts per policy (positive vs negative)
   const latestRowByPolicy = new Map<string, any>()
   const posMap = new Map<string, number>()
@@ -305,12 +310,11 @@ export async function processCorebridgeCommissionsForDealTracker(
     const policyNum = comm.policy_number
     if (!policyNum) continue
 
-    // Only use commission lines where COMM TYPE represents advances or overrides
-    // when computing deal_value/cc_value, but we still want preview rows for
-    // every policy so the verification dialog appears.
     const rawType = (comm.comm_type ?? '').toString().toUpperCase().trim()
-    const isAdvanceType = rawType.includes('GENERICATT') && rawType.endsWith('AD')
-    const isOverrideType = rawType.includes('OVERRIDE')
+    const isAdvanceType = rawType.length >= 4 && /^[A-Z]+AD$/.test(rawType)
+    const isOverrideType = rawType === 'OVERRIDE' || rawType.includes('OVERRIDE')
+
+    console.log('[Deal Tracker Corebridge]   Filter:', policyNum, '| rawType:', rawType, '| isAD:', isAdvanceType, '| isOverride:', isOverrideType, '| pass:', isAdvanceType || isOverrideType)
 
     const amt =
       comm.commission_amount != null
@@ -321,8 +325,12 @@ export async function processCorebridgeCommissionsForDealTracker(
       else if (amt < 0) negMap.set(policyNum, (negMap.get(policyNum) || 0) + amt)
     }
 
-    if (!latestRowByPolicy.has(policyNum)) latestRowByPolicy.set(policyNum, comm)
+    if (isAdvanceType || isOverrideType) {
+      if (!latestRowByPolicy.has(policyNum)) latestRowByPolicy.set(policyNum, comm)
+    }
   }
+
+  console.log('[Deal Tracker Corebridge] Policies passing filter:', Array.from(latestRowByPolicy.keys()).join(', '))
 
   const previewEntries: DealTrackerPreviewEntry[] = []
 

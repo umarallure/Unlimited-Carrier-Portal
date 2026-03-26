@@ -3,7 +3,7 @@
  * Used by the tree-based upload page (and optionally the old upload page).
  */
 import { supabase } from './supabaseClient'
-import { parseFile, parseRNAExcel, parseRNACommissionCSV } from './fileParser'
+import { parseFile, parseRNAExcel, parseRNACommissionCSV, parseRNACommissionExcel } from './fileParser'
 
 export type FileKind = 'Policy' | 'Commission'
 
@@ -776,10 +776,15 @@ export interface UploadParams {
   carrierCode: string
   file: File
   fileType: FileKind
+  /**
+   * Optional business date for backdated uploads (YYYY-MM-DD), typically used
+   * for commission statements posted on a later day.
+   */
+  uploadDateYmd?: string
 }
 
 export async function executeUpload(params: UploadParams): Promise<{ success: true; count: number; fileId: string; carrierCode: string; fileType: FileKind } | { success: false; error: string }> {
-  const { agencyCarrierId, agencyName, carrierName, carrierCode, file, fileType } = params
+  const { agencyCarrierId, agencyName, carrierName, carrierCode, file, fileType, uploadDateYmd } = params
 
   if (carrierCode === 'TRANSAMERICA' && fileType === 'Commission') {
     return { success: false, error: 'Transamerica commission files are not yet supported. Upload policy files only.' }
@@ -794,6 +799,10 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   if (storageError) return { success: false, error: storageError.message }
 
   const sourceFormat = resolveSourceFormat(carrierCode, fileType)
+  const createdAtOverride =
+    uploadDateYmd && /^\d{4}-\d{2}-\d{2}$/.test(uploadDateYmd)
+      ? new Date(`${uploadDateYmd}T12:00:00`).toISOString()
+      : undefined
   const { data: fileRow, error: fileError } = await supabase
     .from('files')
     .insert({
@@ -802,6 +811,7 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
       original_filename: file.name,
       storage_path: filePath,
       source_format: sourceFormat,
+      ...(createdAtOverride ? { created_at: createdAtOverride } : {}),
     })
     .select()
     .single()
@@ -811,6 +821,7 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   const fileNameLower = file.name.toLowerCase()
   const isRNAPolicyExcel = carrierCode === 'RNA' && fileType === 'Policy' && (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls'))
   const isRNACommissionCSV = carrierCode === 'RNA' && fileType === 'Commission' && fileNameLower.endsWith('.csv')
+  const isRNACommissionExcel = carrierCode === 'RNA' && fileType === 'Commission' && (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls'))
   const isCorebridgeCommissionPdf = carrierCode === 'COREBRIDGE' && fileType === 'Commission' && fileNameLower.endsWith('.pdf')
   const isSentinelCommissionPdf = carrierCode === 'SENTINEL' && fileType === 'Commission' && fileNameLower.endsWith('.pdf')
 
@@ -820,6 +831,7 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     fileType,
     isRNAPolicyExcel,
     isRNACommissionCSV,
+    isRNACommissionExcel,
     isCorebridgeCommissionPdf,
     isSentinelCommissionPdf,
   })
@@ -856,6 +868,8 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     ? (await parseRNAExcel(file) as { records: ParsedRecord[]; totalRecords: number })
     : isRNACommissionCSV
       ? (await parseRNACommissionCSV(file) as { records: ParsedRecord[]; totalRecords: number })
+      : isRNACommissionExcel
+        ? (await parseRNACommissionExcel(file) as { records: ParsedRecord[]; totalRecords: number })
       : (await parseFile(file) as { records: ParsedRecord[]; totalRecords: number })
   
   console.log('[Upload Logic] Parse result:', {
@@ -863,7 +877,14 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     totalRecords: parseResult.totalRecords,
   })
   
-  if (!parseResult.records.length) return { success: false, error: 'No records found in the file.' }
+  if (!parseResult.records.length) {
+    // RNA commission files can contain only "Earned Commission Statement" sections.
+    // In that case there are intentionally no tracked commission rows (no ADVANCE section).
+    if (carrierCode === 'RNA' && fileType === 'Commission') {
+      return { success: true, count: 0, fileId: fileRow.id, carrierCode, fileType }
+    }
+    return { success: false, error: 'No records found in the file.' }
+  }
 
   const targetTable = resolveTargetTable(carrierCode, fileType)
   let rows: any[] = []
@@ -884,6 +905,16 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   else if (carrierCode === 'AHL' && fileType === 'Policy') rows = buildAflacPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name).map(r => ({ ...r, source_format: 'AHL_POLICY' }))
   else if (carrierCode === 'AHL' && fileType === 'Commission') rows = buildAflacCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name).map(r => ({ ...r, source_format: 'AHL_COMMISSION' }))
   else if (carrierCode === 'SENTINEL' && fileType === 'Policy') rows = buildSentinelPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+
+  // For backdated commission uploads, tag rows that support statement_date.
+  if (fileType === 'Commission' && uploadDateYmd && /^\d{4}-\d{2}-\d{2}$/.test(uploadDateYmd)) {
+    rows = rows.map((row) => {
+      if (Object.prototype.hasOwnProperty.call(row, 'statement_date')) {
+        return { ...row, statement_date: row.statement_date ?? uploadDateYmd }
+      }
+      return row
+    })
+  }
 
   if (!rows.length) return { success: false, error: 'File parsed but no mappable records were found.' }
 
@@ -911,6 +942,10 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     targetTable === 'sentinel_commissions' ||
     targetTable === 'ahl_commissions'
   const now = new Date().toISOString()
+  const isMissingOnConflictConstraintError = (err: any): boolean => {
+    const msg = String(err?.message || err?.details || err || '').toLowerCase()
+    return msg.includes('no unique or exclusion constraint matching the on conflict specification')
+  }
 
   // For commission tables we want one row per statement line (per file),
   // not one row per policy. Before inserting the parsed rows for this file,
@@ -986,10 +1021,33 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     try {
       if (isPolicyTable) {
         // Policy tables: upsert on (agency_carrier_id, policy_number)
-        const response = await query.upsert(chunk, { 
+        let response = await query.upsert(chunk, { 
           onConflict: 'agency_carrier_id,policy_number', 
           ignoreDuplicates: false 
         })
+        // Fallback for tables missing the expected unique constraint.
+        // Replace by key via delete+insert so uploads still succeed.
+        if (response.error && isMissingOnConflictConstraintError(response.error)) {
+          console.warn('[Upload Logic] Missing ON CONFLICT constraint, using delete+insert fallback', {
+            targetTable,
+            chunkSize: chunk.length,
+          })
+
+          for (const row of chunk) {
+            const delResponse = await query
+              .delete()
+              .eq('agency_carrier_id', row.agency_carrier_id)
+              .eq('policy_number', row.policy_number)
+            if (delResponse.error) {
+              response = { error: delResponse.error } as any
+              break
+            }
+          }
+
+          if (!response.error) {
+            response = await query.insert(chunk)
+          }
+        }
         error = response.error
         result = response
       } else if (isCommissionTable) {
@@ -1056,7 +1114,7 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
           if (errorStr && errorStr !== '{}' && errorStr !== '[object Object]') {
             errorMessage = `Database error: ${errorStr}`
           } else {
-            errorMessage = `Database write failed. Table: ${targetTable}, Operation: ${isPolicyTable ? 'upsert (policy)' : isCommissionTable ? 'upsert (commission)' : 'insert'}. Check browser console for full error details.`
+            errorMessage = `Database write failed. Table: ${targetTable}, Operation: ${isPolicyTable ? 'upsert (policy)' : 'insert'}. Check browser console for full error details.`
           }
         } catch (_) {
           errorMessage = `Database write failed. Table: ${targetTable}. Check browser console for details.`
@@ -1075,7 +1133,7 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
         totalChunks: Math.ceil(rows.length / BATCH_SIZE),
         isPolicyTable,
         isCommissionTable,
-        onConflict: isPolicyTable || isCommissionTable ? 'agency_carrier_id,policy_number' : 'none',
+        onConflict: isPolicyTable ? 'agency_carrier_id,policy_number' : 'none',
         firstRowSample: chunk[0] ? {
           agency_carrier_id: chunk[0].agency_carrier_id,
           policy_number: chunk[0].policy_number,

@@ -565,7 +565,7 @@ export function UploadTreeFlow() {
                     await loadDailyStatuses() // Refetch – carrier and Policy/Commission nodes update (uses local day range)
                     const count = (result as { count?: number }).count ?? 0
                     
-                    // Process deal tracker for supported carriers (AETNA, AMAM, MOH, RNA, TRANSAMERICA, LIBERTY, COREBRIDGE)
+                    // Process deal tracker for supported carriers
                     console.log('[UploadTreeFlow] Upload successful, checking deal tracker processing...', {
                       carrierCode: carrier.code,
                       fileType,
@@ -573,32 +573,30 @@ export function UploadTreeFlow() {
                       fileId: 'fileId' in result ? result.fileId : 'N/A',
                     })
                     
-                    const isDealTrackerCarrier = carrier.code === 'AETNA' || carrier.code === 'AMAM' || carrier.code === 'MOH' || carrier.code === 'RNA' || carrier.code === 'TRANSAMERICA' || carrier.code === 'LIBERTY' || carrier.code === 'COREBRIDGE'
+                    const upperCarrierCode = String(carrier.code || '').toUpperCase()
                     const shouldProcessDealTracker =
-                      isDealTrackerCarrier &&
                       (fileType === 'Policy' || fileType === 'Commission') &&
                       'fileId' in result
                     if (shouldProcessDealTracker) {
                       setLastUploadContext({
                         agencyCarrierId: ac.id,
                         fileId: result.fileId,
-                        carrierCode: carrier.code,
+                        carrierCode: upperCarrierCode,
                         fileType,
                       })
                       console.log('[UploadTreeFlow] Triggering deal tracker processing for', fileType, 'file...')
                       const dealTrackerResult = await dealTracker.processAfterUpload(
                         ac.id,
                         result.fileId,
-                        carrier.code,
+                        upperCarrierCode,
                         fileType
                       )
                       console.log('[UploadTreeFlow] Deal tracker processing result:', dealTrackerResult)
                     } else {
                       console.log('[UploadTreeFlow] Deal tracker processing skipped:', {
-                        isDealTrackerCarrier,
                         fileType,
                         hasFileId: 'fileId' in result,
-                        shouldProcess: isDealTrackerCarrier && (fileType === 'Policy' || fileType === 'Commission'),
+                        shouldProcess: (fileType === 'Policy' || fileType === 'Commission'),
                       })
                     }
                     

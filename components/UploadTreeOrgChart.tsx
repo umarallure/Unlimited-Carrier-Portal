@@ -120,6 +120,10 @@ export function UploadTreeOrgChart() {
     carrierCode: string
   } | null>(null)
   const [uploadingFile, setUploadingFile] = useState<File | null>(null)
+  const [commissionDateYmd, setCommissionDateYmd] = useState(() => {
+    const t = new Date()
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
+  })
   const [uploading, setUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -254,6 +258,7 @@ export function UploadTreeOrgChart() {
         const d = node?.data as ChartNode
         if (!d) return
         if (d.type === 'Upload' && d.agencyCarrierId && d.fileType && d.agencyName && d.carrierName && d.carrierCode) {
+          setCommissionDateYmd(uploadDate)
           setUploadDialog({
             agencyCarrierId: d.agencyCarrierId,
             fileType: d.fileType,
@@ -330,13 +335,15 @@ export function UploadTreeOrgChart() {
         carrierCode: uploadDialog.carrierCode,
         file: uploadingFile,
         fileType: uploadDialog.fileType,
+        uploadDateYmd: uploadDialog.fileType === 'Commission' ? commissionDateYmd : undefined,
       })
       if (result.success) {
         const count = (result as { count?: number }).count ?? 0
         setUploadMessage({ type: 'success', text: `${uploadDialog.fileType} uploaded. ${count} record(s) processed.` })
         setTimeout(() => setUploadMessage(null), 6000)
         
-        // Process deal tracker for supported carriers (AETNA, AMAM, MOH, RNA, TRANSAMERICA, LIBERTY)
+        // Always hand off to central deal-tracker hook for Policy/Commission uploads.
+        // The hook itself decides which carriers are supported.
         const upperCarrierCode = (uploadDialog.carrierCode || '').toUpperCase()
 
         console.log('[UploadTreeOrgChart] Upload successful, checking deal tracker processing...', {
@@ -346,7 +353,7 @@ export function UploadTreeOrgChart() {
           fileId: 'fileId' in result ? result.fileId : 'N/A',
         })
         
-        if ((upperCarrierCode === 'AETNA' || upperCarrierCode === 'AMAM' || upperCarrierCode === 'MOH' || upperCarrierCode === 'RNA' || upperCarrierCode === 'TRANSAMERICA' || upperCarrierCode === 'LIBERTY' || upperCarrierCode === 'COREBRIDGE' || upperCarrierCode === 'AFLAC' || upperCarrierCode === 'SENTINEL') && (uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
+        if ((uploadDialog.fileType === 'Policy' || uploadDialog.fileType === 'Commission') && 'fileId' in result) {
           setLastUploadContext({
             agencyCarrierId: uploadDialog.agencyCarrierId,
             fileId: result.fileId,
@@ -521,6 +528,20 @@ export function UploadTreeOrgChart() {
               <p className="text-sm text-slate-400">
                 Selected: <span className="font-medium text-slate-200">{uploadingFile.name}</span>
               </p>
+            )}
+            {uploadDialog?.fileType === 'Commission' && (
+              <div className="space-y-1">
+                <Label className="text-sm text-slate-300 font-medium">Commission Date</Label>
+                <Input
+                  type="date"
+                  value={commissionDateYmd}
+                  onChange={(e) => setCommissionDateYmd(e.target.value)}
+                  className="w-full bg-slate-900 border-slate-700 text-white text-sm"
+                />
+                <p className="text-xs text-slate-500">
+                  Use the statement/business date (e.g., 2026-03-19). History and daily tracking will use this date.
+                </p>
+              </div>
             )}
           </div>
           <DialogFooter>

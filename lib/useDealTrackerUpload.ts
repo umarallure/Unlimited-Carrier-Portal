@@ -16,6 +16,43 @@ export function useDealTrackerUpload() {
   const [pendingRows, setPendingRows] = useState<PendingRowsPayload | null>(null)
   const [saveProgressLogs, setSaveProgressLogs] = useState<string[]>([])
 
+  const createEmptyManualEntry = (agencyCarrierId: string, carrierCode: string): DealTrackerPreviewEntry => ({
+    agency_carrier_id: agencyCarrierId,
+    name: null,
+    tasks: null,
+    ghl_name: null,
+    ghl_stage: null,
+    policy_status: null,
+    deal_creation_date: null,
+    policy_number: '',
+    carrier: carrierCode,
+    carrier_id: null,
+    deal_value: null,
+    cc_value: null,
+    charge_back: null,
+    notes: null,
+    status: null,
+    last_updated: new Date().toISOString(),
+    sales_agent: null,
+    writing_number: null,
+    commission_type: null,
+    effective_date: null,
+    call_center: null,
+    phone_number: null,
+    cc_pmt_ws: null,
+    cc_cb_ws: null,
+    carrier_status: null,
+    policy_type: null,
+    daily_deal_flow_fetched: false,
+    daily_deal_flow_fetched_at: null,
+    source_policy_table: null,
+    source_policy_id: null,
+    source_commission_table: null,
+    source_commission_id: null,
+    isNew: true,
+    isUpdated: false,
+  })
+
   /**
    * Process deal tracker after upload if needed
    * Returns true if verification dialog should be shown.
@@ -89,6 +126,12 @@ export function useDealTrackerUpload() {
       if (result.success && result.previewEntries && result.previewEntries.length > 0) {
         console.log('[Deal Tracker Hook] Setting verification entries and showing dialog')
         setVerificationEntries(result.previewEntries)
+        setShowVerification(true)
+        return true
+      } else if (result.success && upperCode === 'RNA' && fileType === 'Commission') {
+        // No ADVANCE section found in RNA commission statement; keep flow editable
+        // by opening deal tracker with a blank row users can fill manually.
+        setVerificationEntries([createEmptyManualEntry(agencyCarrierId, upperCode)])
         setShowVerification(true)
         return true
       } else {

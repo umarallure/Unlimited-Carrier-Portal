@@ -90,10 +90,14 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2) Scan lines for policy-level commission rows.
+    // 2) Scan lines for policy-level commission rows with strict business rules:
+    // - Standard block: only track AD rows, and only when the block has COMM TYPE column.
+    // - OVERRIDE block: track all rows; commission amount comes from OVERRIDE COMM column
+    //   (captured as the last money value on the line).
     const lines = text.split(/\r?\n/)
     const rows: any[] = []
     let rowNumber = 0
+    let inOverrideBlock = false
 
     const parseMoney = (s: string | undefined): number | null => {
       if (!s) return null
@@ -123,9 +127,52 @@ export async function POST(req: NextRequest) {
       return `${year}-${mm}-${dd}`
     }
 
+    console.log('[Corebridge PDF] ===== BEGIN LINE-BY-LINE PARSE =====')
+    console.log('[Corebridge PDF] Total lines from pdf-parse:', lines.length)
+
     for (const rawLine of lines) {
       const line = rawLine.trim()
       if (!line) continue
+      const upperLine = line.toUpperCase()
+
+      // Detect section headers
+      const hasCurrencyLikeValue = /[$(]\s*\d|[$]\d/.test(line)
+      const looksLikeOverrideSummaryLine =
+        upperLine.startsWith('OVERRIDE') &&
+        hasCurrencyLikeValue &&
+        !upperLine.includes('POLICY')
+
+      // Ignore override subtotal/summary lines like:
+      // "OVERRIDE ($224.45) ..."
+      if (looksLikeOverrideSummaryLine) {
+        console.log('[Corebridge PDF] >>> Ignoring OVERRIDE summary line (not a header):', line)
+        continue
+      }
+
+      // Enter override block on likely header lines:
+      // - "OVERRIDE COMM ..."
+      // - or a plain "OVERRIDE" section label (no money values)
+      const isPlainOverrideHeader = upperLine === 'OVERRIDE' || upperLine.startsWith('OVERRIDE ')
+      const isOverrideHeader =
+        !hasCurrencyLikeValue &&
+        (upperLine.includes('OVERRIDE COMM') || isPlainOverrideHeader)
+
+      if (isOverrideHeader) {
+        console.log('[Corebridge PDF] >>> OVERRIDE BLOCK header detected:', line)
+        inOverrideBlock = true
+        continue
+      }
+      if (
+        upperLine.includes('POLICY NUMBER') &&
+        upperLine.includes('COMM RATE')
+      ) {
+        console.log('[Corebridge PDF] >>> STANDARD BLOCK header detected:', line)
+        inOverrideBlock = false
+        continue
+      }
+      if (upperLine.startsWith('CO NAME') || upperLine.startsWith('POLICY NUMBER')) {
+        continue
+      }
       if (line.toUpperCase().startsWith('SUB TOTAL')) continue
       if (line.toUpperCase().startsWith('TOTAL')) continue
 
@@ -135,6 +182,25 @@ export async function POST(req: NextRequest) {
 
       const [, coName, policyNumber, insuredRaw, issueDateRaw, tailRaw] = head
       if (!policyNumber) continue
+
+      // Business rule for standard block:
+      // Only track rows whose COMM TYPE token ends with exactly "AD"
+      // (e.g. GENERICATTAD). Skip AE, FY, REN, TA, etc.
+      const lineTokens = line.split(/\s+/)
+      const detectedCommTypeToken =
+        lineTokens.find(tok => tok.length >= 4 && /^[A-Z]+(?:AD|AE|FY|REN|TA)$/i.test(tok)) ?? null
+
+      if (!inOverrideBlock) {
+        const hasAdCommType = !!detectedCommTypeToken && /AD$/i.test(detectedCommTypeToken)
+        console.log('[Corebridge PDF] STANDARD row |', policyNumber, '| tokens:', lineTokens.filter(t => t.length >= 4 && /^[A-Z]+/i.test(t)).join(', '), '| detectedCommType:', detectedCommTypeToken, '| hasAD:', hasAdCommType, '| inOverride:', inOverrideBlock)
+        if (!hasAdCommType) {
+          console.log('[Corebridge PDF]   SKIPPED (no AD token)')
+          continue
+        }
+        console.log('[Corebridge PDF]   ACCEPTED (AD token found)')
+      } else {
+        console.log('[Corebridge PDF] OVERRIDE row |', policyNumber, '| ACCEPTED (override block)')
+      }
 
       // Capture trailing monetary amounts (end of row)
       const moneyMatches = tailRaw.match(/-?\$[\d,]+\.\d{2}|\(\$[\d,]+\.\d{2}\)/g) || []
@@ -156,7 +222,7 @@ export async function POST(req: NextRequest) {
 
       const agentCode = tokens[0] ?? null
       const bgaCode = tokens[1] ?? null
-      const commType = tokens[2] ?? null
+      const commType = inOverrideBlock ? 'OVERRIDE' : detectedCommTypeToken
 
       // Remaining may include annual_premium, premium, split_premium (often look like $ / 0.00)
       const remainingMoney = tokens.slice(3).join(' ').match(/-?\$?[\d,]+\.\d{2}|\(\$[\d,]+\.\d{2}\)/g) || []
@@ -190,6 +256,10 @@ export async function POST(req: NextRequest) {
       })
     }
 
+    console.log('[Corebridge PDF] ===== END LINE-BY-LINE PARSE =====')
+    console.log('[Corebridge PDF] Total accepted rows:', rows.length)
+    console.log('[Corebridge PDF] Accepted policies:', rows.map(r => `${r.policy_number} (${r.comm_type})`).join(', '))
+
     if (!rows.length) {
       console.warn('[Corebridge PDF] No policy rows detected for file:', storagePath)
       return NextResponse.json({ rowsInserted: 0 })
@@ -203,15 +273,30 @@ export async function POST(req: NextRequest) {
       byKey.set(key, r)
     }
     const dedupedRows = Array.from(byKey.values())
+    console.log('[Corebridge PDF] After dedup:', dedupedRows.length, 'rows to insert')
 
-    const { error: insertError } = await supabase
-      .from('corebridge_commissions')
-      .upsert(dedupedRows, {
-        // Match the unique index on (agency_carrier_id, policy_number)
-        onConflict: 'agency_carrier_id,policy_number',
-        ignoreDuplicates: false,
-      })
+    const table = supabase.from('corebridge_commissions')
 
+    // Wipe ALL existing corebridge_commissions for this agency+file so
+    // re-uploads start clean and old non-AD rows don't linger.
+    const { error: wipeError } = await table
+      .delete()
+      .eq('agency_carrier_id', agencyCarrierId)
+      .eq('file_id', fileId)
+    if (wipeError) {
+      console.error('[Corebridge PDF] Wipe error:', wipeError.message)
+    }
+
+    // Also remove any prior rows for the same policy numbers (from older uploads)
+    // so stale AE/FY rows don't persist in the DB.
+    for (const row of dedupedRows) {
+      await table
+        .delete()
+        .eq('agency_carrier_id', row.agency_carrier_id)
+        .eq('policy_number', row.policy_number)
+    }
+
+    const { error: insertError } = await table.insert(dedupedRows)
     if (insertError) {
       console.error('[Corebridge PDF] Insert error:', insertError.message)
       return NextResponse.json({ error: insertError.message }, { status: 500 })

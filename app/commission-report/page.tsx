@@ -33,6 +33,10 @@ type CarrierRecord = {
 
 type CarrierFilter = 'ALL' | 'AMAM' | 'AETNA'
 
+function policyGroupKey(row: { agency_carrier_id: string; policy_number: string }) {
+  return `${row.agency_carrier_id}::${row.policy_number}`
+}
+
 export default function CommissionReportPage() {
   const [rows, setRows] = useState<CommissionRow[]>([])
   const [allRows, setAllRows] = useState<CommissionRow[]>([])
@@ -84,21 +88,33 @@ export default function CommissionReportPage() {
         // - And still show every individual transaction when a row is expanded.
         setAllRows(all)
 
-        // Collapse to one display row per (agency_carrier, policy, carrier)
-        // using the most recent date row as the "header" for that policy.
+        // Collapse to one display row per (agency_carrier, policy)
+        // and pick the "best" header row (prefer non-empty name/agent, then latest date).
         const byKey = new Map<string, CommissionRow>()
         const parseDate = (d: string): number => {
           const dt = new Date(String(d).split('to')[0].trim().replace(/\./g, '-').replace(/\//g, '-'))
           return isNaN(dt.getTime()) ? 0 : dt.getTime()
         }
+        const qualityScore = (r: CommissionRow): number => {
+          let score = 0
+          if (r.name && String(r.name).trim() && String(r.name).trim() !== '-') score += 2
+          if (r.sales_agent && String(r.sales_agent).trim() && String(r.sales_agent).trim() !== '-') score += 1
+          if (r.commission_rate != null) score += 1
+          return score
+        }
         for (const row of all) {
-          const key = `${row.agency_carrier_id}::${row.policy_number}::${row.carrier}`
+          const key = policyGroupKey(row)
           const existing = byKey.get(key)
           if (!existing) {
             byKey.set(key, row)
             continue
           }
-          if (parseDate(row.date) > parseDate(existing.date)) {
+          const rowScore = qualityScore(row)
+          const existingScore = qualityScore(existing)
+          if (
+            rowScore > existingScore ||
+            (rowScore === existingScore && parseDate(row.date) > parseDate(existing.date))
+          ) {
             byKey.set(key, row)
           }
         }
@@ -328,11 +344,10 @@ export default function CommissionReportPage() {
                     const salesAgent = row.sales_agent || '-'
                     const commissionRate = row.commission_rate
 
-                    const key = `${row.agency_carrier_id}::${row.policy_number}::${row.carrier}`
+                    const key = policyGroupKey(row)
                     const detailRows = allRows.filter(r =>
                       r.agency_carrier_id === row.agency_carrier_id &&
-                      r.policy_number === row.policy_number &&
-                      r.carrier === row.carrier
+                      r.policy_number === row.policy_number
                     )
 
                     const advanceTotal = detailRows.reduce((sum, r) => sum + (r.advance_amount ?? 0), 0)

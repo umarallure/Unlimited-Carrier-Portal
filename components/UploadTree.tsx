@@ -184,7 +184,7 @@ export function UploadTree() {
       })
 
       if (result.success) {
-        // Process deal tracker for supported carriers (AETNA, AMAM, MOH, RNA, TRANSAMERICA, LIBERTY)
+        // Process deal tracker for supported carriers
         console.log('[UploadTree] Upload successful, checking deal tracker processing...', {
           carrierCode,
           fileType,
@@ -194,19 +194,7 @@ export function UploadTree() {
         
         const upperCarrierCode = (carrierCode || '').toUpperCase()
 
-        if (
-          (upperCarrierCode === 'AETNA' ||
-            upperCarrierCode === 'AMAM' ||
-            upperCarrierCode === 'MOH' ||
-            upperCarrierCode === 'RNA' ||
-            upperCarrierCode === 'TRANSAMERICA' ||
-            upperCarrierCode === 'LIBERTY' ||
-            upperCarrierCode === 'COREBRIDGE' ||
-            upperCarrierCode === 'AFLAC' ||
-            upperCarrierCode === 'SENTINEL') &&
-          (fileType === 'Policy' || fileType === 'Commission') &&
-          'fileId' in result
-        ) {
+        if ((fileType === 'Policy' || fileType === 'Commission') && 'fileId' in result) {
           console.log('[UploadTree] Triggering deal tracker processing for', fileType, 'file...')
           setLastUploadContext({
             agencyCarrierId,

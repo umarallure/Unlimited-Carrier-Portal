@@ -45,6 +45,8 @@ export async function processAhlFilesForDealTracker(
   const carrierName = carrier.name || 'AHL'
   const carrierCode = carrier.code || 'AHL'
   const carrierId = carrier.id
+  // Daily Deal Flow stores this carrier under full name, not code.
+  const ddfCarrier = 'American Home Life'
 
   const policies = await fetchAllPaginated(() =>
     supabase
@@ -107,7 +109,7 @@ export async function processAhlFilesForDealTracker(
   )
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, carrierName)
+      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier)
       : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
 
   const previewEntries: DealTrackerPreviewEntry[] = []
@@ -121,6 +123,7 @@ export async function processAhlFilesForDealTracker(
     const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
     let callCenter: string | null
     let phoneNumber: string | null
+    let effectiveDateFromDdf: string | null = null
     if (alreadyHasDdf) {
       callCenter = existing!.call_center
       phoneNumber = existing!.phone_number
@@ -129,6 +132,7 @@ export async function processAhlFilesForDealTracker(
       const ddfInfo = dailyDealFlowMap.get(normalizedName) ?? null
       callCenter = ddfInfo?.call_center ?? null
       phoneNumber = ddfInfo?.phone_number ?? null
+      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
     }
 
     let dealValue: number | null = null
@@ -175,6 +179,7 @@ export async function processAhlFilesForDealTracker(
 
     const effectiveDate =
       existing?.effective_date ??
+      effectiveDateFromDdf ??
       (existing ? null : (policy.issuedate as string | undefined) || null)
 
     const derivedStatus = statusFromDealValue(dealValue)
@@ -274,6 +279,8 @@ export async function processAhlCommissionsForDealTracker(
   const carrierName = carrier.name || 'AHL'
   const carrierCode = carrier.code || 'AHL'
   const carrierId = carrier.id
+  // Daily Deal Flow stores this carrier under full name, not code.
+  const ddfCarrier = 'American Home Life'
 
   const commissions = await fetchAllPaginated(() =>
     supabase
@@ -355,7 +362,7 @@ export async function processAhlCommissionsForDealTracker(
       .map((p: any) => p.insuredname)
       .filter((name: string) => name && name.trim().length > 0)
     if (policyNamesForDDF.length > 0) {
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, carrierName)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier)
     }
   }
 
@@ -459,7 +466,7 @@ export async function processAhlCommissionsForDealTracker(
           sales_agent: policy.agentcompletename || commission.writingagentname || null,
           writing_number: policy.agentnumber || commission.writingagentnumber || null,
           commission_type: commission.commissiontype || null,
-          effective_date: null,
+          effective_date: effectiveDateFromDdf ?? null,
           call_center: callCenter,
           phone_number: phoneNumber,
           cc_pmt_ws: null,
