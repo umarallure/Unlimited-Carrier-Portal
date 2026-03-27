@@ -108,6 +108,9 @@ export function UploadTreeOrgChart() {
     const t = new Date()
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
   })
+  /** Latest toolbar date for d3 onNodeClick (chart effect deps are only chartData). */
+  const uploadDateRef = useRef(uploadDate)
+  uploadDateRef.current = uploadDate
   const [chartData, setChartData] = useState<ChartNode[]>([])
   const [loading, setLoading] = useState(false)
   const [dailyStatusMap, setDailyStatusMap] = useState<Record<string, DailyStatus>>({})
@@ -118,12 +121,10 @@ export function UploadTreeOrgChart() {
     agencyName: string
     carrierName: string
     carrierCode: string
+    /** Date shown in toolbar when the user opened this upload (YYYY-MM-DD). */
+    uploadDateYmd: string
   } | null>(null)
   const [uploadingFile, setUploadingFile] = useState<File | null>(null)
-  const [commissionDateYmd, setCommissionDateYmd] = useState(() => {
-    const t = new Date()
-    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
-  })
   const [uploading, setUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -258,13 +259,13 @@ export function UploadTreeOrgChart() {
         const d = node?.data as ChartNode
         if (!d) return
         if (d.type === 'Upload' && d.agencyCarrierId && d.fileType && d.agencyName && d.carrierName && d.carrierCode) {
-          setCommissionDateYmd(uploadDate)
           setUploadDialog({
             agencyCarrierId: d.agencyCarrierId,
             fileType: d.fileType,
             agencyName: d.agencyName,
             carrierName: d.carrierName,
             carrierCode: d.carrierCode,
+            uploadDateYmd: uploadDateRef.current,
           })
         }
       })
@@ -335,7 +336,8 @@ export function UploadTreeOrgChart() {
         carrierCode: uploadDialog.carrierCode,
         file: uploadingFile,
         fileType: uploadDialog.fileType,
-        uploadDateYmd: uploadDialog.fileType === 'Commission' ? commissionDateYmd : undefined,
+        // Toolbar date when the dialog was opened — drives file.created_at override and commission statement_date backfill in uploadLogic.
+        uploadDateYmd: uploadDialog.uploadDateYmd,
       })
       if (result.success) {
         const count = (result as { count?: number }).count ?? 0
@@ -529,20 +531,6 @@ export function UploadTreeOrgChart() {
                 Selected: <span className="font-medium text-slate-200">{uploadingFile.name}</span>
               </p>
             )}
-            {uploadDialog?.fileType === 'Commission' && (
-              <div className="space-y-1">
-                <Label className="text-sm text-slate-300 font-medium">Commission Date</Label>
-                <Input
-                  type="date"
-                  value={commissionDateYmd}
-                  onChange={(e) => setCommissionDateYmd(e.target.value)}
-                  className="w-full bg-slate-900 border-slate-700 text-white text-sm"
-                />
-                <p className="text-xs text-slate-500">
-                  Use the statement/business date (e.g., 2026-03-19). History and daily tracking will use this date.
-                </p>
-              </div>
-            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setUploadDialog(null)} className="border-slate-600 text-slate-300">Cancel</Button>
@@ -584,15 +572,16 @@ export function UploadTreeOrgChart() {
       {/* Commission Report step (after "Next" from deal tracker for AETNA/AMAM Commission) */}
       <CommissionReportDialog
         open={commissionReport.showCommissionReport}
-        onOpenChange={commissionReport.setShowCommissionReport}
+        onOpenChange={commissionReport.handleCommissionReportOpenChange}
         rows={commissionReport.commissionRows}
         loading={commissionReport.loading}
         saving={commissionReport.saving}
         carrierCode={lastUploadContext?.carrierCode ?? 'AETNA'}
+        agencyCarrierId={commissionReport.reportContext?.agencyCarrierId}
+        fileId={commissionReport.reportContext?.fileId}
         onSave={async (editedRows) => {
           await commissionReport.saveCommissionReport(editedRows)
         }}
-        onCancel={commissionReport.cancelCommissionReport}
       />
     </div>
   )

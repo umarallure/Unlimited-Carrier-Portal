@@ -964,15 +964,16 @@ export function UploadTreeFlow() {
       {/* Commission Report step (after "Next" from deal tracker for AETNA/AMAM Commission) */}
       <CommissionReportDialog
         open={commissionReport.showCommissionReport}
-        onOpenChange={commissionReport.setShowCommissionReport}
+        onOpenChange={commissionReport.handleCommissionReportOpenChange}
         rows={commissionReport.commissionRows}
         loading={commissionReport.loading}
         saving={commissionReport.saving}
         carrierCode={lastUploadContext?.carrierCode ?? 'AETNA'}
+        agencyCarrierId={commissionReport.reportContext?.agencyCarrierId}
+        fileId={commissionReport.reportContext?.fileId}
         onSave={async (editedRows) => {
           await commissionReport.saveCommissionReport(editedRows)
         }}
-        onCancel={commissionReport.cancelCommissionReport}
       />
     </div>
   )

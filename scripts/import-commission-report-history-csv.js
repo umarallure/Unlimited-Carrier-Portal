@@ -181,7 +181,7 @@ async function buildAgencyCarrierByNameLookup (carrierLookup) {
 
   if (error) {
     console.error('Failed to fetch agency_carriers for carriers:', error.message)
-    return map
+    return { byName, byCarrierId }
   }
 
   for (const row of data || []) {
@@ -248,7 +248,20 @@ async function main () {
   console.log('Reading historical Commission Report CSV:', resolved)
   const csvContent = fs.readFileSync(resolved, 'utf-8')
 
-  const records = csv.parse(csvContent, {
+  // Exports often start with 1–2 title rows ("Commision report", …) before the real header.
+  // If columns: true uses line 1 as headers, row["Policy Number"] is always undefined and every row is skipped.
+  const lines = csvContent.split(/\r?\n/)
+  const headerIdx = lines.findIndex(
+    (l) => /\bPolicy Number\b/i.test(l) && /\bCarrier\b/i.test(l) && /\bDate\b/i.test(l)
+  )
+  const csvBody = headerIdx >= 0 ? lines.slice(headerIdx).join('\n') : csvContent
+  if (headerIdx > 0) {
+    console.log(`Detected header at line ${headerIdx + 1} (skipped ${headerIdx} preamble row(s)).`)
+  } else if (headerIdx < 0) {
+    console.warn('Could not find a row with Policy Number + Carrier + Date; parsing from line 1.')
+  }
+
+  const records = csv.parse(csvBody, {
     columns: true,
     skip_empty_lines: true,
     relax_column_count: true,
