@@ -25,10 +25,14 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { executeUpload, type FileKind } from '@/lib/uploadLogic'
 import { fetchDailyStatus, fetchDailyFileTypes, setDailyStatus, getLocalDayRange, type DailyStatus } from '@/lib/dailyUploadStatus'
 import { useDealTrackerUpload } from '@/lib/useDealTrackerUpload'
-import { useCommissionReportUpload } from '@/lib/useCommissionReportUpload'
+import { useCommissionReportUpload, rollbackCommissionFileSession } from '@/lib/useCommissionReportUpload'
 import { DealTrackerVerificationDialog } from '@/components/DealTrackerVerificationDialog'
-import { CommissionReportDialog } from '@/components/CommissionReportDialog'
+import {
+  CommissionReportDialog,
+  type CommissionReportDialogProps,
+} from '@/components/CommissionReportDialog'
 import { cn } from '@/lib/utils'
+import { adminOutlineBtn } from '@/lib/adminFieldClasses'
 
 // Custom Node Components - Professional and Simple
 function AgencyNode({ data }: { data: any }) {
@@ -243,45 +247,45 @@ function UploadNode({ data }: { data: any }) {
 
       {/* Confirmation Dialog */}
       <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
-        <DialogContent className="bg-slate-900 border-slate-700 max-w-md" aria-describedby="upload-confirm-desc">
+        <DialogContent className="max-w-md border-border bg-card sm:rounded-2xl" aria-describedby="upload-confirm-desc">
           <DialogHeader>
-            <DialogTitle className="text-white flex items-center gap-2">
-              <AlertCircle className="w-5 h-5 text-orange-400" />
+            <DialogTitle className="flex items-center gap-2 text-foreground">
+              <AlertCircle className="h-5 w-5 text-orange-500 dark:text-orange-400" />
               Confirm File Upload
             </DialogTitle>
-            <DialogDescription id="upload-confirm-desc" className="text-slate-400">
+            <DialogDescription id="upload-confirm-desc" className="text-muted-foreground">
               Please verify the file details before uploading.
             </DialogDescription>
           </DialogHeader>
           {pendingFile && (
             <div className="space-y-4 py-4">
-              <div className="bg-slate-800/50 rounded-lg p-4 space-y-3 border border-slate-700">
+              <div className="space-y-3 rounded-lg border border-border bg-muted/50 p-4 dark:border-slate-700 dark:bg-slate-800/50">
                 <div>
-                  <div className="text-xs text-slate-500 mb-1">File Name</div>
-                  <div className="text-sm font-medium text-slate-200 break-all">{pendingFile.name}</div>
+                  <div className="mb-1 text-xs text-muted-foreground">File Name</div>
+                  <div className="break-all text-sm font-medium text-foreground">{pendingFile.name}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-slate-500 mb-1">File Size</div>
-                  <div className="text-sm text-slate-300">{formatFileSize(pendingFile.size)}</div>
+                  <div className="mb-1 text-xs text-muted-foreground">File Size</div>
+                  <div className="text-sm text-foreground/90">{formatFileSize(pendingFile.size)}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-slate-500 mb-1">File Type</div>
-                  <div className="text-sm text-slate-300">{pendingFile.type || 'Not specified'}</div>
+                  <div className="mb-1 text-xs text-muted-foreground">File Type</div>
+                  <div className="text-sm text-foreground/90">{pendingFile.type || 'Not specified'}</div>
                 </div>
-                <div className="pt-2 border-t border-slate-700">
-                  <div className="text-xs text-slate-500 mb-1">Upload Location</div>
-                  <div className="text-sm text-slate-300">
+                <div className="border-t border-border pt-2 dark:border-slate-700">
+                  <div className="mb-1 text-xs text-muted-foreground">Upload Location</div>
+                  <div className="text-sm text-foreground/90">
                     <div className="font-medium">{data.fileType}</div>
-                    <div className="text-xs text-slate-400 mt-0.5">
+                    <div className="mt-0.5 text-xs text-muted-foreground">
                       {data.agencyName} → {data.carrierName}
                     </div>
                   </div>
                 </div>
               </div>
-              <div className="bg-amber-900/20 border border-amber-800/50 rounded-lg p-3">
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/50 dark:bg-amber-900/20">
                 <div className="flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  <div className="text-xs text-amber-300">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <div className="text-xs text-amber-900 dark:text-amber-300">
                     Make sure this is the correct file. Uploading the wrong file may overwrite existing records.
                   </div>
                 </div>
@@ -292,13 +296,13 @@ function UploadNode({ data }: { data: any }) {
             <Button
               variant="outline"
               onClick={handleCancelUpload}
-              className="bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700"
+              className={adminOutlineBtn}
             >
               Cancel
             </Button>
             <Button
               onClick={handleConfirmUpload}
-              className="bg-orange-500 hover:bg-orange-600 text-white"
+              className="bg-orange-600 text-white hover:bg-orange-700"
             >
               Confirm & Upload
             </Button>
@@ -435,6 +439,16 @@ export function UploadTreeFlow() {
   })
   const [dailyStatusMap, setDailyStatusMap] = useState<Record<string, DailyStatus>>({})
   const [uploadMessage, setUploadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const onCommissionSaveDealTrackerOnly = useCallback<
+    NonNullable<CommissionReportDialogProps['onSaveDealTrackerOnly']>
+  >(async () => {
+    const ctx = commissionReport.reportContext
+    if (!ctx) return
+    await dealTracker.confirmAndSave()
+    await rollbackCommissionFileSession(ctx)
+    commissionReport.closeAfterDealTrackerOnly()
+  }, [commissionReport, dealTracker])
 
   const toggleNode = useCallback((nodeId: string) => {
     setExpandedNodes(prev => {
@@ -944,10 +958,9 @@ export function UploadTreeFlow() {
         fileType={lastUploadContext?.fileType}
         onNext={
           lastUploadContext?.fileType === 'Commission' &&
-          (lastUploadContext?.carrierCode === 'AETNA' ||
-            lastUploadContext?.carrierCode === 'AMAM' ||
-            lastUploadContext?.carrierCode === 'MOH' ||
-            lastUploadContext?.carrierCode === 'COREBRIDGE')
+          ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL'].includes(
+            (lastUploadContext?.carrierCode || '').toUpperCase()
+          )
             ? () => {
                 dealTracker.setShowVerification(false)
                 if (lastUploadContext)
@@ -974,6 +987,7 @@ export function UploadTreeFlow() {
         onSave={async (editedRows) => {
           await commissionReport.saveCommissionReport(editedRows)
         }}
+        onSaveDealTrackerOnly={onCommissionSaveDealTrackerOnly}
       />
     </div>
   )

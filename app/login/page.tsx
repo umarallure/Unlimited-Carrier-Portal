@@ -39,20 +39,20 @@ function LoginForm() {
   }
 
   return (
-    <Card className="w-full max-w-sm border-slate-700 bg-slate-900/95 shadow-xl">
-      <CardHeader className="space-y-3 text-center pb-2">
-        <div className="mx-auto w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center border border-slate-700">
-          <Shield className="w-7 h-7 text-blue-400" />
+    <Card className="w-full max-w-sm shadow-xl">
+      <CardHeader className="space-y-3 pb-2 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-muted dark:border-slate-700 dark:bg-slate-800">
+          <Shield className="h-7 w-7 text-primary" />
         </div>
         <div>
-          <h1 className="text-xl font-semibold text-slate-50">Unlimited Insurance Admin</h1>
-          <p className="text-sm text-slate-400 mt-1">Sign in to continue</p>
+          <h1 className="text-xl font-semibold text-foreground">Unlimited Insurance Admin</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Sign in to continue</p>
         </div>
       </CardHeader>
       <CardContent className="px-6 pb-6">
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="email" className="text-slate-300">Email</Label>
+            <Label htmlFor="email">Email</Label>
             <Input
               id="email"
               type="email"
@@ -60,19 +60,17 @@ function LoginForm() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              className="bg-slate-950 border-slate-700 text-slate-100"
               autoComplete="email"
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="password" className="text-slate-300">Password</Label>
+            <Label htmlFor="password">Password</Label>
             <Input
               id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              className="bg-slate-950 border-slate-700 text-slate-100"
               autoComplete="current-password"
             />
           </div>
@@ -95,16 +93,16 @@ function LoginForm() {
 export default function LoginPage() {
   return (
     <Suspense fallback={
-      <Card className="w-full max-w-sm border-slate-700 bg-slate-900/95 shadow-xl">
-        <CardHeader className="space-y-3 text-center pb-2">
-          <div className="mx-auto w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center border border-slate-700 animate-pulse" />
-          <div className="h-6 bg-slate-800 rounded w-3/4 mx-auto animate-pulse" />
-          <div className="h-4 bg-slate-800 rounded w-1/2 mx-auto animate-pulse" />
+      <Card className="w-full max-w-sm shadow-xl">
+        <CardHeader className="space-y-3 pb-2 text-center">
+          <div className="mx-auto h-12 w-12 animate-pulse rounded-xl border border-border bg-muted dark:bg-slate-800" />
+          <div className="mx-auto h-6 w-3/4 animate-pulse rounded bg-muted dark:bg-slate-800" />
+          <div className="mx-auto h-4 w-1/2 animate-pulse rounded bg-muted dark:bg-slate-800" />
         </CardHeader>
-        <CardContent className="px-6 pb-6 space-y-4">
-          <div className="h-10 bg-slate-800 rounded animate-pulse" />
-          <div className="h-10 bg-slate-800 rounded animate-pulse" />
-          <div className="h-10 bg-slate-800 rounded animate-pulse" />
+        <CardContent className="space-y-4 px-6 pb-6">
+          <div className="h-10 animate-pulse rounded bg-muted dark:bg-slate-800" />
+          <div className="h-10 animate-pulse rounded bg-muted dark:bg-slate-800" />
+          <div className="h-10 animate-pulse rounded bg-muted dark:bg-slate-800" />
         </CardContent>
       </Card>
     }>

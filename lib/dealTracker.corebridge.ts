@@ -11,8 +11,11 @@ import {
   getChangedFieldsAndPrevious,
   financialsUnchanged,
   carrierStatusUnchanged,
+  policyNeedsDdfLookup,
+  resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
 import { resolveGhlStage } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
 
 /**
  * Build insured name from Corebridge policy for DDF lookup.
@@ -105,10 +108,7 @@ export async function processCorebridgeFilesForDealTracker(
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
   const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
 
-  const policiesNeedingDdf = policies.filter(p => {
-    const ex = existingMap.get(p.policy_number)
-    return !ex || (ex.call_center == null && ex.phone_number == null)
-  })
+  const policiesNeedingDdf = policies.filter(p => policyNeedsDdfLookup(existingMap.get(p.policy_number)))
   const uniqueNames = Array.from(
     new Set(
       policiesNeedingDdf
@@ -135,34 +135,35 @@ export async function processCorebridgeFilesForDealTracker(
     const existing = existingMap.get(policy.policy_number)
     const insuredName = buildCorebridgeInsuredName(policy)
     const originalStatus = (policy.policy_status as string) || null
-    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const normalizedName = normalizeNameForSearch(insuredName)
+    const ddfInfo = insuredName ? dailyDealFlowMap.get(normalizedName) || null : null
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
-    let effectiveDateFromDdf: string | null = null
-    if ((callCenter == null && phoneNumber == null) && insuredName) {
-      const normalizedName = normalizeNameForSearch(insuredName)
-      const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
-      callCenter = ddfInfo?.call_center ?? null
-      phoneNumber = ddfInfo?.phone_number ?? null
-      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+    if (callCenter == null && phoneNumber == null && ddfInfo) {
+      callCenter = ddfInfo.call_center ?? null
+      phoneNumber = ddfInfo.phone_number ?? null
     }
+    const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
     let dealValue: number | null = existing?.deal_value != null ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value) : null
     let ccValue: number | null = dealValue != null ? (existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : dealValue / 2) : null
 
     const dealCreationDate = (policy.date_of_issue as string | undefined) || null
 
-    // Effective date rule for Corebridge:
-    // - If the policy already has effective_date/date_of_issue, keep it.
-    // - Only fall back to DDF draft_date when there is no effective date present.
-    const effectiveDateExisting =
-      (policy.effective_date as string | undefined) ||
-      (policy.date_of_issue as string | undefined) ||
-      null
-
-    const effectiveDate = effectiveDateExisting || effectiveDateFromDdf || null
+    const effectiveDate = mergeEffectiveDate(
+      existing?.effective_date,
+      effectiveDateFromDdf,
+      policy.effective_date,
+      policy.date_of_issue,
+    )
 
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      originalStatus,
+      !!statusUnchanged,
+      existing?.policy_status
+    )
 
     // Re-resolve GHL stage even when raw carrier status is unchanged so that
     // time-based transitions still trigger.
@@ -171,6 +172,7 @@ export async function processCorebridgeFilesForDealTracker(
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealValue,
       commissionType: null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -183,9 +185,7 @@ export async function processCorebridgeFilesForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: statusUnchanged
-        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
-        : (mappedStatus ?? originalStatus),
+      policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,

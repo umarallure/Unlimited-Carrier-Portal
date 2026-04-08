@@ -92,94 +92,116 @@ export async function POST(req: NextRequest) {
       return isParenNegative ? -n : n
     }
 
+    const normalizeSentinelPolicyNumber = (value: string | null | undefined): string | null => {
+      if (!value) return null
+      const raw = String(value).trim()
+      if (!raw) return null
+      if (/^\d+$/.test(raw) && raw.length === 6) return `0${raw}`
+      return raw
+    }
+
     let debugLinesEmitted = 0
     const MAX_DEBUG_LINES = 50
 
-    const tryParsePolicyLine = (line: string) => {
+    const parseSentinelTableRow = (line: string) => {
       const trimmed = line.trim()
       if (!trimmed) return null
       if (trimmed.toUpperCase().startsWith('TOTAL')) return null
+      if (/^WRITING\s+AGENT/i.test(trimmed)) return null
+      if (/^(LIFE|FIRST YEAR)$/i.test(trimmed)) return null
 
-      // Collect money and percent chunks from the tail of the line.
-      const moneyMatches = trimmed.match(moneyRegex) || []
-      const pctMatches = trimmed.match(pctRegex) || []
+      // Parse from right side because tail columns are fixed:
+      // ... AppSt PlanCode EffMo/Yr MthsPaid PaidToDate PolicyDur CommPremium CommRate PayableComm AppliedToAdvance
+      const rowRe =
+        /^(.+?)\s+([A-Z]{2})\s+(\S+)\s+(\d{2}\/\d{4})\s+(\d+)\s+(\d{2}\/\d{4})\s+(\d+)\s+(\(?\$?\d[\d,]*\.\d{2}\)?)\s+(?:(\d+(?:\.\d+)?\s*%)\s+)?(\(?\$?\d[\d,]*\.\d{2}\)?)\s+(\(?\$?\d[\d,]*\.\d{2}\)?)$/i
+      const m = trimmed.match(rowRe)
+      if (!m) {
+        // Fallback for variable spacing/wrapped rows from pdf text extraction.
+        const moneyMatches = trimmed.match(moneyRegex) || []
+        const pctMatches = trimmed.match(pctRegex) || []
+        if (moneyMatches.length < 2) return null
+        if (!/\b\d{2}\/\d{4}\b/.test(trimmed)) return null
 
-      // Expect at least Payable Comm + Applied To Advance; Comm Premium is optional.
-      if (moneyMatches.length < 2) return null
+        let head = trimmed
+        for (const mm of moneyMatches) head = head.replace(mm, ' ')
+        for (const pm of pctMatches) head = head.replace(pm, ' ')
+        head = head.replace(/\s+/g, ' ').trim()
+        const tokens = head.split(' ').filter(Boolean)
+        if (tokens.length < 6) return null
+        if (!/^[A-Z]?\d{5,}$/i.test(tokens[0])) return null
 
-      // Identify core monetary columns from the end:
-      const appliedToAdvanceStr = moneyMatches[moneyMatches.length - 1]
-      const payableCommStr = moneyMatches[moneyMatches.length - 2]
-      const commPremiumStr =
-        moneyMatches.length >= 3 ? moneyMatches[moneyMatches.length - 3] : null
-
-      const commissionRateStr = pctMatches.length > 0 ? pctMatches[pctMatches.length - 1] : null
-
-      // Remove the money and percent pieces from the line so we can parse the head.
-      let head = trimmed
-      for (const m of moneyMatches) head = head.replace(m, ' ')
-      for (const p of pctMatches) head = head.replace(p, ' ')
-      head = head.replace(/\s+/g, ' ').trim()
-
-      // Tokenize the remaining head. Layout (approx):
-      // Writing Agent #, Writing Agent Name, Policy #, Name, App St, Plan Code, Eff Mo/Yr, Mths Paid, Paid to Date, Policy Dur.
-      const tokens = head.split(' ').filter(Boolean)
-      if (tokens.length < 6) {
-        if (debugLinesEmitted < MAX_DEBUG_LINES) {
-          console.log('[Sentinel PDF][debug] skip: too few tokens', { line: trimmed, head, tokens })
-          debugLinesEmitted++
+        let policyIndex = -1
+        for (let i = 1; i < tokens.length; i++) {
+          if (/^\d{5,}$/.test(tokens[i])) {
+            policyIndex = i
+            break
+          }
         }
-        return null
+        if (policyIndex < 0) return null
+
+        let stateIndex = -1
+        for (let i = policyIndex + 1; i < tokens.length; i++) {
+          if (/^[A-Z]{2}$/i.test(tokens[i])) {
+            stateIndex = i
+            break
+          }
+        }
+        if (stateIndex < 0) return null
+
+        const writingAgentNumber = tokens[0] || null
+        const writingAgentName = tokens.slice(1, policyIndex).join(' ') || null
+        const policyNumber = normalizeSentinelPolicyNumber(tokens[policyIndex]) || null
+        const clientName = tokens.slice(policyIndex + 1, stateIndex).join(' ') || null
+        const state = tokens[stateIndex] || null
+        const remaining = tokens.slice(stateIndex + 1)
+        const planCode = remaining[0] ?? null
+        const effMonthYear = remaining[1] ?? null
+        const monthsPaid = remaining[2] ? Number(remaining[2]) : null
+        const paidToDate = remaining[3] ?? null
+        const policyDuration = remaining[4] ? Number(remaining[4]) : null
+        const commPremiumStr = moneyMatches.length >= 3 ? moneyMatches[moneyMatches.length - 3] : null
+        const commissionRateStr = pctMatches.length > 0 ? pctMatches[pctMatches.length - 1] : null
+        const payableCommStr = moneyMatches[moneyMatches.length - 2] || null
+        const appliedToAdvanceStr = moneyMatches[moneyMatches.length - 1] || null
+
+        return {
+          policyNumber,
+          writingAgentNumber,
+          writingAgentName,
+          clientName,
+          state,
+          planCode,
+          effMonthYear,
+          monthsPaid,
+          paidToDate,
+          policyDuration,
+          commPremiumStr,
+          commissionRateStr,
+          payableCommStr,
+          appliedToAdvanceStr,
+        }
       }
 
-      const writingAgentNumber = tokens[0]
+      const left = m[1].trim()
+      // Left side: WritingAgent# WritingAgentName Policy# ClientName
+      const leftRe = /^([A-Z]?\d{5,})\s+(.+?)\s+(\d{5,})\s+(.+)$/i
+      const lm = left.match(leftRe)
+      if (!lm) return null
 
-      // Find policy number as the first all-digit token of length >= 5
-      let policyIndex = -1
-      for (let i = 1; i < tokens.length; i++) {
-        if (/^\d{5,}$/.test(tokens[i])) {
-          policyIndex = i
-          break
-        }
-      }
-      if (policyIndex === -1) {
-        if (debugLinesEmitted < MAX_DEBUG_LINES) {
-          console.log('[Sentinel PDF][debug] skip: no policy number', { line: trimmed, head, tokens })
-          debugLinesEmitted++
-        }
-        return null
-      }
-
-      const writingAgentName = tokens.slice(1, policyIndex).join(' ') || null
-
-      const policyNumber = tokens[policyIndex]
-
-      // After policy number: client name until we hit a 2-letter state code
-      let stateIndex = -1
-      for (let i = policyIndex + 1; i < tokens.length; i++) {
-        if (/^[A-Z]{2}$/i.test(tokens[i])) {
-          stateIndex = i
-          break
-        }
-      }
-      if (stateIndex === -1) {
-        if (debugLinesEmitted < MAX_DEBUG_LINES) {
-          console.log('[Sentinel PDF][debug] skip: no state token', { line: trimmed, head, tokens })
-          debugLinesEmitted++
-        }
-        return null
-      }
-
-      const clientName = tokens.slice(policyIndex + 1, stateIndex).join(' ') || null
-      const state = tokens[stateIndex] ?? null
-
-      // Remaining: plan code, eff month/yr, mths paid, paid to date, policy duration (best-effort parsing)
-      const remaining = tokens.slice(stateIndex + 1)
-      const planCode = remaining[0] ?? null
-      const effMonthYear = remaining[1] ?? null
-      const monthsPaid = remaining[2] ? Number(remaining[2]) : null
-      const paidToDate = remaining[3] ?? null
-      const policyDuration = remaining[4] ? Number(remaining[4]) : null
+      const writingAgentNumber = lm[1] || null
+      const writingAgentName = lm[2]?.trim() || null
+      const policyNumber = normalizeSentinelPolicyNumber(lm[3]) || null
+      const clientName = lm[4]?.trim() || null
+      const state = m[2] || null
+      const planCode = m[3] || null
+      const effMonthYear = m[4] || null
+      const monthsPaid = m[5] ? Number(m[5]) : null
+      const paidToDate = m[6] || null
+      const policyDuration = m[7] ? Number(m[7]) : null
+      const commPremiumStr = m[8] || null
+      const commissionRateStr = m[9] || null
+      const payableCommStr = m[10] || null
+      const appliedToAdvanceStr = m[11] || null
 
       return {
         policyNumber,
@@ -206,9 +228,9 @@ export async function POST(req: NextRequest) {
 
       // Some PDFs split a logical row into two lines (text + money). Try combined then current.
       let parsed =
-        prevLine != null ? tryParsePolicyLine(`${prevLine} ${line}`) : null
+        prevLine != null ? parseSentinelTableRow(`${prevLine} ${line}`) : null
       if (!parsed) {
-        parsed = tryParsePolicyLine(line)
+        parsed = parseSentinelTableRow(line)
       }
 
       if (parsed) {
@@ -245,23 +267,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Fallback: handle vertical layout where an entire row is spread across many lines.
-    // Based on observed output, detail blocks look like:
-    //  LIFE
-    //  First Year
-    //  K999999622              (writing agent #)
-    //  FLINCHUM, BRANDON       (writing agent name)
-    //  654558                  (policy #)
-    //  NATACIA LOGAN-COLLINS   (client name)   <-- may be on the next line(s)
-    //  IL                      (state)
-    //  848                     (plan code)
-    //  03/2026                 (eff Mo/Yr)
-    //  1                       (months paid)
-    //  04/2026                 (paid to date)
-    //  1                       (policy duration)
-    //  $58.02 85.00 %          (commission premium + rate)
-    //  85.00 % $384.70         (rate + payable comm)
-    //  $384.70 $49.32          (payable + applied to advance)
+    // Fallback: vertical layout where each policy appears as a block.
+    // IMPORTANT: parse each block in isolation; never scan tail of whole document.
     if (!rows.length) {
       for (let i = 0; i < lines.length; i++) {
         if (lines[i]?.trim() !== 'LIFE') continue
@@ -269,7 +276,7 @@ export async function POST(req: NextRequest) {
 
         const writingAgentNumber = (lines[i + 2] || '').trim()
         const writingAgentName = (lines[i + 3] || '').trim() || null
-        const policyNumber = (lines[i + 4] || '').trim()
+        const policyNumber = normalizeSentinelPolicyNumber((lines[i + 4] || '').trim())
         const possibleClient = (lines[i + 5] || '').trim()
         const possibleState = (lines[i + 6] || '').trim()
 
@@ -292,10 +299,24 @@ export async function POST(req: NextRequest) {
         const paidToDate = (lines[cursor++] || '').trim() || null
         const policyDurationStr = (lines[cursor++] || '').trim()
 
-        // Find monetary values in all subsequent lines of the document.
-        const tailText = lines.slice(cursor).join(' ')
-        const tailMoney = tailText.match(moneyRegex) || []
-        const tailPct = tailText.match(pctRegex) || []
+        // Determine the end of this block (before next LIFE/First Year or TOTAL).
+        let blockEnd = lines.length
+        for (let j = cursor; j < lines.length; j++) {
+          const cur = (lines[j] || '').trim()
+          const next = (lines[j + 1] || '').trim()
+          if (cur === 'LIFE' && next === 'First Year') {
+            blockEnd = j
+            break
+          }
+          if (/^TOTAL\b/i.test(cur)) {
+            blockEnd = j
+            break
+          }
+        }
+
+        const blockText = lines.slice(cursor, blockEnd).join(' ')
+        const tailMoney = blockText.match(moneyRegex) || []
+        const tailPct = blockText.match(pctRegex) || []
 
         let commissionPremiumStr: string | undefined
         let commissionRatePctStr: string | undefined
@@ -312,27 +333,29 @@ export async function POST(req: NextRequest) {
 
         const positiveMoney = moneyWithVals.filter(m => m.val > 0)
 
-        if (positiveMoney.length > 0) {
-          // Payable commission should be the largest positive amount (e.g. 384.70)
-          const maxPayable = positiveMoney.reduce((max, cur) =>
-            cur.val > max.val ? cur : max
+        if (moneyWithVals.length > 0) {
+          // Prefer explicit row shape "... <rate> <payable> <applied>" when available.
+          const rowTailMatch = blockText.match(
+            /(?:\d+(?:\.\d+)?\s*%)\s+(\(?\$?\d[\d,]*\.\d{2}\)?)\s+(\(?\$?\d[\d,]*\.\d{2}\)?)/i
           )
-          payableCommStr = maxPayable.raw
-
-          // Applied to advance is typically the smallest positive (e.g. 49.32)
-          const remaining = positiveMoney.filter(m => m !== maxPayable)
-          if (remaining.length > 0) {
-            const minApplied = remaining.reduce((min, cur) =>
-              cur.val < min.val ? cur : min
-            )
-            appliedToAdvanceStr = minApplied.raw
-
-            // Commission premium, when present, is the remaining positive value (e.g. 58.02)
-            const remainingAfterApplied = remaining.filter(m => m !== minApplied)
-            if (remainingAfterApplied.length > 0) {
-              commissionPremiumStr = remainingAfterApplied[0].raw
+          if (rowTailMatch) {
+            payableCommStr = rowTailMatch[1]
+            appliedToAdvanceStr = rowTailMatch[2]
+          } else {
+            // Fallback heuristic within block only.
+            const nonZeroByAbs = moneyWithVals
+              .filter(m => m.val !== 0)
+              .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
+            if (nonZeroByAbs.length > 0) {
+              payableCommStr = nonZeroByAbs[0].raw
+            } else if (moneyWithVals.length > 0) {
+              payableCommStr = moneyWithVals[0].raw
             }
+            const afterPayable = moneyWithVals.find(m => m.raw !== payableCommStr)
+            if (afterPayable) appliedToAdvanceStr = afterPayable.raw
           }
+          const firstMoney = moneyWithVals[0]
+          if (firstMoney && firstMoney.raw !== payableCommStr) commissionPremiumStr = firstMoney.raw
         }
 
         if (tailPct.length >= 1) {
@@ -371,6 +394,8 @@ export async function POST(req: NextRequest) {
           source_file: storagePath,
           source_format: 'SENTINEL_COMMISSION_PDF',
         })
+        // Move outer index forward to this block end to avoid duplicate parsing.
+        i = blockEnd - 1
       }
     }
 
@@ -381,27 +406,56 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ rowsInserted: 0 })
     }
 
-    const byKey = new Map<string, any>()
-    for (const r of rows) {
-      const key = `${r.agency_carrier_id}::${r.policy_number}`
-      byKey.set(key, r)
-    }
-    const dedupedRows = Array.from(byKey.values())
+    // Ignore zero-payable rows; only keep rows with real commission movement.
+    // Parentheses are already parsed as negative by parseMoney(), so chargebacks
+    // (e.g. "($436.88)") remain and are processed.
+    const rowsWithPayable = rows.filter((r) => {
+      const amt =
+        r.payable_commission != null
+          ? (typeof r.payable_commission === 'number'
+              ? r.payable_commission
+              : Number(String(r.payable_commission).replace(/,/g, '')))
+          : NaN
+      return !Number.isNaN(amt) && amt !== 0
+    })
+    const zeroPayableCount = rows.length - rowsWithPayable.length
 
+    if (!rowsWithPayable.length) {
+      console.warn(
+        '[Sentinel PDF] Parsed rows found but all payable_commission values are zero.',
+        { parsedRows: rows.length }
+      )
+      return NextResponse.json({ rowsInserted: 0 })
+    }
+
+    console.log(
+      '[Sentinel PDF] Parsed sample:',
+      rowsWithPayable.slice(0, 5).map((r) => ({
+        policy_number: r.policy_number,
+        payable_commission: r.payable_commission,
+        applied_to_advance: r.applied_to_advance,
+        client_name: r.client_name,
+      }))
+    )
+    console.log('[Sentinel PDF] Parse stats:', {
+      parsedRows: rows.length,
+      insertedRows: rowsWithPayable.length,
+      filteredZeroPayable: zeroPayableCount,
+    })
+
+    // Append-only behavior (same as other commission uploads):
+    // keep historical rows; do not replace prior uploads.
     const { error: insertError } = await supabase
       .from('sentinel_commissions')
-      .upsert(dedupedRows, {
-        onConflict: 'agency_carrier_id,policy_number',
-        ignoreDuplicates: false,
-      })
+      .insert(rowsWithPayable)
 
     if (insertError) {
       console.error('[Sentinel PDF] Insert error:', insertError.message)
       return NextResponse.json({ error: insertError.message }, { status: 500 })
     }
 
-    console.log('[Sentinel PDF] Inserted sentinel_commissions rows:', dedupedRows.length)
-    return NextResponse.json({ rowsInserted: dedupedRows.length })
+    console.log('[Sentinel PDF] Inserted sentinel_commissions rows:', rowsWithPayable.length)
+    return NextResponse.json({ rowsInserted: rowsWithPayable.length })
   } catch (e: any) {
     console.error('[Sentinel PDF] Error handling request:', e)
     return NextResponse.json({ error: 'Failed to parse Sentinel commission PDF.' }, { status: 500 })

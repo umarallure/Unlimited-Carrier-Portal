@@ -19,6 +19,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Loader2, Search, RefreshCw } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { PageHeader } from '@/components/PageHeader'
+import { normalizeRnaPolicyKey } from '@/lib/dealTracker.rna'
+import {
+  adminCardHeaderBar,
+  adminCardTitle,
+  adminInput,
+  adminOutlineBtn,
+  adminSelectContent,
+  adminSelectItem,
+  adminSelectTrigger,
+  adminThPlain,
+} from '@/lib/adminFieldClasses'
 
 type CompareFieldKey =
   | 'name'
@@ -45,7 +58,16 @@ type CompareFieldKey =
   | 'policy_type'
 
 type ParsedDealTrackerRow = {
+  /**
+   * Policy Number as displayed from the file (preserves leading zeros).
+   * Used for diffs/display.
+   */
   policy_number: string
+  /**
+   * Normalized policy key used for matching against DB rows.
+   * (Strips spaces and collapses leading zeros for all-digit policy numbers.)
+   */
+  policy_number_key: string
   carrier: string
   // only the fields we compare
   fields: Partial<Record<CompareFieldKey, unknown>>
@@ -151,14 +173,23 @@ function normalizeCarrierForKey(v: unknown): string {
   const key = normalizeWhitespace(t).toUpperCase()
   // Known export alias: ANAM (American Amicable) sometimes appears instead of AMAM.
   if (key === 'ANAM') return 'AMAM'
+  // RNA: short name in exports vs full `carriers.name` in deal_tracker — same logical carrier.
+  if (key === 'ROYAL NEIGHBORS' || key === 'ROYAL NEIGHBORS OF AMERICA') return 'ROYAL NEIGHBORS OF AMERICA'
   return key
 }
 
+/**
+ * Must align with RNA (and deal_tracker upsert) for numeric policies: strip spaces, then leading zeros
+ * on all-digit policy numbers so the compare keys match saved rows and duplicates collapse.
+ */
 function normalizePolicyForKey(v: unknown): string {
   const t = normalizeDashEmptyToNull(v)
   if (!t) return ''
-  // Policy numbers should match regardless of whitespace.
-  return String(t).replace(/\s+/g, '').trim().toUpperCase()
+  const compact = String(t).replace(/\s+/g, '').trim()
+  if (/^\d+$/.test(compact)) {
+    return normalizeRnaPolicyKey(compact).toUpperCase()
+  }
+  return compact.toUpperCase()
 }
 
 function normalizeDateYMD(value: unknown): string | null {
@@ -182,9 +213,16 @@ function normalizeDateYMD(value: unknown): string | null {
     return `${us[3]}-${m}-${d}`
   }
 
-  const d = new Date(t)
+  // ISO / timestamptz: use the calendar prefix so we don't shift the day via UTC (toISOString).
+  const ymdPrefix = String(t).match(/^(\d{4}-\d{2}-\d{2})/)
+  if (ymdPrefix) return ymdPrefix[1]
+
+  const d = new Date(t.includes('T') ? t : `${t}T12:00:00`)
   if (Number.isNaN(d.getTime())) return normalizeWhitespace(t)
-  return d.toISOString().slice(0, 10)
+  const y = d.getFullYear()
+  const mo = d.getMonth() + 1
+  const day = d.getDate()
+  return `${y}-${String(mo).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
 function parseNumber(value: unknown): number | null {
@@ -198,10 +236,8 @@ function parseNumber(value: unknown): number | null {
 }
 
 function numbersEqual(a: unknown, b: unknown): boolean {
-  const an = parseNumber(a)
-  const bn = parseNumber(b)
-  if (an == null && bn == null) return true
-  if (an == null || bn == null) return false
+  const an = parseNumber(a) ?? 0
+  const bn = parseNumber(b) ?? 0
   return Math.abs(an - bn) < 1e-6
 }
 
@@ -221,6 +257,19 @@ function valuesEqual(field: CompareFieldKey, fileValue: unknown, dbValue: unknow
     field === 'cc_cb_ws'
   ) {
     return numbersEqual(fileValue, dbValue)
+  }
+
+  if (field === 'policy_number') {
+    const an = normalizeDashEmptyToNull(fileValue)
+    const bn = normalizeDashEmptyToNull(dbValue)
+    if (an == null && bn == null) return true
+    if (an == null || bn == null) return false
+
+    const ac = String(an).replace(/\s+/g, '').trim()
+    const bc = String(bn).replace(/\s+/g, '').trim()
+    if (/^\d+$/.test(ac) && /^\d+$/.test(bc)) {
+      return normalizeRnaPolicyKey(ac).toUpperCase() === normalizeRnaPolicyKey(bc).toUpperCase()
+    }
   }
 
   if (field === 'deal_creation_date' || field === 'effective_date') {
@@ -246,12 +295,20 @@ function extractParsedRows(records: Array<{ policyNumber: string; data: Record<s
     // prefer DB key columns from file columns if present, else fallback to detected policyNumber
     const policyNumberRaw = data['Policy Number'] ?? data['Policy #'] ?? r.policyNumber
     const carrierRaw = data['Carrier']
-    const policyNumber = normalizePolicyForKey(policyNumberRaw)
+    const policyNumberKey = normalizePolicyForKey(policyNumberRaw)
     const carrier = normalizeCarrierForKey(carrierRaw)
+
+    // Preserve the original policy value (except whitespace) for display/diffing.
+    // Your historical import keeps leading zeros, so display should too.
+    const policyNumberDisplayRaw = normalizeDashEmptyToNull(policyNumberRaw)
+    const policyNumberDisplay = policyNumberDisplayRaw
+      ? String(policyNumberDisplayRaw).replace(/\s+/g, '').trim().toUpperCase()
+      : ''
+
     // Skip stray header rows accidentally included by CSV/Excel exports.
     // Example: policyNumber becomes "POLICYNUMBER" and carrier becomes "CARRIER".
-    if (!policyNumber || !carrier) continue
-    if (!/\d/.test(policyNumber)) continue
+    if (!policyNumberDisplay || !carrier) continue
+    if (!/\d/.test(policyNumberDisplay)) continue
     if (carrier === 'CARRIER') continue
 
     const fields: Partial<Record<CompareFieldKey, unknown>> = {}
@@ -262,10 +319,11 @@ function extractParsedRows(records: Array<{ policyNumber: string; data: Record<s
     }
 
     // ensure keys are always set
-    fields.policy_number = policyNumber
+    fields.policy_number = policyNumberDisplay
     fields.carrier = carrier
     out.push({
-      policy_number: policyNumber,
+      policy_number: policyNumberDisplay,
+      policy_number_key: policyNumberKey,
       carrier,
       fields,
     })
@@ -343,6 +401,27 @@ export default function DealTrackerComparePage() {
     return { total, dbOnly, exact, different, missing, ambiguous, score }
   }, [results])
 
+  /** Match stats for file rows only, optionally narrowed by the result-table carrier filter. */
+  const tableScopeSummary = useMemo(() => {
+    if (!results.length) return null
+    const fileRows = results.filter(r => r.matchKind !== 'db_only')
+    const scoped =
+      resultCarrierFilter === 'all'
+        ? fileRows
+        : fileRows.filter(
+            r => normalizeCarrierForKey(r.carrier) === normalizeCarrierForKey(resultCarrierFilter)
+          )
+    const total = scoped.length
+    const exact = scoped.filter(r => r.exact).length
+    const different = scoped.filter(r => r.matchKind === 'different').length
+    const missing = scoped.filter(r => r.matchKind === 'missing_in_db').length
+    const ambiguous = scoped.filter(r => r.matchKind === 'ambiguous_in_db').length
+    const score = total > 0 ? (exact / total) * 100 : 0
+    const dbOnly =
+      resultCarrierFilter === 'all' ? results.filter(r => r.matchKind === 'db_only').length : 0
+    return { total, exact, different, missing, ambiguous, score, dbOnly }
+  }, [results, resultCarrierFilter])
+
   const filteredResults = useMemo(() => {
     const q = search.trim().toLowerCase()
     const filterFn = (r: CompareRowResult) => {
@@ -369,6 +448,116 @@ export default function DealTrackerComparePage() {
 
   const totalPages = Math.max(1, Math.ceil(filteredResults.length / pageSize))
   const paginated = filteredResults.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize)
+
+  const computeCompareResults = (
+    effectiveRows: ParsedDealTrackerRow[],
+    dbMap: Map<string, any[]>,
+    policyDbMap: Map<string, any[]>
+  ): CompareRowResult[] => {
+    const matchedDbIdSet = new Set<string>()
+    const resultsOut: CompareRowResult[] = []
+
+    for (const fr of effectiveRows) {
+      const exactKey = `${fr.policy_number_key}|${normalizeCarrierForKey(fr.carrier)}`
+      const dbRowsExact = dbMap.get(exactKey) ?? []
+
+      let dbRow: any | null = null
+      if (dbRowsExact.length === 1) {
+        dbRow = dbRowsExact[0]
+      } else if (dbRowsExact.length > 1) {
+        for (const r of dbRowsExact) {
+          if (r?.id != null) matchedDbIdSet.add(String(r.id))
+        }
+        resultsOut.push({
+          policy_number: fr.policy_number,
+          carrier: fr.carrier,
+          matchKind: 'ambiguous_in_db',
+          exact: false,
+          diffs: [],
+        })
+        continue
+      } else {
+        // No exact policy+carrier row. Fall back to policy-only.
+        const policyKey = fr.policy_number_key
+        const dbRowsByPolicy = policyDbMap.get(policyKey) ?? []
+
+        if (dbRowsByPolicy.length === 0) {
+          resultsOut.push({
+            policy_number: fr.policy_number,
+            carrier: fr.carrier,
+            matchKind: 'missing_in_db',
+            exact: false,
+            diffs: [],
+          })
+          continue
+        }
+        if (dbRowsByPolicy.length > 1) {
+          for (const r of dbRowsByPolicy) {
+            if (r?.id != null) matchedDbIdSet.add(String(r.id))
+          }
+          resultsOut.push({
+            policy_number: fr.policy_number,
+            carrier: fr.carrier,
+            matchKind: 'ambiguous_in_db',
+            exact: false,
+            diffs: [],
+          })
+          continue
+        }
+        dbRow = dbRowsByPolicy[0]
+      }
+
+      if (dbRow?.id != null) {
+        matchedDbIdSet.add(String(dbRow.id))
+      }
+
+      const diffs: DiffCell[] = []
+      for (const field of compareFields) {
+        const fileVal = fr.fields[field]
+        const dbVal = (dbRow as any)[field]
+        const equal = valuesEqual(field, fileVal, dbVal)
+        if (!equal) {
+          diffs.push({
+            field,
+            fileValue: toDisplayString(fileVal),
+            dbValue: toDisplayString(dbVal),
+          })
+        }
+      }
+
+      // Hard ignore `policy_type` and `commission_type` diffs even if it somehow gets into `diffs`
+      // (e.g. stale bundle / future field list changes).
+      const diffsFiltered = diffs.filter(d => d.field !== 'policy_type' && d.field !== 'commission_type')
+      const exact = diffsFiltered.length === 0
+      resultsOut.push({
+        policy_number: fr.policy_number,
+        carrier: fr.carrier,
+        matchKind: exact ? 'exact' : 'different',
+        exact,
+        diffs: diffsFiltered,
+      })
+    }
+
+    // DB-only detection within the scanned policy numbers universe.
+    const dbOnlyOut: CompareRowResult[] = []
+    for (const [, rows] of dbMap.entries()) {
+      for (const row of rows) {
+        if (row?.id == null) continue
+        const idStr = String(row.id)
+        if (matchedDbIdSet.has(idStr)) continue
+
+        dbOnlyOut.push({
+          policy_number: row.policy_number ? String(row.policy_number) : '',
+          carrier: row.carrier ? String(row.carrier) : '',
+          matchKind: 'db_only',
+          exact: false,
+          diffs: [],
+        })
+      }
+    }
+
+    return [...resultsOut, ...dbOnlyOut]
+  }
 
   const runCompare = async () => {
     if (!file) return
@@ -453,7 +642,15 @@ export default function DealTrackerComparePage() {
         }
       }
 
-      const allPolicyNumbers = Array.from(new Set(effectiveRows.map(r => r.policy_number)))
+      // Supabase `.in('policy_number', ...)` matches the stored DB string exactly.
+      // Your historical import script preserves leading zeros in `deal_tracker.policy_number`,
+      // but our matching key collapses leading zeros. To avoid "missing in db" false negatives,
+      // fetch by BOTH the display value and the normalized key.
+      const allPolicyNumbers = Array.from(
+        new Set(
+          effectiveRows.flatMap(r => [r.policy_number, r.policy_number_key]).filter(Boolean)
+        )
+      )
 
       // Fetch deal_tracker rows by policy number.
       // We'll try an exact (policy+carrier) match first, but if carrier value differs
@@ -464,7 +661,6 @@ export default function DealTrackerComparePage() {
       // from getting stuck on a single large `IN (...)` request.
       const policyChunks = chunk(allPolicyNumbers, 200)
 
-      const matchedDbIdSet = new Set<string>()
       let fetchedSoFar = 0
 
       const withTimeout = async <T,>(promise: PromiseLike<T>, ms: number, label: string): Promise<T> => {
@@ -481,10 +677,8 @@ export default function DealTrackerComparePage() {
 
       for (let i = 0; i < policyChunks.length; i++) {
         const chunkPol = policyChunks[i]
-        const q = supabase
-          .from('deal_tracker')
-          .select(compareFieldSelect)
-          .in('policy_number', chunkPol)
+        let q = supabase.from('deal_tracker').select(compareFieldSelect).in('policy_number', chunkPol)
+        // FETCH-ONCE: always fetch for all agencies; scope changes recompute locally.
 
         // Fetch
         console.log('[DealTrackerCompare] Fetching DB chunk', i + 1, '/', policyChunks.length, {
@@ -511,108 +705,7 @@ export default function DealTrackerComparePage() {
         }
       }
 
-      const resultsOut: CompareRowResult[] = []
-      for (const fr of effectiveRows) {
-        const exactKey = `${normalizePolicyForKey(fr.policy_number)}|${normalizeCarrierForKey(fr.carrier)}`
-        const dbRowsExact = dbMap.get(exactKey) ?? []
-
-        let dbRow: any | null = null
-        if (dbRowsExact.length === 1) {
-          dbRow = dbRowsExact[0]
-        } else if (dbRowsExact.length > 1) {
-          for (const r of dbRowsExact) {
-            if (r?.id != null) matchedDbIdSet.add(String(r.id))
-          }
-          resultsOut.push({
-            policy_number: fr.policy_number,
-            carrier: fr.carrier,
-            matchKind: 'ambiguous_in_db',
-            exact: false,
-            diffs: [],
-          })
-          continue
-        } else {
-          // No exact policy+carrier row. Fall back to policy-only.
-          const policyKey = normalizePolicyForKey(fr.policy_number)
-          const dbRowsByPolicy = policyDbMap.get(policyKey) ?? []
-          if (dbRowsByPolicy.length === 0) {
-            resultsOut.push({
-              policy_number: fr.policy_number,
-              carrier: fr.carrier,
-              matchKind: 'missing_in_db',
-              exact: false,
-              diffs: [],
-            })
-            continue
-          }
-          if (dbRowsByPolicy.length > 1) {
-            for (const r of dbRowsByPolicy) {
-              if (r?.id != null) matchedDbIdSet.add(String(r.id))
-            }
-            resultsOut.push({
-              policy_number: fr.policy_number,
-              carrier: fr.carrier,
-              matchKind: 'ambiguous_in_db',
-              exact: false,
-              diffs: [],
-            })
-            continue
-          }
-          dbRow = dbRowsByPolicy[0]
-        }
-
-        if (dbRow?.id != null) {
-          matchedDbIdSet.add(String(dbRow.id))
-        }
-
-        const diffs: DiffCell[] = []
-        for (const field of compareFields) {
-          const fileVal = fr.fields[field]
-          const dbVal = (dbRow as any)[field]
-          const equal = valuesEqual(field, fileVal, dbVal)
-          if (!equal) {
-            diffs.push({
-              field,
-              fileValue: toDisplayString(fileVal),
-              dbValue: toDisplayString(dbVal),
-            })
-          }
-        }
-
-        // Hard ignore `policy_type` and `commission_type` diffs even if it somehow gets into `diffs`
-        // (e.g. stale bundle / future field list changes).
-        const diffsFiltered = diffs.filter(d => d.field !== 'policy_type' && d.field !== 'commission_type')
-        const exact = diffsFiltered.length === 0
-        resultsOut.push({
-          policy_number: fr.policy_number,
-          carrier: fr.carrier,
-          matchKind: exact ? 'exact' : 'different',
-          exact,
-          diffs: diffsFiltered,
-        })
-      }
-
-      // DB-only detection within the scanned policy numbers universe.
-      // Any DB deal_tracker row we fetched (for policy_numbers from the file)
-      // that wasn't matched to a file row is considered "db_only".
-      const dbOnlyOut: CompareRowResult[] = []
-      for (const [, rows] of dbMap.entries()) {
-        for (const row of rows) {
-          if (row?.id == null) continue
-          const idStr = String(row.id)
-          if (matchedDbIdSet.has(idStr)) continue
-
-          dbOnlyOut.push({
-            policy_number: row.policy_number ? String(row.policy_number) : '',
-            carrier: row.carrier ? String(row.carrier) : '',
-            matchKind: 'db_only',
-            exact: false,
-            diffs: [],
-          })
-        }
-      }
-
-      setResults([...resultsOut, ...dbOnlyOut])
+      setResults(computeCompareResults(effectiveRows, dbMap, policyDbMap))
     } catch (e: any) {
       console.error('DealTracker compare failed:', e)
       alert(e?.message || 'Compare failed')
@@ -622,76 +715,82 @@ export default function DealTrackerComparePage() {
   }
 
   return (
-    <div className="w-full max-w-none py-8 px-4 space-y-6">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-3xl font-bold mb-2 text-white">Deal Tracker Compare (QA)</h1>
-          <p className="text-slate-400 max-w-3xl">
-            Upload your exported Deal Tracker Excel/CSV, then we compare each row vs the Supabase
-            <code className="ml-2">deal_tracker</code> table by <code>Policy Number</code> + <code>Carrier</code>.
-            {' '}We ignore <code>policy_type</code> and <code>commission_type</code> differences during matching.
-          </p>
-        </div>
-      </div>
+    <div className="admin-page w-full max-w-none space-y-6 px-4 py-8">
+      <PageHeader
+        title="Deal Tracker Compare (QA)"
+        description={
+          <>
+            Upload your exported Deal Tracker Excel/CSV, then we compare each row vs the Supabase{' '}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">deal_tracker</code> table by{' '}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">Policy Number</code> +{' '}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">Carrier</code>. We ignore{' '}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">policy_type</code> and{' '}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">commission_type</code> differences during matching.
+            {' '}
+            Numeric policy numbers are matched like RNA uploads (leading zeros stripped). DB rows are loaded once for
+            all agencies (same policy # may appear under multiple orgs).
+          </>
+        }
+      />
 
-      <Card className="bg-slate-900 border-slate-800">
-        <CardHeader className="border-b border-slate-800">
-          <CardTitle className="text-white text-lg">Upload & Compare</CardTitle>
+      <Card>
+        <CardHeader className={adminCardHeaderBar}>
+          <CardTitle className={cn(adminCardTitle, 'text-lg')}>Upload & Compare</CardTitle>
         </CardHeader>
         <CardContent className="pt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+          <div className="grid grid-cols-1 items-end gap-4 md:grid-cols-2">
             <div className="space-y-2">
-              <label className="text-sm text-slate-300 block">Deal Tracker File (CSV or Excel)</label>
+              <label className="block text-sm text-muted-foreground">Deal Tracker File (CSV or Excel)</label>
               <Input
                 type="file"
                 accept=".csv,.xlsx,.xls"
                 onChange={e => setFile(e.target.files?.[0] ?? null)}
-                className="bg-slate-950 border-slate-800 text-white"
+                className={cn(adminInput, 'cursor-pointer file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-foreground')}
               />
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm text-slate-300 block">Optional Carrier Filter</label>
+              <label className="block text-sm text-muted-foreground">Optional Carrier Filter</label>
               <Select value={carriers} onValueChange={setCarriers}>
-                <SelectTrigger className="bg-slate-950 border-slate-800 text-white">
+                <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
                   <SelectValue placeholder="All carriers" />
                 </SelectTrigger>
-                <SelectContent className="bg-slate-800 border-slate-700">
-                  <SelectItem value="all" className="text-white">All carriers</SelectItem>
+                <SelectContent className={adminSelectContent}>
+                  <SelectItem value="all" className={adminSelectItem}>All carriers</SelectItem>
                   {carrierOptions.map(c => (
-                    <SelectItem key={c} value={c} className="text-white">
+                    <SelectItem key={c} value={c} className={adminSelectItem}>
                       {c}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <div className="text-xs text-slate-500">
+              <div className="text-xs text-muted-foreground">
                 Carrier dropdown is populated after parsing (requires compare click).
               </div>
             </div>
           </div>
 
           <Tabs defaultValue="upload" className="mt-6">
-            <TabsList className="bg-slate-950 border border-slate-800">
+            <TabsList className="h-auto w-full flex-wrap justify-start gap-1">
               <TabsTrigger value="upload">Upload</TabsTrigger>
               <TabsTrigger value="compare_settings">Compare Settings</TabsTrigger>
             </TabsList>
             <TabsContent value="upload">
-              <div className="text-xs text-slate-500">
+              <div className="text-xs text-muted-foreground">
                 Use your file + carrier filter, then click Compare.
               </div>
             </TabsContent>
             <TabsContent value="compare_settings">
-              <div className="rounded-md border border-slate-800 bg-slate-950 p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="text-sm text-slate-300">
-                    Choose which columns should count as "changed". Default excludes <code>notes</code>.
+              <div className="space-y-3 rounded-md border border-border bg-muted/30 p-4 dark:border-slate-800 dark:bg-slate-950/50">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-sm text-muted-foreground dark:text-slate-300">
+                    Choose which columns should count as &quot;changed&quot;. Default excludes <code className="rounded bg-muted px-1 text-xs">notes</code>.
                   </div>
                   <div className="flex items-center gap-2">
                     <Button
                       size="sm"
                       variant="outline"
-                      className="border-slate-700 text-slate-300 hover:bg-slate-800"
+                      className={adminOutlineBtn}
                       onClick={() => setTrackedFields(DEFAULT_TRACKED_FIELDS)}
                     >
                       Reset Defaults
@@ -699,21 +798,24 @@ export default function DealTrackerComparePage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      className="border-slate-700 text-slate-300 hover:bg-slate-800"
+                      className={adminOutlineBtn}
                       onClick={() => setTrackedFields(TRACKABLE_FIELDS.map(f => f.key))}
                     >
                       Select All
                     </Button>
                   </div>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-2">
+                <div className="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
                   {TRACKABLE_FIELDS.map(field => {
                     const checked = trackedFields.includes(field.key)
                     const lockedKey = field.key === 'policy_number' || field.key === 'carrier'
                     return (
                       <label
                         key={field.key}
-                        className={`flex items-center gap-2 text-sm ${lockedKey ? 'text-slate-500' : 'text-slate-300'}`}
+                        className={cn(
+                          'flex items-center gap-2 text-sm',
+                          lockedKey ? 'text-muted-foreground' : 'text-foreground dark:text-slate-300'
+                        )}
                       >
                         <Checkbox
                           checked={checked}
@@ -735,20 +837,20 @@ export default function DealTrackerComparePage() {
             </TabsContent>
           </Tabs>
 
-          <div className="mt-6 flex items-center gap-3 flex-wrap">
+          <div className="mt-6 flex flex-wrap items-center gap-3">
             <Button
-              onClick={runCompare}
+              onClick={() => void runCompare()}
               disabled={!file || loading}
-              className="bg-orange-600 hover:bg-orange-700 text-white font-semibold"
+              className="bg-orange-600 font-semibold text-white hover:bg-orange-700"
             >
               {loading ? (
                 <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Comparing...
                 </>
               ) : (
                 <>
-                  <Search className="w-4 h-4 mr-2" />
+                  <Search className="mr-2 h-4 w-4" />
                   Compare
                 </>
               )}
@@ -756,7 +858,7 @@ export default function DealTrackerComparePage() {
             <Button
               variant="outline"
               disabled={loading}
-              className="border-slate-700 text-slate-300 hover:bg-slate-800"
+              className={adminOutlineBtn}
               onClick={() => {
                 setFile(null)
                 setResults([])
@@ -772,18 +874,22 @@ export default function DealTrackerComparePage() {
 
           {(parsedCount > 0 || results.length > 0) && (
             <div className="mt-6 space-y-2">
-              <div className="text-sm text-slate-300">
-                Parsed rows: <span className="text-white font-semibold">{parsedCount}</span>
-                {' '}| DB rows fetched: <span className="text-white font-semibold">{dbFetchedCount}</span>
+              <div className="text-sm text-muted-foreground dark:text-slate-300">
+                Parsed rows: <span className="font-semibold text-foreground dark:text-white">{parsedCount}</span>
+                {' '}| DB rows fetched:{' '}
+                <span className="font-semibold text-foreground dark:text-white">{dbFetchedCount}</span>
               </div>
               {summary && (
-                <div className="text-sm text-slate-300">
-                  Exact match: <span className="text-white font-semibold">{summary.exact}</span> /{' '}
-                  <span className="text-white font-semibold">{summary.total}</span> ({summary.score.toFixed(2)}%)
-                  {' '}| DB-only: <span className="text-white font-semibold">{summary.dbOnly}</span>
-                  {' '}| Different: <span className="text-white font-semibold">{summary.different}</span>
-                  {' '}| Missing: <span className="text-white font-semibold">{summary.missing}</span>
-                  {' '}| Ambiguous: <span className="text-white font-semibold">{summary.ambiguous}</span>
+                <div className="text-sm text-muted-foreground dark:text-slate-300">
+                  Exact match: <span className="font-semibold text-foreground dark:text-white">{summary.exact}</span> /{' '}
+                  <span className="font-semibold text-foreground dark:text-white">{summary.total}</span> ({summary.score.toFixed(2)}%)
+                  {' '}| DB-only: <span className="font-semibold text-foreground dark:text-white">{summary.dbOnly}</span>
+                  {' '}| Different:{' '}
+                  <span className="font-semibold text-foreground dark:text-white">{summary.different}</span>
+                  {' '}| Missing:{' '}
+                  <span className="font-semibold text-foreground dark:text-white">{summary.missing}</span>
+                  {' '}| Ambiguous:{' '}
+                  <span className="font-semibold text-foreground dark:text-white">{summary.ambiguous}</span>
                 </div>
               )}
             </div>
@@ -792,17 +898,68 @@ export default function DealTrackerComparePage() {
       </Card>
 
       {results.length > 0 && (
-        <Card className="bg-slate-900 border-slate-800">
-          <CardHeader className="border-b border-slate-800">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <CardTitle className="text-white text-lg">Differences</CardTitle>
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs text-slate-500 mr-1">Match:</span>
+        <Card>
+          <CardHeader className={cn(adminCardHeaderBar, 'space-y-4')}>
+            <div>
+              <CardTitle className={cn(adminCardTitle, 'text-lg')}>Mapped entries</CardTitle>
+              <p className="mt-1 text-sm text-muted-foreground dark:text-slate-400">
+                Use the carrier dropdown below to focus stats on one insurer name from the file.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-end sm:gap-4">
+              {tableScopeSummary && (
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950/50">
+                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    {resultCarrierFilter === 'all' ? 'All carriers (file rows)' : `Carrier: ${resultCarrierFilter}`}
+                  </div>
+                  <div className="mt-1 tabular-nums text-foreground dark:text-slate-200">
+                    Exact{' '}
+                    <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                      {tableScopeSummary.exact}
+                    </span>
+                    {' / '}
+                    <span className="font-semibold">{tableScopeSummary.total}</span> (
+                    {tableScopeSummary.score.toFixed(2)}%) · Different{' '}
+                    <span className="font-semibold text-blue-600 dark:text-blue-400">{tableScopeSummary.different}</span> ·
+                    Missing{' '}
+                    <span className="font-semibold text-red-600 dark:text-red-400">{tableScopeSummary.missing}</span>
+                    {tableScopeSummary.ambiguous > 0 && (
+                      <>
+                        {' '}
+                        · Ambiguous{' '}
+                        <span className="font-semibold text-amber-600 dark:text-amber-400">
+                          {tableScopeSummary.ambiguous}
+                        </span>
+                      </>
+                    )}
+                    {resultCarrierFilter === 'all' && tableScopeSummary.dbOnly > 0 && (
+                      <>
+                        {' '}
+                        · DB-only{' '}
+                        <span className="font-semibold text-purple-600 dark:text-purple-400">
+                          {tableScopeSummary.dbOnly}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4 dark:border-slate-800">
+              <div className="text-sm font-medium text-muted-foreground dark:text-slate-400">Row filters</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="mr-1 text-xs text-muted-foreground">Match:</span>
                   <Button
                     size="sm"
                     variant={matchFilter === 'all' ? 'default' : 'outline'}
-                    className={matchFilter === 'all' ? 'bg-slate-700 hover:bg-slate-600' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}
+                    className={
+                      matchFilter === 'all'
+                        ? 'bg-slate-700 text-white hover:bg-slate-600 dark:bg-slate-700'
+                        : adminOutlineBtn
+                    }
                     onClick={() => setMatchFilter('all')}
                   >
                     All
@@ -810,7 +967,11 @@ export default function DealTrackerComparePage() {
                   <Button
                     size="sm"
                     variant={matchFilter === 'exact' ? 'default' : 'outline'}
-                    className={matchFilter === 'exact' ? 'bg-emerald-700 hover:bg-emerald-600' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}
+                    className={
+                      matchFilter === 'exact'
+                        ? 'bg-emerald-600 text-white hover:bg-emerald-600'
+                        : adminOutlineBtn
+                    }
                     onClick={() => setMatchFilter('exact')}
                   >
                     Exact
@@ -818,7 +979,11 @@ export default function DealTrackerComparePage() {
                   <Button
                     size="sm"
                     variant={matchFilter === 'missing' ? 'default' : 'outline'}
-                    className={matchFilter === 'missing' ? 'bg-red-700 hover:bg-red-600' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}
+                    className={
+                      matchFilter === 'missing'
+                        ? 'bg-red-600 text-white hover:bg-red-600'
+                        : adminOutlineBtn
+                    }
                     onClick={() => setMatchFilter('missing')}
                   >
                     Missing
@@ -826,7 +991,11 @@ export default function DealTrackerComparePage() {
                   <Button
                     size="sm"
                     variant={matchFilter === 'different' ? 'default' : 'outline'}
-                    className={matchFilter === 'different' ? 'bg-blue-700 hover:bg-blue-600' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}
+                    className={
+                      matchFilter === 'different'
+                        ? 'bg-blue-600 text-white hover:bg-blue-600'
+                        : adminOutlineBtn
+                    }
                     onClick={() => setMatchFilter('different')}
                   >
                     Different
@@ -834,7 +1003,11 @@ export default function DealTrackerComparePage() {
                   <Button
                     size="sm"
                     variant={matchFilter === 'db_only' ? 'default' : 'outline'}
-                    className={matchFilter === 'db_only' ? 'bg-purple-700 hover:bg-purple-600' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}
+                    className={
+                      matchFilter === 'db_only'
+                        ? 'bg-purple-600 text-white hover:bg-purple-600'
+                        : adminOutlineBtn
+                    }
                     onClick={() => setMatchFilter('db_only')}
                     title="Deals present in DB but not matched by file rows (within scanned policy numbers)."
                   >
@@ -842,13 +1015,13 @@ export default function DealTrackerComparePage() {
                   </Button>
                 </div>
                 <Select value={resultCarrierFilter} onValueChange={setResultCarrierFilter}>
-                  <SelectTrigger className="bg-slate-950 border-slate-800 text-white w-56">
+                  <SelectTrigger className={cn('h-10 w-56', adminSelectTrigger)}>
                     <SelectValue placeholder="Filter carrier" />
                   </SelectTrigger>
-                  <SelectContent className="bg-slate-800 border-slate-700">
-                    <SelectItem value="all" className="text-white">All carriers</SelectItem>
+                  <SelectContent className={adminSelectContent}>
+                    <SelectItem value="all" className={adminSelectItem}>All carriers</SelectItem>
                     {resultCarrierOptions.map(c => (
-                      <SelectItem key={c} value={c} className="text-white">
+                      <SelectItem key={c} value={c} className={adminSelectItem}>
                         {c}
                       </SelectItem>
                     ))}
@@ -858,17 +1031,17 @@ export default function DealTrackerComparePage() {
                   value={search}
                   onChange={e => setSearch(e.target.value)}
                   placeholder="Search policy # or carrier..."
-                  className="bg-slate-950 border-slate-800 text-white w-72"
+                  className={cn(adminInput, 'w-full min-w-[12rem] max-w-xs sm:w-72')}
                 />
                 <Button
                   variant="outline"
-                  className="border-slate-700 text-slate-300 hover:bg-slate-800"
+                  className={adminOutlineBtn}
                   onClick={() => {
                     setPage(1)
                     setResultCarrierFilter('all')
                   }}
                 >
-                  <RefreshCw className="w-4 h-4 mr-2" />
+                  <RefreshCw className="mr-2 h-4 w-4" />
                   Re-focus
                 </Button>
               </div>
@@ -876,18 +1049,18 @@ export default function DealTrackerComparePage() {
           </CardHeader>
           <CardContent className="pt-6">
             <Table>
-              <TableHeader className="bg-slate-800">
+              <TableHeader className="bg-muted/80 dark:bg-slate-800">
                 <TableRow>
-                  <TableHead className="text-slate-200">Match</TableHead>
-                  <TableHead className="text-slate-200">Policy #</TableHead>
-                  <TableHead className="text-slate-200">Carrier</TableHead>
-                  <TableHead className="text-slate-200">Changed Fields</TableHead>
+                  <TableHead className={adminThPlain}>Match</TableHead>
+                  <TableHead className={adminThPlain}>Policy #</TableHead>
+                  <TableHead className={adminThPlain}>Carrier</TableHead>
+                  <TableHead className={adminThPlain}>Changed Fields</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {paginated.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-slate-400 text-center py-6">
+                    <TableCell colSpan={4} className="py-6 text-center text-muted-foreground">
                       No results.
                     </TableCell>
                   </TableRow>
@@ -898,29 +1071,29 @@ export default function DealTrackerComparePage() {
                     return (
                       <Fragment key={`${r.policy_number}-${r.carrier}-${idx}`}>
                         <TableRow>
-                          <TableCell className="text-slate-100">
+                          <TableCell className="text-foreground">
                             {r.matchKind === 'exact' ? (
-                              <span className="text-emerald-300 font-semibold">Exact</span>
+                              <span className="font-semibold text-emerald-700 dark:text-emerald-300">Exact</span>
                             ) : r.matchKind === 'missing_in_db' ? (
-                              <span className="text-red-300 font-semibold">Missing</span>
+                              <span className="font-semibold text-red-700 dark:text-red-300">Missing</span>
                             ) : r.matchKind === 'ambiguous_in_db' ? (
-                              <span className="text-amber-300 font-semibold">Ambiguous</span>
-                        ) : r.matchKind === 'db_only' ? (
-                          <span className="text-purple-300 font-semibold">DB-only</span>
+                              <span className="font-semibold text-amber-700 dark:text-amber-300">Ambiguous</span>
+                            ) : r.matchKind === 'db_only' ? (
+                              <span className="font-semibold text-purple-700 dark:text-purple-300">DB-only</span>
                             ) : (
-                              <span className="text-blue-300 font-semibold">Different</span>
+                              <span className="font-semibold text-blue-700 dark:text-blue-300">Different</span>
                             )}
                           </TableCell>
-                          <TableCell className="font-mono text-slate-200">{r.policy_number}</TableCell>
-                          <TableCell className="text-slate-200">{r.carrier}</TableCell>
-                          <TableCell className="text-slate-200">
+                          <TableCell className="font-mono text-foreground dark:text-slate-200">{r.policy_number}</TableCell>
+                          <TableCell className="text-foreground dark:text-slate-200">{r.carrier}</TableCell>
+                          <TableCell className="text-foreground dark:text-slate-200">
                             {r.matchKind === 'exact' ? (
-                              <span className="text-slate-500">—</span>
-                          ) : r.matchKind === 'db_only' ? (
-                            <span className="text-slate-300">—</span>
+                              <span className="text-muted-foreground">—</span>
+                            ) : r.matchKind === 'db_only' ? (
+                              <span className="text-muted-foreground dark:text-slate-300">—</span>
                             ) : (
                               <div className="flex items-center gap-2">
-                                <span className="text-slate-200">
+                                <span>
                                   {r.matchKind === 'different'
                                     ? (r.diffs.length ? `${r.diffs.length} field(s)` : 'Different')
                                     : '—'}
@@ -929,7 +1102,7 @@ export default function DealTrackerComparePage() {
                                   <Button
                                     size="sm"
                                     variant="outline"
-                                    className="h-7 border-slate-700 text-slate-300 hover:bg-slate-800"
+                                    className={cn('h-7', adminOutlineBtn)}
                                     onClick={() => setExpandedKey(prev => (prev === rowKey ? null : rowKey))}
                                   >
                                     {isExpanded ? 'Hide' : 'Details'}
@@ -941,20 +1114,20 @@ export default function DealTrackerComparePage() {
                         </TableRow>
                         {isExpanded && (
                           <TableRow>
-                            <TableCell colSpan={4} className="bg-slate-950/40">
+                            <TableCell colSpan={4} className="bg-muted/40 dark:bg-slate-950/40">
                               <div className="p-3">
-                                <div className="text-xs font-medium text-slate-300 mb-2">
+                                <div className="mb-2 text-xs font-medium text-muted-foreground dark:text-slate-300">
                                   Changes (file -&gt; DB)
                                 </div>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                                   {r.diffs.map(d => (
-                                    <div key={d.field} className="text-xs text-slate-200">
-                                      <div className="font-semibold text-slate-100">{d.field}</div>
-                                      <div className="text-slate-400">
-                                        File: <span className="text-slate-200">{d.fileValue ?? '—'}</span>
+                                    <div key={d.field} className="text-xs text-foreground dark:text-slate-200">
+                                      <div className="font-semibold text-foreground dark:text-slate-100">{d.field}</div>
+                                      <div className="text-muted-foreground">
+                                        File: <span className="text-foreground dark:text-slate-200">{d.fileValue ?? '—'}</span>
                                       </div>
-                                      <div className="text-slate-400">
-                                        DB: <span className="text-slate-200">{d.dbValue ?? '—'}</span>
+                                      <div className="text-muted-foreground">
+                                        DB: <span className="text-foreground dark:text-slate-200">{d.dbValue ?? '—'}</span>
                                       </div>
                                     </div>
                                   ))}
@@ -971,23 +1144,18 @@ export default function DealTrackerComparePage() {
             </Table>
 
             {filteredResults.length > pageSize && (
-              <div className="mt-6 flex items-center justify-between gap-3 flex-wrap">
-                <div className="text-sm text-slate-400">
-                  Page <span className="text-slate-200 font-semibold">{page}</span> of{' '}
-                  <span className="text-slate-200 font-semibold">{totalPages}</span>
+              <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+                <div className="text-sm text-muted-foreground">
+                  Page <span className="font-semibold text-foreground dark:text-slate-200">{page}</span> of{' '}
+                  <span className="font-semibold text-foreground dark:text-slate-200">{totalPages}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    className="border-slate-700 text-slate-300 hover:bg-slate-800"
-                    disabled={page <= 1}
-                    onClick={() => setPage(p => Math.max(1, p - 1))}
-                  >
+                  <Button variant="outline" className={adminOutlineBtn} disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>
                     Prev
                   </Button>
                   <Button
                     variant="outline"
-                    className="border-slate-700 text-slate-300 hover:bg-slate-800"
+                    className={adminOutlineBtn}
                     disabled={page >= totalPages}
                     onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                   >
@@ -998,8 +1166,8 @@ export default function DealTrackerComparePage() {
             )}
 
             {paginated.length > 0 && paginated.some(r => r.matchKind === 'different') && (
-              <div className="mt-6 text-slate-400 text-xs">
-                Click <span className="text-slate-200 font-semibold">Details</span> to see before/after values per column.
+              <div className="mt-6 text-xs text-muted-foreground">
+                Click <span className="font-semibold text-foreground dark:text-slate-200">Details</span> to see before/after values per column.
               </div>
             )}
           </CardContent>

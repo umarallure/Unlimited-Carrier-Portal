@@ -9,6 +9,22 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "@/components/ui/dialog"
 import { Pencil, Trash2, Plus, Building2, Search } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { cn } from '@/lib/utils'
+import { PageHeader } from '@/components/PageHeader'
+import { Card, CardContent } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import {
+  adminInput,
+  adminOutlineBtn,
+  adminPaginationBar,
+  adminSelectContent,
+  adminSelectItem,
+  adminSelectTrigger,
+  adminTableRowInteractive,
+  adminTdMuted,
+  adminTdStrong,
+  adminThPlain,
+} from '@/lib/adminFieldClasses'
 
 export default function AgenciesPage() {
     const [agencies, setAgencies] = useState<any[]>([])
@@ -111,126 +127,125 @@ export default function AgenciesPage() {
     }, [searchTerm])
 
     return (
-        <div className="space-y-6 animate-in fade-in duration-500">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4">
-                    <div className="w-12 h-12 rounded-xl bg-slate-900 flex items-center justify-center border border-slate-800">
-                        <Building2 className="w-6 h-6 text-orange-400" />
-                    </div>
-                    <div>
-                        <h1 className="text-3xl font-bold text-white">Agencies</h1>
-                        <p className="text-gray-400">Manage all your agencies</p>
-                    </div>
-                </div>
-                <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                    <DialogTrigger asChild>
-                        <Button onClick={() => openDialog()} className="bg-orange-600 hover:bg-orange-700 text-white shadow-sm">
-                            <Plus className="mr-2 h-4 w-4" /> Add Agency
-                        </Button>
-                    </DialogTrigger>
-                    <DialogContent className="bg-slate-900 border-slate-700" aria-describedby="agency-dialog-desc">
-                        <DialogHeader>
-                            <DialogTitle className="text-white">{editingAgency ? 'Edit Agency' : 'Add New Agency'}</DialogTitle>
-                            <DialogDescription id="agency-dialog-desc" className="sr-only text-slate-400">
-                                {editingAgency ? 'Edit agency name.' : 'Create a new agency.'}
-                            </DialogDescription>
-                        </DialogHeader>
-                        <div className="space-y-4 py-4">
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium text-gray-300">Agency Name</label>
-                                <Input
-                                    value={newAgencyName}
-                                    onChange={(e) => setNewAgencyName(e.target.value)}
-                                    placeholder="Enter agency name"
-                                    className="bg-slate-800 border-slate-700 text-white placeholder:text-gray-500"
-                                />
-                            </div>
-                            <Button
-                                onClick={editingAgency ? handleUpdateAgency : handleAddAgency}
-                                className="w-full bg-gradient-to-r from-purple-500 to-pink-600 hover:from-purple-600 hover:to-pink-700"
-                            >
-                                {editingAgency ? 'Update Agency' : 'Create Agency'}
+        <div className="admin-page animate-in space-y-6 fade-in duration-500">
+            <PageHeader
+                title="Agencies"
+                description="Manage all your agencies"
+                icon={<Building2 className="h-7 w-7 text-orange-500 dark:text-orange-400" strokeWidth={2} />}
+                action={
+                    <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+                        <DialogTrigger asChild>
+                            <Button onClick={() => openDialog()} className="bg-orange-600 text-white shadow-sm hover:bg-orange-700">
+                                <Plus className="mr-2 h-4 w-4" /> Add Agency
                             </Button>
+                        </DialogTrigger>
+                        <DialogContent className="sm:max-w-md" aria-describedby="agency-dialog-desc">
+                            <DialogHeader>
+                                <DialogTitle>{editingAgency ? 'Edit Agency' : 'Add New Agency'}</DialogTitle>
+                                <DialogDescription id="agency-dialog-desc" className="sr-only">
+                                    {editingAgency ? 'Edit agency name.' : 'Create a new agency.'}
+                                </DialogDescription>
+                            </DialogHeader>
+                            <div className="space-y-4 py-4">
+                                <div className="space-y-2">
+                                    <Label className="text-foreground">Agency Name</Label>
+                                    <Input
+                                        value={newAgencyName}
+                                        onChange={(e) => setNewAgencyName(e.target.value)}
+                                        placeholder="Enter agency name"
+                                        className={adminInput}
+                                    />
+                                </div>
+                                <Button
+                                    onClick={editingAgency ? handleUpdateAgency : handleAddAgency}
+                                    className="w-full bg-gradient-to-r from-purple-500 to-pink-600 text-white hover:from-purple-600 hover:to-pink-700"
+                                >
+                                    {editingAgency ? 'Update Agency' : 'Create Agency'}
+                                </Button>
+                            </div>
+                        </DialogContent>
+                    </Dialog>
+                }
+            />
+
+            <Card>
+                <CardContent className="space-y-3 pt-6">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-4">
+                        <div className="relative min-w-[200px] flex-1">
+                            <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
+                            <Input
+                                placeholder="Search agencies..."
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                className={cn(adminInput, 'pl-10')}
+                            />
                         </div>
-                    </DialogContent>
-                </Dialog>
-            </div>
-
-            <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-                <div className="flex items-center justify-between gap-4 mb-3">
-                    <div className="relative flex-1">
-                        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-                        <Input
-                            placeholder="Search agencies..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="pl-10 bg-slate-950 border-slate-800 text-white placeholder:text-slate-500"
-                        />
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-muted-foreground">Rows per page:</span>
+                            <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
+                                <SelectTrigger className={cn('h-8 w-20 text-xs', adminSelectTrigger)}>
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent className={adminSelectContent}>
+                                    <SelectItem value="25" className={adminSelectItem}>25</SelectItem>
+                                    <SelectItem value="50" className={adminSelectItem}>50</SelectItem>
+                                    <SelectItem value="100" className={adminSelectItem}>100</SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <span className="text-sm text-slate-400">Rows per page:</span>
-                        <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
-                            <SelectTrigger className="h-8 w-20 bg-slate-950 border-slate-800 text-white text-xs">
-                                <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent className="bg-slate-800 border-slate-700">
-                                <SelectItem value="25" className="text-white">25</SelectItem>
-                                <SelectItem value="50" className="text-white">50</SelectItem>
-                                <SelectItem value="100" className="text-white">100</SelectItem>
-                            </SelectContent>
-                        </Select>
+                    <div className="text-sm text-muted-foreground">
+                        Showing {filteredAgencies.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, filteredAgencies.length)} of {filteredAgencies.length} agencies
                     </div>
-                </div>
-                <div className="text-sm text-slate-400">
-                    Showing {filteredAgencies.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, filteredAgencies.length)} of {filteredAgencies.length} agencies
-                </div>
-            </div>
+                </CardContent>
+            </Card>
 
-            <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
+            <Card className="overflow-hidden">
+                <CardContent className="p-0">
                 <Table>
                     <TableHeader>
-                        <TableRow className="border-b border-white/10 hover:bg-transparent">
-                            <TableHead className="text-gray-300 font-semibold">Agency Name</TableHead>
-                            <TableHead className="text-gray-300 font-semibold">Created Date</TableHead>
-                            <TableHead className="text-right text-gray-300 font-semibold">Actions</TableHead>
+                        <TableRow className="border-b border-border hover:bg-transparent dark:border-white/10">
+                            <TableHead className={cn(adminThPlain, 'font-semibold')}>Agency Name</TableHead>
+                            <TableHead className={cn(adminThPlain, 'font-semibold')}>Created Date</TableHead>
+                            <TableHead className={cn(adminThPlain, 'text-right font-semibold')}>Actions</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
                         {loading ? (
-                            <TableRow className="border-b border-slate-800">
-                                <TableCell colSpan={3} className="text-center py-8">
+                            <TableRow className="border-b border-border dark:border-slate-800">
+                                <TableCell colSpan={3} className="py-8 text-center">
                                     <div className="flex items-center justify-center space-x-2">
-                                        <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce"></div>
-                                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                                        <div className="w-2 h-2 bg-pink-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                                        <div className="h-2 w-2 animate-bounce rounded-full bg-purple-500"></div>
+                                        <div className="h-2 w-2 animate-bounce rounded-full bg-blue-500" style={{ animationDelay: '0.1s' }}></div>
+                                        <div className="h-2 w-2 animate-bounce rounded-full bg-pink-500" style={{ animationDelay: '0.2s' }}></div>
                                     </div>
                                 </TableCell>
                             </TableRow>
                         ) : filteredAgencies.length === 0 ? (
-                            <TableRow className="border-b border-slate-800">
-                                <TableCell colSpan={3} className="text-center py-8 text-gray-400">
+                            <TableRow className="border-b border-border dark:border-slate-800">
+                                <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
                                     {searchTerm ? 'No agencies found matching your search' : 'No agencies found'}
                                 </TableCell>
                             </TableRow>
                         ) : (
                             paginatedAgencies.map((agency) => (
-                                <TableRow key={agency.id} className="border-b border-slate-800 hover:bg-slate-900/80 transition-colors">
-                                    <TableCell className="font-medium text-slate-100">{agency.name}</TableCell>
-                                    <TableCell className="text-slate-400">{new Date(agency.created_at).toLocaleDateString()}</TableCell>
+                                <TableRow key={agency.id} className={adminTableRowInteractive}>
+                                    <TableCell className={cn(adminTdStrong, 'font-medium')}>{agency.name}</TableCell>
+                                    <TableCell className={adminTdMuted}>{new Date(agency.created_at).toLocaleDateString()}</TableCell>
                                     <TableCell className="text-right">
                                         <div className="flex justify-end space-x-2">
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
                                                 onClick={() => openDialog(agency)}
-                                                className="hover:bg-slate-800 text-slate-200"
+                                                className="text-foreground hover:bg-muted dark:text-slate-200 dark:hover:bg-slate-800"
                                             >
                                                 <Pencil className="h-4 w-4" />
                                             </Button>
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
-                                                className="hover:bg-red-900/40 text-red-300"
+                                                className="text-destructive hover:bg-destructive/10 dark:hover:bg-red-900/40 dark:text-red-300"
                                                 onClick={() => handleDeleteAgency(agency.id)}
                                             >
                                                 <Trash2 className="h-4 w-4" />
@@ -242,53 +257,29 @@ export default function AgenciesPage() {
                         )}
                     </TableBody>
                 </Table>
-                {/* Pagination Controls */}
                 {filteredAgencies.length > 0 && (
-                    <div className="flex items-center justify-between px-4 py-3 border-t border-slate-800 bg-slate-900/50">
-                        <div className="text-sm text-slate-400">
+                    <div className={cn('flex items-center justify-between border-t border-border px-4 py-3 dark:border-slate-800', adminPaginationBar)}>
+                        <div className="text-sm text-muted-foreground">
                             Page {currentPage} of {totalPages}
                         </div>
                         <div className="flex items-center gap-2">
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(1)}
-                                disabled={currentPage === 1}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(1)} disabled={currentPage === 1} className={adminOutlineBtn}>
                                 First
                             </Button>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                                disabled={currentPage === 1}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className={adminOutlineBtn}>
                                 Previous
                             </Button>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                                disabled={currentPage === totalPages}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className={adminOutlineBtn}>
                                 Next
                             </Button>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(totalPages)}
-                                disabled={currentPage === totalPages}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} className={adminOutlineBtn}>
                                 Last
                             </Button>
                         </div>
                     </div>
                 )}
-            </div>
+                </CardContent>
+            </Card>
         </div>
     )
 }

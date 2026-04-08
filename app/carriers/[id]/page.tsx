@@ -17,6 +17,23 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ArrowLeft, Upload, CheckCircle, AlertCircle, Loader2, FileText, CloudUpload } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { cn } from '@/lib/utils'
+import {
+  adminCardHeaderBar,
+  adminCardTitle,
+  adminOutlineBtn,
+  adminPaginationBar,
+  adminSelectContent,
+  adminSelectItem,
+  adminSelectTrigger,
+  adminTableRowInteractive,
+  adminTdMuted,
+  adminTdStrong,
+  adminThPlain,
+  adminTypeTabActive,
+  adminTypeTabIdle,
+  adminTypeTabsWrap,
+} from '@/lib/adminFieldClasses'
 
 export default function CarrierDetailPage() {
     const params = useParams()
@@ -166,7 +183,10 @@ export default function CarrierDetailPage() {
                     carrierCode === 'RNA' ||
                     carrierCode === 'TRANSAMERICA' ||
                     carrierCode === 'LIBERTY' ||
-                    carrierCode === 'COREBRIDGE') &&
+                    carrierCode === 'COREBRIDGE' ||
+                    carrierCode === 'AFLAC' ||
+                    carrierCode === 'SENTINEL' ||
+                    carrierCode === 'AHL') &&
                 (fileType === 'Policy' || fileType === 'Commission') &&
                 'fileId' in result
             ) {
@@ -214,7 +234,7 @@ export default function CarrierDetailPage() {
     }
 
     if (!carrier) {
-        return <div className="text-white">Carrier not found</div>
+        return <div className="p-6 text-muted-foreground">Carrier not found</div>
     }
 
     const columns = getColumnNames()
@@ -226,88 +246,75 @@ export default function CarrierDetailPage() {
     const paginatedRecords = policyRecords.slice(startIndex, endIndex)
 
     return (
-        <div className="space-y-6 animate-in fade-in duration-500">
-            {/* Header with back button */}
+        <div className="admin-page animate-in space-y-6 fade-in duration-500">
             <div className="flex items-center space-x-4">
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => router.push('/carriers')}
-                    className="hover:bg-slate-900"
-                >
-                    <ArrowLeft className="w-5 h-5 text-white" />
+                <Button variant="ghost" size="icon" onClick={() => router.push('/carriers')} className="text-foreground hover:bg-muted">
+                    <ArrowLeft className="h-5 w-5" />
                 </Button>
                 <div className="flex items-center space-x-4">
-                    <div className="w-12 h-12 rounded-xl bg-slate-900 flex items-center justify-center border border-slate-800">
-                        <FileText className="w-6 h-6 text-orange-400" />
+                    <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-gradient-to-br from-slate-100 to-slate-200/90 dark:from-slate-800/90 dark:to-slate-900">
+                        <FileText className="h-6 w-6 text-orange-500 dark:text-orange-400" />
                     </div>
                     <div>
-                        <h1 className="text-3xl font-bold text-white">{carrier.name}</h1>
-                        <p className="text-gray-400">
+                        <h1 className="text-3xl font-bold text-foreground">{carrier.name}</h1>
+                        <p className="text-muted-foreground">
                             {carrier.agency_carriers.map((ac: any) => ac.agencies.name).join(', ')}
                         </p>
                     </div>
                 </div>
             </div>
 
-            {/* Upload Card */}
-            <Card className="bg-slate-900 border border-slate-800">
-                <CardHeader className="border-b border-slate-800">
-                    <CardTitle className="text-white flex items-center space-x-2">
-                        <CloudUpload className="w-5 h-5 text-orange-400" />
+            <Card>
+                <CardHeader className={adminCardHeaderBar}>
+                    <CardTitle className={cn(adminCardTitle, 'flex items-center gap-2')}>
+                        <CloudUpload className="h-5 w-5 text-orange-500 dark:text-orange-400" />
                         <span>Upload File</span>
                     </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-6 pt-6">
                     <div className="space-y-3">
-                        <Label className="text-gray-300">File Type</Label>
+                        <Label className="text-foreground">File Type</Label>
                         <RadioGroup value={fileType} onValueChange={(v) => setFileType(v as any)} className="grid grid-cols-2 gap-4">
                             <div className="relative">
                                 <RadioGroupItem value="Policy" id="policy" className="peer sr-only" />
                                 <Label
                                     htmlFor="policy"
-                                    className="flex flex-col items-center justify-center p-4 rounded-xl border-2 border-slate-700 bg-slate-900 hover:bg-slate-800 cursor-pointer peer-data-[state=checked]:border-orange-500 peer-data-[state=checked]:bg-orange-500/10 transition-all"
+                                    className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-border bg-muted/30 p-4 transition-all hover:bg-muted/50 peer-data-[state=checked]:border-orange-500 peer-data-[state=checked]:bg-orange-500/10 dark:border-slate-700 dark:bg-muted/20 dark:hover:bg-slate-800/80"
                                 >
-                                    <span className="text-white font-medium">Policy File</span>
-                                    <span className="text-xs text-gray-400 mt-1">Insurance policies</span>
+                                    <span className="font-medium text-foreground">Policy File</span>
+                                    <span className="mt-1 text-xs text-muted-foreground">Insurance policies</span>
                                 </Label>
                             </div>
                             <div className="relative">
                                 <RadioGroupItem value="Commission" id="commission" className="peer sr-only" />
                                 <Label
                                     htmlFor="commission"
-                                    className="flex flex-col items-center justify-center p-4 rounded-xl border-2 border-slate-700 bg-slate-900 hover:bg-slate-800 cursor-pointer peer-data-[state=checked]:border-orange-500 peer-data-[state=checked]:bg-orange-500/10 transition-all"
+                                    className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-border bg-muted/30 p-4 transition-all hover:bg-muted/50 peer-data-[state=checked]:border-orange-500 peer-data-[state=checked]:bg-orange-500/10 dark:border-slate-700 dark:bg-muted/20 dark:hover:bg-slate-800/80"
                                 >
-                                    <span className="text-white font-medium">Commission File</span>
-                                    <span className="text-xs text-gray-400 mt-1">Commission reports</span>
+                                    <span className="font-medium text-foreground">Commission File</span>
+                                    <span className="mt-1 text-xs text-muted-foreground">Commission reports</span>
                                 </Label>
                             </div>
                         </RadioGroup>
                     </div>
 
                     <div className="space-y-2">
-                        <Label className="text-gray-300">Select File (CSV or Excel)</Label>
-                        <div className="border-2 border-dashed border-slate-700 rounded-xl p-8 text-center hover:border-orange-500/70 transition-colors bg-slate-900">
-                            <Input
-                                type="file"
-                                accept=".csv,.xlsx,.xls,.pdf"
-                                onChange={handleFileChange}
-                                className="hidden"
-                                id="file-upload"
-                            />
+                        <Label className="text-foreground">Select File (CSV or Excel)</Label>
+                        <div className="rounded-xl border-2 border-dashed border-border bg-muted/20 p-8 text-center transition-colors hover:border-orange-500/50 dark:bg-slate-950/30">
+                            <Input type="file" accept=".csv,.xlsx,.xls,.pdf" onChange={handleFileChange} className="hidden" id="file-upload" />
                             <label htmlFor="file-upload" className="cursor-pointer">
                                 {file ? (
                                     <div className="space-y-2">
-                                        <CloudUpload className="w-12 h-12 mx-auto text-green-400" />
-                                        <p className="text-white font-medium">{file.name}</p>
-                                        <p className="text-sm text-gray-400">{(file.size / 1024).toFixed(2)} KB</p>
-                                        <p className="text-xs text-orange-400 mt-2">Click to change file</p>
+                                        <CloudUpload className="mx-auto h-12 w-12 text-emerald-600 dark:text-green-400" />
+                                        <p className="font-medium text-foreground">{file.name}</p>
+                                        <p className="text-sm text-muted-foreground">{(file.size / 1024).toFixed(2)} KB</p>
+                                        <p className="mt-2 text-xs text-orange-600 dark:text-orange-400">Click to change file</p>
                                     </div>
                                 ) : (
                                     <div className="space-y-2">
-                                        <CloudUpload className="w-12 h-12 mx-auto text-slate-500" />
-                                        <p className="text-slate-100">Click to upload or drag and drop</p>
-                                        <p className="text-sm text-slate-400">CSV or Excel files</p>
+                                        <CloudUpload className="mx-auto h-12 w-12 text-muted-foreground" />
+                                        <p className="text-foreground">Click to upload or drag and drop</p>
+                                        <p className="text-sm text-muted-foreground">CSV or Excel files</p>
                                     </div>
                                 )}
                             </label>
@@ -315,23 +322,25 @@ export default function CarrierDetailPage() {
                     </div>
 
                     {message && (
-                        <div className={`p-4 rounded-xl flex items-center space-x-3 ${message.type === 'success'
-                            ? 'bg-emerald-900/40 border border-emerald-700/70'
-                            : 'bg-red-900/40 border border-red-700/70'
-                            }`}>
+                        <div className={cn(
+                            'flex items-center space-x-3 rounded-xl border p-4',
+                            message.type === 'success'
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-700/70 dark:bg-emerald-900/40 dark:text-emerald-100'
+                                : 'border-red-200 bg-red-50 text-red-900 dark:border-red-700/70 dark:bg-red-900/40 dark:text-red-100'
+                        )}>
                             {message.type === 'success' ? (
-                                <CheckCircle className="w-5 h-5 text-emerald-300" />
+                                <CheckCircle className="h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-300" />
                             ) : (
-                                <AlertCircle className="w-5 h-5 text-red-300" />
+                                <AlertCircle className="h-5 w-5 shrink-0 text-red-600 dark:text-red-300" />
                             )}
-                            <span className={message.type === 'success' ? 'text-emerald-200' : 'text-red-200'}>{message.text}</span>
+                            <span>{message.text}</span>
                         </div>
                     )}
 
                     <Button
                         onClick={handleUpload}
                         disabled={uploading || !file}
-                        className="w-full h-12 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium text-white shadow-sm"
+                        className="h-12 w-full bg-orange-600 text-sm font-medium text-white shadow-sm hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                         {uploading ? (
                             <>
@@ -346,64 +355,42 @@ export default function CarrierDetailPage() {
                 </CardContent>
             </Card>
 
-            {/* Records Display */}
-            <Card className="bg-slate-900 border border-slate-800">
-                <CardHeader className="border-b border-slate-800">
-                    <div className="flex items-center justify-between">
-                        <CardTitle className="text-white">Policy Records ({policyRecords.length})</CardTitle>
-                        <div className="flex gap-2">
-                            <Button
-                                variant={selectedFileType === 'All' ? 'default' : 'outline'}
-                                size="sm"
-                                onClick={() => setSelectedFileType('All')}
-                                className={selectedFileType === 'All' ? 'bg-slate-800 text-slate-100' : 'text-slate-200'}
-                            >
-                                All
-                            </Button>
-                            <Button
-                                variant={selectedFileType === 'Policy' ? 'default' : 'outline'}
-                                size="sm"
-                                onClick={() => setSelectedFileType('Policy')}
-                                className={selectedFileType === 'Policy' ? 'bg-slate-800 text-slate-100' : 'text-slate-200'}
-                            >
-                                Policy
-                            </Button>
-                            <Button
-                                variant={selectedFileType === 'Commission' ? 'default' : 'outline'}
-                                size="sm"
-                                onClick={() => setSelectedFileType('Commission')}
-                                className={selectedFileType === 'Commission' ? 'bg-slate-800 text-slate-100' : 'text-slate-200'}
-                            >
-                                Commission
-                            </Button>
+            <Card>
+                <CardHeader className={cn(adminCardHeaderBar)}>
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <CardTitle className={adminCardTitle}>Policy Records ({policyRecords.length})</CardTitle>
+                        <div className={cn(adminTypeTabsWrap, 'items-center gap-1')}>
+                            <button type="button" onClick={() => setSelectedFileType('All')} className={cn('rounded-md px-3 py-1.5 text-sm font-medium', selectedFileType === 'All' ? adminTypeTabActive : adminTypeTabIdle)}>All</button>
+                            <button type="button" onClick={() => setSelectedFileType('Policy')} className={cn('rounded-md px-3 py-1.5 text-sm font-medium', selectedFileType === 'Policy' ? adminTypeTabActive : adminTypeTabIdle)}>Policy</button>
+                            <button type="button" onClick={() => setSelectedFileType('Commission')} className={cn('rounded-md px-3 py-1.5 text-sm font-medium', selectedFileType === 'Commission' ? adminTypeTabActive : adminTypeTabIdle)}>Commission</button>
                         </div>
                     </div>
                 </CardHeader>
                 <CardContent className="p-0">
                     {recordsLoading ? (
                         <div className="flex items-center justify-center py-8">
-                            <Loader2 className="w-6 h-6 animate-spin text-slate-300" />
+                            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                         </div>
                         ) : policyRecords.length === 0 ? (
-                            <div className="text-center py-12 text-slate-400">
+                            <div className="py-12 text-center text-muted-foreground">
                             No records found. Upload a file to get started.
                         </div>
                     ) : (
                         <>
-                            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between text-sm text-slate-400">
+                            <div className="flex flex-col gap-2 border-b border-border px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
                                 <span>
                                     Showing {policyRecords.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, policyRecords.length)} of {policyRecords.length} records
                                 </span>
                                 <div className="flex items-center gap-2">
                                     <span>Rows per page:</span>
                                     <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
-                                        <SelectTrigger className="h-8 w-20 bg-slate-950 border-slate-800 text-white text-xs">
+                                        <SelectTrigger className={cn('h-8 w-20 text-xs', adminSelectTrigger)}>
                                             <SelectValue />
                                         </SelectTrigger>
-                                        <SelectContent className="bg-slate-800 border-slate-700">
-                                            <SelectItem value="25" className="text-white">25</SelectItem>
-                                            <SelectItem value="50" className="text-white">50</SelectItem>
-                                            <SelectItem value="100" className="text-white">100</SelectItem>
+                                        <SelectContent className={adminSelectContent}>
+                                            <SelectItem value="25" className={adminSelectItem}>25</SelectItem>
+                                            <SelectItem value="50" className={adminSelectItem}>50</SelectItem>
+                                            <SelectItem value="100" className={adminSelectItem}>100</SelectItem>
                                         </SelectContent>
                                     </Select>
                                 </div>
@@ -411,30 +398,30 @@ export default function CarrierDetailPage() {
                             <div className="overflow-x-auto">
                                 <Table>
                                     <TableHeader>
-                                        <TableRow className="border-b border-white/10 hover:bg-transparent">
-                                            <TableHead className="text-slate-300 font-semibold">Policy #</TableHead>
-                                            <TableHead className="text-slate-300 font-semibold">Type</TableHead>
+                                        <TableRow className="border-b border-border hover:bg-transparent dark:border-white/10">
+                                            <TableHead className={cn(adminThPlain, 'font-semibold')}>Policy #</TableHead>
+                                            <TableHead className={cn(adminThPlain, 'font-semibold')}>Type</TableHead>
                                             {columns.slice(0, 8).map(col => (
-                                                <TableHead key={col} className="text-slate-300 font-semibold">{col}</TableHead>
+                                                <TableHead key={col} className={cn(adminThPlain, 'font-semibold')}>{col}</TableHead>
                                             ))}
-                                            <TableHead className="text-gray-300 font-semibold">Updated</TableHead>
+                                            <TableHead className={cn(adminThPlain, 'font-semibold')}>Updated</TableHead>
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody>
                                         {paginatedRecords.map((record) => (
-                                            <TableRow key={record.id} className="border-b border-slate-800 hover:bg-slate-900/80 transition-colors">
-                                                <TableCell className="font-medium text-slate-100">{record.policy_number}</TableCell>
+                                            <TableRow key={record.id} className={adminTableRowInteractive}>
+                                                <TableCell className={cn(adminTdStrong, 'font-medium')}>{record.policy_number}</TableCell>
                                                 <TableCell>
-                                                    <span className={`px-2 py-1 rounded-full text-xs ${record.file_type === 'Policy' ? 'bg-slate-800 text-slate-100' : 'bg-slate-800 text-slate-100'}`}>
+                                                    <span className="rounded-full bg-muted px-2 py-1 text-xs text-foreground dark:bg-slate-800 dark:text-slate-100">
                                                         {record.file_type}
                                                     </span>
                                                 </TableCell>
                                                 {columns.slice(0, 8).map(col => (
-                                                    <TableCell key={col} className="text-slate-400">
+                                                    <TableCell key={col} className={cn(adminTdMuted, 'text-sm')}>
                                                         {String(record.raw_data[col] || '-').substring(0, 50)}
                                                     </TableCell>
                                                 ))}
-                                                <TableCell className="text-slate-400">
+                                                <TableCell className={cn(adminTdMuted, 'text-sm')}>
                                                     {new Date(record.updated_at).toLocaleDateString()}
                                                 </TableCell>
                                             </TableRow>
@@ -442,49 +429,14 @@ export default function CarrierDetailPage() {
                                     </TableBody>
                                 </Table>
                             </div>
-                            {/* Pagination Controls */}
                             {policyRecords.length > 0 && (
-                                <div className="flex items-center justify-between px-4 py-3 border-t border-slate-800 bg-slate-900/50">
-                                    <div className="text-sm text-slate-400">
-                                        Page {currentPage} of {totalPages}
-                                    </div>
+                                <div className={cn('flex items-center justify-between border-t border-border px-4 py-3 dark:border-slate-800', adminPaginationBar)}>
+                                    <div className="text-sm text-muted-foreground">Page {currentPage} of {totalPages}</div>
                                     <div className="flex items-center gap-2">
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => setCurrentPage(1)}
-                                            disabled={currentPage === 1}
-                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                                        >
-                                            First
-                                        </Button>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                                            disabled={currentPage === 1}
-                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                                        >
-                                            Previous
-                                        </Button>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                                            disabled={currentPage === totalPages}
-                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                                        >
-                                            Next
-                                        </Button>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => setCurrentPage(totalPages)}
-                                            disabled={currentPage === totalPages}
-                                            className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                                        >
-                                            Last
-                                        </Button>
+                                        <Button variant="outline" size="sm" onClick={() => setCurrentPage(1)} disabled={currentPage === 1} className={adminOutlineBtn}>First</Button>
+                                        <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className={adminOutlineBtn}>Previous</Button>
+                                        <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className={adminOutlineBtn}>Next</Button>
+                                        <Button variant="outline" size="sm" onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} className={adminOutlineBtn}>Last</Button>
                                     </div>
                                 </div>
                             )}
@@ -505,10 +457,9 @@ export default function CarrierDetailPage() {
                 fileType={lastUploadContext?.fileType}
                 onNext={
                     lastUploadContext?.fileType === 'Commission' &&
-                    (lastUploadContext?.carrierCode === 'AETNA' ||
-                        lastUploadContext?.carrierCode === 'AMAM' ||
-                        lastUploadContext?.carrierCode === 'MOH' ||
-                        lastUploadContext?.carrierCode === 'COREBRIDGE')
+                    ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL'].includes(
+                        (lastUploadContext?.carrierCode || '').toUpperCase()
+                    )
                         ? () => {
                               dealTracker.setShowVerification(false)
                               if (lastUploadContext) {

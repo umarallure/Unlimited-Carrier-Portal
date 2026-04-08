@@ -11,6 +11,7 @@ import {
   processAmamFilesForDealTrackerFromRows,
   processAmamCommissionsForDealTrackerFromRows,
   saveDealTrackerEntries,
+  isInvalidGhlStageForSave,
   type DealTrackerPreviewEntry,
 } from './dealTracker'
 import {
@@ -214,6 +215,18 @@ export async function saveDealTrackerAfterConfirmation(
 ): Promise<{ success: boolean; inserted: number; updated: number; failed: number; error?: string }> {
   const onProgress = options?.onProgress
   try {
+    const badGhl = entries.find((e) => isInvalidGhlStageForSave(e.ghl_stage))
+    if (badGhl) {
+      return {
+        success: false,
+        inserted: 0,
+        updated: 0,
+        failed: entries.length,
+        error:
+          'GHL Stage cannot be empty or "-" for any row. Use the Incomplete tab in the verification dialog to fix rows before saving.',
+      }
+    }
+
     let entriesToSave = entries
     if (options?.pendingRows?.rows?.length) {
       onProgress?.('Writing policy/commission rows to database...')

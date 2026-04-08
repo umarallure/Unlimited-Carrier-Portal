@@ -18,6 +18,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+import { useTheme } from '@/components/ThemeProvider'
+import { adminOutlineBtn, adminSelectContent, adminSelectItem, adminSelectTrigger } from '@/lib/adminFieldClasses'
 
 const MAX_FILE_SIZE_MB = 10
 const ACCEPT_TYPES = '.xlsx,.xls,.csv'
@@ -48,15 +50,27 @@ function escapeHtml(s: string): string {
   return div.innerHTML
 }
 
-function getNodeHtml(d: ChartNode): string {
-  const base = 'border-radius:10px;padding:12px 16px;min-width:140px;min-height:70px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 2px 4px rgb(0 0 0/0.2);cursor:pointer;'
+function getNodeHtml(d: ChartNode, light: boolean): string {
+  const base = 'border-radius:10px;padding:12px 16px;min-width:140px;min-height:70px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 2px 4px rgb(0 0 0/0.12);cursor:pointer;'
   if (d.type === 'Agency') {
+    if (light) {
+      return `<div style="${base}background:linear-gradient(135deg,#fff 0%,#f8fafc 100%);color:#0f172a;border:2px solid #f97316;">
+      <div style="font-weight:600;font-size:14px;">${escapeHtml(d.name)}</div>
+      <div style="font-size:11px;color:#64748b;">Agency</div>
+    </div>`
+    }
     return `<div style="${base}background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);color:#f8fafc;border:2px solid #f97316;">
       <div style="font-weight:600;font-size:14px;">${escapeHtml(d.name)}</div>
       <div style="font-size:11px;color:#94a3b8;">Agency</div>
     </div>`
   }
   if (d.type === 'Agent') {
+    if (light) {
+      return `<div style="${base}background:#f1f5f9;color:#0f172a;border:2px solid #94a3b8;flex-direction:column;">
+      <div style="font-weight:600;font-size:13px;">${escapeHtml(d.name)}</div>
+      <div style="font-size:10px;color:#475569;">Agent${d.email ? ' · ' + escapeHtml(d.email) : ''}</div>
+    </div>`
+    }
     return `<div style="${base}background:#475569;color:#f1f5f9;border:2px solid #64748b;flex-direction:column;">
       <div style="font-weight:600;font-size:13px;">${escapeHtml(d.name)}</div>
       <div style="font-size:10px;color:#94a3b8;">Agent${d.email ? ' · ' + escapeHtml(d.email) : ''}</div>
@@ -65,6 +79,16 @@ function getNodeHtml(d: ChartNode): string {
   if (d.type === 'Carrier') {
     const isUploaded = d.status === 'uploaded'
     const isNoUpdate = d.status === 'no_update'
+    if (light) {
+      const border = isUploaded ? '2px solid #16a34a' : isNoUpdate ? '2px solid #94a3b8' : '2px solid #cbd5e1'
+      const bg = isUploaded ? 'linear-gradient(135deg,#dcfce7 0%,#bbf7d0 100%)' : isNoUpdate ? '#e2e8f0' : 'linear-gradient(135deg,#f8fafc 0%,#e2e8f0 100%)'
+      const fg = '#0f172a'
+      const sub = '#475569'
+      return `<div style="${base}background:${bg};color:${fg};border:${border};">
+      <div style="font-weight:600;font-size:13px;">${escapeHtml(d.name)}</div>
+      <div style="font-size:10px;color:${sub};">Carrier · ${isUploaded ? 'Uploaded' : isNoUpdate ? 'No update' : 'Pending'}</div>
+    </div>`
+    }
     const border = isUploaded ? '2px solid #22c55e' : isNoUpdate ? '2px solid #64748b' : '2px solid #64748b'
     const bg = isUploaded ? 'linear-gradient(135deg,#14532d 0%,#166534 100%)' : isNoUpdate ? '#334155' : 'linear-gradient(135deg,#1e293b 0%,#334155 100%)'
     return `<div style="${base}background:${bg};color:#e2e8f0;border:${border};">
@@ -72,10 +96,19 @@ function getNodeHtml(d: ChartNode): string {
       <div style="font-size:10px;color:#94a3b8;">Carrier · ${isUploaded ? 'Uploaded' : isNoUpdate ? 'No update' : 'Pending'}</div>
     </div>`
   }
-  // Upload (Policy / Commission)
   const isGreen = d.thisFileTypeUploaded && !d.carrierNoUpdate
   const isGray = d.carrierNoUpdate
   const label = d.fileType === 'Policy' ? 'P' : 'C'
+  if (light) {
+    const border = isGray ? '2px solid #94a3b8' : isGreen ? '2px solid #16a34a' : '2px solid #ea580c'
+    const bg = isGray ? '#e2e8f0' : isGreen ? '#bbf7d0' : '#e0e7ff'
+    const fg = '#0f172a'
+    const sub = '#334155'
+    return `<div style="${base}background:${bg};color:${fg};border:${border};flex-direction:column;">
+    <div style="font-weight:700;font-size:18px;">${label}</div>
+    <div style="font-size:11px;color:${sub};">${escapeHtml(d.fileType || '')} ${isGreen ? '· Done' : isGray ? '· No update' : '· Click to upload'}</div>
+  </div>`
+  }
   const border = isGray ? '2px solid #475569' : isGreen ? '2px solid #22c55e' : '2px solid #f97316'
   const bg = isGray ? '#334155' : isGreen ? '#166534' : '#4338ca'
   return `<div style="${base}background:${bg};color:#f1f5f9;border:${border};flex-direction:column;">
@@ -94,6 +127,8 @@ type LastUploadContext = {
 }
 
 export function UploadTreeOrgChart() {
+  const { theme } = useTheme()
+  const isLight = theme === 'light'
   const dealTracker = useDealTrackerUpload()
   const commissionReport = useCommissionReportUpload({
     onAfterSave: () => dealTracker.confirmAndSave(),
@@ -269,7 +304,7 @@ export function UploadTreeOrgChart() {
           })
         }
       })
-      .nodeContent((node: any) => getNodeHtml((node?.data || {}) as ChartNode))
+      .nodeContent((node: any) => getNodeHtml((node?.data || {}) as ChartNode, isLight))
       .render()
 
     // Always center the chart after render to keep it visible
@@ -319,11 +354,10 @@ export function UploadTreeOrgChart() {
     }, 150)
 
     return () => {
-      // Don't save transform - we'll always center on re-render
       chartInstanceRef.current = null
       if (containerRef.current?.firstChild) containerRef.current.innerHTML = ''
     }
-  }, [chartData])
+  }, [chartData, isLight])
 
   const handleUploadSubmit = useCallback(async () => {
     if (!uploadDialog || !uploadingFile) return
@@ -390,31 +424,31 @@ export function UploadTreeOrgChart() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+      <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-2 border border-slate-700">
-            <Building2 className="w-4 h-4 text-orange-400" />
-            <Label className="text-sm text-slate-300 font-medium">Agency:</Label>
+          <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2 dark:bg-slate-800 dark:border-slate-700">
+            <Building2 className="h-4 w-4 text-orange-500 dark:text-orange-400" />
+            <Label className="text-sm font-medium text-foreground">Agency:</Label>
             <Select value={selectedAgencyId} onValueChange={setSelectedAgencyId}>
-              <SelectTrigger className="w-[220px] bg-slate-900 border-slate-700 text-white">
+              <SelectTrigger className={cn('h-10 w-[220px]', adminSelectTrigger)}>
                 <SelectValue placeholder="Select an agency" />
               </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
+              <SelectContent className={adminSelectContent}>
                 {agencies.map(a => (
-                  <SelectItem key={a.id} value={a.id} className="text-white focus:bg-slate-700">{a.name}</SelectItem>
+                  <SelectItem key={a.id} value={a.id} className={adminSelectItem}>{a.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
           {selectedAgencyId && (
             <>
-              <div className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-2 border border-slate-700">
-                <Calendar className="w-4 h-4 text-orange-400" />
-                <Label className="text-sm text-slate-300 font-medium">Date:</Label>
-                <Input type="date" value={uploadDate} onChange={e => setUploadDate(e.target.value)} className="w-40 bg-slate-900 border-slate-700 text-white text-sm" />
+              <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2 dark:bg-slate-800 dark:border-slate-700">
+                <Calendar className="h-4 w-4 text-orange-500 dark:text-orange-400" />
+                <Label className="text-sm font-medium text-foreground">Date:</Label>
+                <Input type="date" value={uploadDate} onChange={e => setUploadDate(e.target.value)} className={cn('h-9 w-40 text-sm', adminSelectTrigger)} />
               </div>
-              <Button variant="outline" size="sm" className="border-slate-700 text-slate-300 hover:bg-slate-800" onClick={() => { loadDailyStatuses(); loadTreeData(); }}>
-                <RefreshCw className="w-4 h-4 mr-2" />
+              <Button variant="outline" size="sm" className={adminOutlineBtn} onClick={() => { loadDailyStatuses(); loadTreeData(); }}>
+                <RefreshCw className="mr-2 h-4 w-4" />
                 Refresh
               </Button>
             </>
@@ -423,35 +457,35 @@ export function UploadTreeOrgChart() {
       </div>
 
       {uploadMessage && (
-        <div className={cn('rounded-xl border px-4 py-3 flex items-center justify-between gap-4', uploadMessage.type === 'success' ? 'bg-emerald-950/60 border-emerald-600 text-emerald-100' : 'bg-red-950/60 border-red-600 text-red-100')}>
+        <div className={cn('flex items-center justify-between gap-4 rounded-xl border px-4 py-3', uploadMessage.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-100' : 'border-red-200 bg-red-50 text-red-900 dark:border-red-600 dark:bg-red-950/60 dark:text-red-100')}>
           <div className="flex items-center gap-3">
-            {uploadMessage.type === 'success' ? <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" /> : <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />}
+            {uploadMessage.type === 'success' ? <CheckCircle className="h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" /> : <AlertCircle className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />}
             <span className="text-sm font-medium">{uploadMessage.text}</span>
           </div>
-          <button type="button" onClick={() => setUploadMessage(null)} className="text-slate-300 hover:text-white text-sm underline">Dismiss</button>
+          <button type="button" onClick={() => setUploadMessage(null)} className="text-sm underline text-muted-foreground hover:text-foreground">Dismiss</button>
         </div>
       )}
 
       {!selectedAgencyId && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl p-16 flex flex-col items-center justify-center min-h-[500px] text-center">
-          <div className="w-16 h-16 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center mb-4">
-            <Building2 className="w-8 h-8 text-slate-400" />
+        <div className="flex min-h-[500px] flex-col items-center justify-center rounded-xl border-2 border-border bg-muted/20 p-16 text-center dark:border-slate-800 dark:bg-slate-900/40">
+          <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-xl border border-border bg-muted dark:border-slate-700 dark:bg-slate-800">
+            <Building2 className="h-8 w-8 text-muted-foreground" />
           </div>
-          <p className="text-slate-300 text-lg font-medium">Select an agency</p>
-          <p className="text-slate-500 text-sm mt-2 max-w-sm">Choose an agency to see the org chart and upload Policy or Commission files per carrier.</p>
+          <p className="text-lg font-medium text-foreground">Select an agency</p>
+          <p className="mt-2 max-w-sm text-sm text-muted-foreground">Choose an agency to see the org chart and upload Policy or Commission files per carrier.</p>
         </div>
       )}
 
       {selectedAgencyId && loading && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl p-12 flex flex-col items-center justify-center min-h-[500px]">
-          <Loader2 className="w-12 h-12 animate-spin text-orange-400 mb-4" />
-          <p className="text-slate-300">Loading tree...</p>
+        <div className="flex min-h-[500px] flex-col items-center justify-center rounded-xl border-2 border-border bg-muted/20 p-12 dark:border-slate-800 dark:bg-slate-900/40">
+          <Loader2 className="mb-4 h-12 w-12 animate-spin text-orange-500 dark:text-orange-400" />
+          <p className="text-muted-foreground">Loading tree...</p>
         </div>
       )}
 
       {selectedAgencyId && !loading && chartData.length > 0 && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl overflow-hidden min-h-[600px]" style={{ minHeight: '700px', width: '100%' }}>
-          <div ref={containerRef} className="w-full h-full min-h-[600px] [&>svg]:max-w-full [&>svg]:h-auto [&>svg]:mx-auto [&>svg]:block" style={{ overflow: 'auto' }} />
+        <div className="min-h-[600px] overflow-hidden rounded-xl border-2 border-border bg-muted/10 dark:border-slate-800 dark:bg-slate-900/40" style={{ minHeight: '700px', width: '100%' }}>
+          <div ref={containerRef} className="h-full min-h-[600px] w-full [&>svg]:mx-auto [&>svg]:block [&>svg]:h-auto [&>svg]:max-w-full" style={{ overflow: 'auto' }} />
         </div>
       )}
 
@@ -462,13 +496,13 @@ export function UploadTreeOrgChart() {
           setDragActive(false)
         }
       }}>
-        <DialogContent className="bg-slate-900 border-slate-700" aria-describedby="upload-dialog-desc">
+        <DialogContent className="sm:max-w-lg" aria-describedby="upload-dialog-desc">
           <DialogHeader>
-            <DialogTitle className="text-white flex items-center gap-2">
-              <Upload className="w-5 h-5 text-orange-400" />
+            <DialogTitle className="flex items-center gap-2 text-foreground">
+              <Upload className="h-5 w-5 text-orange-500 dark:text-orange-400" />
               Upload {uploadDialog?.fileType} — {uploadDialog?.carrierName}
             </DialogTitle>
-            <DialogDescription id="upload-dialog-desc" className="text-slate-400 sr-only">
+            <DialogDescription id="upload-dialog-desc" className="sr-only">
               Select a file to upload for this carrier and file type.
             </DialogDescription>
           </DialogHeader>
@@ -500,17 +534,17 @@ export function UploadTreeOrgChart() {
                 if (file) setUploadingFile(file);
               }}
               className={cn(
-                'flex items-center gap-4 rounded-xl border-2 border-dashed p-6 cursor-pointer transition-colors',
-                'bg-slate-700/80 border-slate-600 hover:border-orange-500 hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900',
-                dragActive && 'border-orange-500 bg-slate-700'
+                'flex cursor-pointer items-center gap-4 rounded-xl border-2 border-dashed border-border bg-muted/40 p-6 transition-colors',
+                'hover:border-orange-500/50 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-background dark:border-slate-600 dark:bg-slate-700/50 dark:hover:bg-slate-700',
+                dragActive && 'border-orange-500 bg-muted/60 dark:bg-slate-700'
               )}
             >
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-600 text-slate-300">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground dark:bg-slate-600 dark:text-slate-300">
                 <Upload className="h-6 w-6" />
               </div>
               <div className="min-w-0 flex-1">
-                <p className="font-semibold text-slate-200">Drag and drop files</p>
-                <p className="mt-0.5 text-sm text-slate-400">
+                <p className="font-semibold text-foreground">Drag and drop files</p>
+                <p className="mt-0.5 text-sm text-muted-foreground">
                   Up to {MAX_FILE_SIZE_MB}MB per file in{' '}
                   {uploadDialog?.carrierCode === 'COREBRIDGE' && uploadDialog?.fileType === 'Commission'
                     ? ACCEPT_LABEL_WITH_PDF
@@ -520,21 +554,21 @@ export function UploadTreeOrgChart() {
                 <button
                   type="button"
                   onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}
-                  className="mt-1 text-sm font-medium text-orange-400 underline hover:text-orange-300"
+                  className="mt-1 text-sm font-medium text-orange-600 underline hover:text-orange-700 dark:text-orange-400 dark:hover:text-orange-300"
                 >
                   Browse files
                 </button>
               </div>
             </div>
             {uploadingFile && (
-              <p className="text-sm text-slate-400">
-                Selected: <span className="font-medium text-slate-200">{uploadingFile.name}</span>
+              <p className="text-sm text-muted-foreground">
+                Selected: <span className="font-medium text-foreground">{uploadingFile.name}</span>
               </p>
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setUploadDialog(null)} className="border-slate-600 text-slate-300">Cancel</Button>
-            <Button onClick={handleUploadSubmit} disabled={!uploadingFile || uploading} className="bg-orange-600 hover:bg-orange-700">
+            <Button variant="outline" onClick={() => setUploadDialog(null)} className={adminOutlineBtn}>Cancel</Button>
+            <Button onClick={handleUploadSubmit} disabled={!uploadingFile || uploading} className="bg-orange-600 text-white hover:bg-orange-700">
               {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Upload'}
             </Button>
           </DialogFooter>
@@ -553,7 +587,7 @@ export function UploadTreeOrgChart() {
         fileType={lastUploadContext?.fileType}
         onNext={
           lastUploadContext?.fileType === 'Commission' &&
-          ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC'].includes(
+          ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL'].includes(
             (lastUploadContext?.carrierCode || '').toUpperCase()
           )
             ? () => {

@@ -11,11 +11,21 @@ import {
   getChangedFieldsAndPrevious,
   financialsUnchanged,
   carrierStatusUnchanged,
+  policyNeedsDdfLookup,
+  resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
 import { resolveGhlStage } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
 
 function buildSentinelInsuredName(p: { client_name?: string | null }): string {
   return (p.client_name ?? '').toString().trim()
+}
+
+function normalizePolicyNumber(value: unknown): string {
+  const raw = (value == null ? '' : String(value)).trim()
+  if (!raw) return ''
+  if (/^\d+$/.test(raw) && raw.length === 6) return `0${raw}`
+  return raw
 }
 
 /** Policy-only Sentinel processing: create/update deal tracker rows from sentinel_policies. */
@@ -96,10 +106,7 @@ export async function processSentinelFilesForDealTracker(
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
   const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
 
-  const policiesNeedingDdf = policies.filter(p => {
-    const ex = existingMap.get(p.policy_number)
-    return !ex || (ex.call_center == null && ex.phone_number == null)
-  })
+  const policiesNeedingDdf = policies.filter(p => policyNeedsDdfLookup(existingMap.get(p.policy_number)))
   const uniqueNames = Array.from(
     new Set(
       policiesNeedingDdf
@@ -121,17 +128,15 @@ export async function processSentinelFilesForDealTracker(
     const existing = existingMap.get(policy.policy_number)
     const insuredName = buildSentinelInsuredName(policy)
     const originalStatus = policy.status || null
-    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const normalizedName = normalizeNameForSearch(insuredName)
+    const ddfInfo = insuredName ? dailyDealFlowMap.get(normalizedName) || null : null
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
-    let effectiveDateFromDdf: string | null = null
-    if ((callCenter == null && phoneNumber == null) && insuredName) {
-      const normalizedName = normalizeNameForSearch(insuredName)
-      const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
-      callCenter = ddfInfo?.call_center ?? null
-      phoneNumber = ddfInfo?.phone_number ?? null
-      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+    if (callCenter == null && phoneNumber == null && ddfInfo) {
+      callCenter = ddfInfo.call_center ?? null
+      phoneNumber = ddfInfo.phone_number ?? null
     }
+    const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
     let dealValue: number | null =
       existing?.deal_value != null
@@ -157,13 +162,19 @@ export async function processSentinelFilesForDealTracker(
       (existing?.deal_creation_date as string | null) ??
       null
 
-    const effectiveDate =
-      effectiveDateFromDdf ??
-      effectiveDateFromPolicy ??
-      (existing?.effective_date as string | null) ??
-      null
+    const effectiveDate = mergeEffectiveDate(
+      existing?.effective_date,
+      effectiveDateFromDdf,
+      effectiveDateFromPolicy,
+    )
 
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      originalStatus,
+      !!statusUnchanged,
+      existing?.policy_status
+    )
 
     // Re-resolve GHL stage even when raw carrier status is unchanged so that
     // time-based transitions still trigger.
@@ -172,6 +183,7 @@ export async function processSentinelFilesForDealTracker(
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealValue,
       commissionType: null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -184,9 +196,7 @@ export async function processSentinelFilesForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: statusUnchanged
-        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
-        : (mappedStatus ?? originalStatus),
+      policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
@@ -286,7 +296,7 @@ export async function processSentinelCommissionsForDealTracker(
   }
 
   const policyNumbers = Array.from(
-    new Set(commissions.map((c: any) => c.policy_number).filter(Boolean))
+    new Set(commissions.map((c: any) => normalizePolicyNumber(c.policy_number)).filter(Boolean))
   )
 
   let existingEntries: any[] = []
@@ -304,14 +314,17 @@ export async function processSentinelCommissionsForDealTracker(
   }
 
   const existingMap = new Map<string, any>()
-  existingEntries?.forEach((entry: any) => existingMap.set(entry.policy_number, entry))
+  existingEntries?.forEach((entry: any) => {
+    const pn = normalizePolicyNumber(entry.policy_number)
+    if (pn) existingMap.set(pn, entry)
+  })
 
   const latestRowByPolicy = new Map<string, any>()
   const posMap = new Map<string, number>()
   const negMap = new Map<string, number>()
 
   for (const comm of commissions) {
-    const policyNum = comm.policy_number
+    const policyNum = normalizePolicyNumber(comm.policy_number)
     if (!policyNum) continue
 
     const amt =
@@ -345,13 +358,13 @@ export async function processSentinelCommissionsForDealTracker(
     policies?.forEach((p: any) => policiesMap.set(p.policy_number, p))
   }
 
-  let statusMappingMap = new Map<string, string>()
+  const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   let dailyDealFlowMap = new Map<
     string,
     { call_center: string | null; phone_number: string | null; draft_date: string | null }
   >()
   if (missingPolicyNumbers.length > 0) {
-    statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
     const policyNamesForDDF = Array.from(policiesMap.values())
       .map((p: any) => p.client_name)
       .filter((name: string) => name && name.trim().length > 0)
@@ -435,13 +448,34 @@ export async function processSentinelCommissionsForDealTracker(
       effectiveDateFromDdf = ddfInfo?.draft_date ?? null
     }
 
+    const effectiveDate = mergeEffectiveDate(existing?.effective_date, effectiveDateFromDdf, statementDate)
+    const carrierStatusForGhl = existing?.carrier_status ?? policy?.status ?? null
+    const statusUnchanged = existing && carrierStatusUnchanged(existing, carrierStatusForGhl)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      carrierStatusForGhl,
+      !!statusUnchanged,
+      existing?.policy_status
+    )
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: carrierStatusForGhl,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealValue,
+      chargeBack: effectiveChargeBack,
+      commissionType: null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: nameForEntry,
       tasks: existing?.tasks ?? null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: existing?.ghl_stage ?? null,
-      policy_status: existing?.policy_status ?? policy?.status ?? null,
+      ghl_stage: mappedGhlStage ?? existing?.ghl_stage ?? null,
+      policy_status: policyStatusResolved,
       deal_creation_date: existing?.deal_creation_date ?? policy?.issue_date ?? statementDate,
       policy_number: policyNum,
       carrier: carrierName,
@@ -454,7 +488,7 @@ export async function processSentinelCommissionsForDealTracker(
       sales_agent: salesAgentForEntry,
       writing_number: existing?.writing_number ?? policy?.writing_agent_code ?? latest.writing_agent_number ?? null,
       commission_type: null,
-      effective_date: existing?.effective_date ?? effectiveDateFromDdf ?? statementDate,
+      effective_date: effectiveDate,
       call_center: callCenter,
       phone_number: phoneNumber,
       cc_pmt_ws: positiveAmount ?? existing?.cc_pmt_ws ?? null,

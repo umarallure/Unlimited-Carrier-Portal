@@ -10,6 +10,21 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Pencil, Trash2, Plus, FileText, Search } from 'lucide-react'
 import { Label } from "@/components/ui/label"
+import { cn } from '@/lib/utils'
+import { PageHeader } from '@/components/PageHeader'
+import { Card, CardContent } from '@/components/ui/card'
+import {
+  adminInput,
+  adminOutlineBtn,
+  adminPaginationBar,
+  adminSelectContent,
+  adminSelectItem,
+  adminSelectTrigger,
+  adminTableRowInteractive,
+  adminTdMuted,
+  adminTdStrong,
+  adminThPlain,
+} from '@/lib/adminFieldClasses'
 
 export default function CarriersPage() {
     const [carriers, setCarriers] = useState<any[]>([])
@@ -189,158 +204,159 @@ export default function CarriersPage() {
     }, [searchTerm])
 
     return (
-        <div className="space-y-6 animate-in fade-in duration-500">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4">
-                    <div className="w-12 h-12 rounded-xl bg-slate-900 flex items-center justify-center border border-slate-800">
-                        <FileText className="w-6 h-6 text-orange-400" />
-                    </div>
-                    <div>
-                        <h1 className="text-3xl font-bold text-white">Carriers</h1>
-                        <p className="text-gray-400">Manage carriers across agencies</p>
-                    </div>
-                </div>
-                <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                    <DialogTrigger asChild>
-                        <Button onClick={() => openDialog()} className="bg-orange-600 hover:bg-orange-700 text-white shadow-sm">
-                            <Plus className="mr-2 h-4 w-4" /> Add Carrier
-                        </Button>
-                    </DialogTrigger>
-                    <DialogContent className="bg-slate-900 border-slate-700" aria-describedby="carrier-dialog-desc">
-                        <DialogHeader>
-                            <DialogTitle className="text-white">{editingCarrier ? 'Edit Carrier' : 'Add New Carrier'}</DialogTitle>
-                            <DialogDescription id="carrier-dialog-desc" className="sr-only text-slate-400">
-                                {editingCarrier ? 'Edit carrier and agency assignments.' : 'Add a new carrier and assign agencies.'}
-                            </DialogDescription>
-                        </DialogHeader>
-                        <div className="space-y-4 py-4">
-                            <div className="space-y-2">
-                                <Label className="text-gray-300">Carrier Name</Label>
-                                <Input
-                                    value={newCarrierName}
-                                    onChange={(e) => setNewCarrierName(e.target.value)}
-                                    placeholder="e.g. Transamerica"
-                                    className="bg-slate-800 border-slate-700 text-white placeholder:text-gray-500"
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <Label className="text-gray-300">Carrier Code (required)</Label>
-                                <Input
-                                    value={newCarrierCode}
-                                    onChange={(e) => setNewCarrierCode(e.target.value)}
-                                    placeholder="e.g. TRANSAMERICA"
-                                    className="bg-slate-800 border-slate-700 text-white placeholder:text-gray-500"
-                                />
-                                <p className="text-xs text-slate-500">Short code used in uploads (e.g. TRANSAMERICA, AETNA).</p>
-                            </div>
-                            <div className="space-y-2">
-                                <Label className="text-gray-300">Select Agencies (can select multiple)</Label>
-                                <div className="grid grid-cols-1 gap-2 max-h-48 overflow-y-auto p-2 bg-slate-800/50 rounded-lg border border-slate-700">
-                                    {agencies.map(agency => (
-                                        <label
-                                            key={agency.id}
-                                            className={`flex items-center space-x-3 p-3 rounded-lg cursor-pointer transition-colors ${selectedAgencyIds.includes(agency.id)
-                                                ? 'bg-blue-500/20 border border-blue-500/50'
-                                                : 'bg-slate-800 border border-slate-700 hover:bg-slate-750'
-                                                }`}
-                                        >
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedAgencyIds.includes(agency.id)}
-                                                onChange={() => toggleAgencySelection(agency.id)}
-                                                className="w-4 h-4 text-blue-500"
-                                            />
-                                            <span className="text-white">{agency.name}</span>
-                                        </label>
-                                    ))}
-                                </div>
-                                {selectedAgencyIds.length > 0 && (
-                                    <p className="text-xs text-blue-400 mt-2">
-                                        {selectedAgencyIds.length} agency(ies) selected
-                                    </p>
-                                )}
-                            </div>
-                            <Button
-                                onClick={editingCarrier ? handleUpdateCarrier : handleAddCarrier}
-                                className="w-full bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-600 hover:to-cyan-700"
-                                disabled={!newCarrierName.trim() || !newCarrierCode.trim() || selectedAgencyIds.length === 0}
-                            >
-                                {editingCarrier ? 'Update Carrier' : 'Create Carrier'}
+        <div className="admin-page animate-in space-y-6 fade-in duration-500">
+            <PageHeader
+                title="Carriers"
+                description="Manage carriers across agencies"
+                icon={<FileText className="h-7 w-7 text-orange-500 dark:text-orange-400" strokeWidth={2} />}
+                action={
+                    <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+                        <DialogTrigger asChild>
+                            <Button onClick={() => openDialog()} className="bg-orange-600 text-white shadow-sm hover:bg-orange-700">
+                                <Plus className="mr-2 h-4 w-4" /> Add Carrier
                             </Button>
+                        </DialogTrigger>
+                        <DialogContent className="sm:max-w-lg" aria-describedby="carrier-dialog-desc">
+                            <DialogHeader>
+                                <DialogTitle>{editingCarrier ? 'Edit Carrier' : 'Add New Carrier'}</DialogTitle>
+                                <DialogDescription id="carrier-dialog-desc" className="sr-only">
+                                    {editingCarrier ? 'Edit carrier and agency assignments.' : 'Add a new carrier and assign agencies.'}
+                                </DialogDescription>
+                            </DialogHeader>
+                            <div className="space-y-4 py-4">
+                                <div className="space-y-2">
+                                    <Label className="text-foreground">Carrier Name</Label>
+                                    <Input
+                                        value={newCarrierName}
+                                        onChange={(e) => setNewCarrierName(e.target.value)}
+                                        placeholder="e.g. Transamerica"
+                                        className={adminInput}
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label className="text-foreground">Carrier Code (required)</Label>
+                                    <Input
+                                        value={newCarrierCode}
+                                        onChange={(e) => setNewCarrierCode(e.target.value)}
+                                        placeholder="e.g. TRANSAMERICA"
+                                        className={adminInput}
+                                    />
+                                    <p className="text-xs text-muted-foreground">Short code used in uploads (e.g. TRANSAMERICA, AETNA).</p>
+                                </div>
+                                <div className="space-y-2">
+                                    <Label className="text-foreground">Select Agencies (can select multiple)</Label>
+                                    <div className="grid max-h-48 grid-cols-1 gap-2 overflow-y-auto rounded-lg border border-border bg-muted/30 p-2 dark:bg-slate-800/40">
+                                        {agencies.map(agency => (
+                                            <label
+                                                key={agency.id}
+                                                className={cn(
+                                                    'flex cursor-pointer items-center space-x-3 rounded-lg border p-3 transition-colors',
+                                                    selectedAgencyIds.includes(agency.id)
+                                                        ? 'border-blue-500/50 bg-blue-500/10 dark:bg-blue-500/20'
+                                                        : 'border-border bg-background hover:bg-muted/80 dark:border-slate-700 dark:bg-slate-800/60 dark:hover:bg-slate-800'
+                                                )}
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedAgencyIds.includes(agency.id)}
+                                                    onChange={() => toggleAgencySelection(agency.id)}
+                                                    className="h-4 w-4 text-blue-600"
+                                                />
+                                                <span className="text-foreground">{agency.name}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                    {selectedAgencyIds.length > 0 && (
+                                        <p className="mt-2 text-xs text-blue-700 dark:text-blue-400">
+                                            {selectedAgencyIds.length} agency(ies) selected
+                                        </p>
+                                    )}
+                                </div>
+                                <Button
+                                    onClick={editingCarrier ? handleUpdateCarrier : handleAddCarrier}
+                                    className="w-full bg-gradient-to-r from-blue-500 to-cyan-600 text-white hover:from-blue-600 hover:to-cyan-700"
+                                    disabled={!newCarrierName.trim() || !newCarrierCode.trim() || selectedAgencyIds.length === 0}
+                                >
+                                    {editingCarrier ? 'Update Carrier' : 'Create Carrier'}
+                                </Button>
+                            </div>
+                        </DialogContent>
+                    </Dialog>
+                }
+            />
+
+            <Card>
+                <CardContent className="space-y-3 pt-6">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-4">
+                        <div className="relative min-w-[200px] flex-1">
+                            <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
+                            <Input
+                                placeholder="Search carriers..."
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                className={cn(adminInput, 'pl-10')}
+                            />
                         </div>
-                    </DialogContent>
-                </Dialog>
-            </div>
-
-            <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-                <div className="flex items-center justify-between gap-4 mb-3">
-                    <div className="relative flex-1">
-                        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-                        <Input
-                            placeholder="Search carriers..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="pl-10 bg-slate-950 border-slate-800 text-white placeholder:text-slate-500"
-                        />
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-muted-foreground">Rows per page:</span>
+                            <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
+                                <SelectTrigger className={cn('h-8 w-20 text-xs', adminSelectTrigger)}>
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent className={adminSelectContent}>
+                                    <SelectItem value="25" className={adminSelectItem}>25</SelectItem>
+                                    <SelectItem value="50" className={adminSelectItem}>50</SelectItem>
+                                    <SelectItem value="100" className={adminSelectItem}>100</SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <span className="text-sm text-slate-400">Rows per page:</span>
-                        <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
-                            <SelectTrigger className="h-8 w-20 bg-slate-950 border-slate-800 text-white text-xs">
-                                <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent className="bg-slate-800 border-slate-700">
-                                <SelectItem value="25" className="text-white">25</SelectItem>
-                                <SelectItem value="50" className="text-white">50</SelectItem>
-                                <SelectItem value="100" className="text-white">100</SelectItem>
-                            </SelectContent>
-                        </Select>
+                    <div className="text-sm text-muted-foreground">
+                        Showing {filteredCarriers.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, filteredCarriers.length)} of {filteredCarriers.length} carriers
                     </div>
-                </div>
-                <div className="text-sm text-slate-400">
-                    Showing {filteredCarriers.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, filteredCarriers.length)} of {filteredCarriers.length} carriers
-                </div>
-            </div>
+                </CardContent>
+            </Card>
 
-            <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
+            <Card className="overflow-hidden">
+                <CardContent className="p-0">
                 <Table>
                     <TableHeader>
-                        <TableRow className="border-b border-white/10 hover:bg-transparent">
-                            <TableHead className="text-gray-300 font-semibold">Carrier Name</TableHead>
-                            <TableHead className="text-gray-300 font-semibold">Agencies</TableHead>
-                            <TableHead className="text-right text-gray-300 font-semibold">Actions</TableHead>
+                        <TableRow className="border-b border-border hover:bg-transparent dark:border-white/10">
+                            <TableHead className={cn(adminThPlain, 'font-semibold')}>Carrier Name</TableHead>
+                            <TableHead className={cn(adminThPlain, 'font-semibold')}>Agencies</TableHead>
+                            <TableHead className={cn(adminThPlain, 'text-right font-semibold')}>Actions</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
                         {loading ? (
-                            <TableRow className="border-b border-slate-800">
-                                <TableCell colSpan={3} className="text-center py-8">
+                            <TableRow className="border-b border-border dark:border-slate-800">
+                                <TableCell colSpan={3} className="py-8 text-center">
                                     <div className="flex items-center justify-center space-x-2">
-                                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
-                                        <div className="w-2 h-2 bg-cyan-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                                        <div className="w-2 h-2 bg-teal-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                                        <div className="h-2 w-2 animate-bounce rounded-full bg-blue-500"></div>
+                                        <div className="h-2 w-2 animate-bounce rounded-full bg-cyan-500" style={{ animationDelay: '0.1s' }}></div>
+                                        <div className="h-2 w-2 animate-bounce rounded-full bg-teal-500" style={{ animationDelay: '0.2s' }}></div>
                                     </div>
                                 </TableCell>
                             </TableRow>
                         ) : filteredCarriers.length === 0 ? (
-                            <TableRow className="border-b border-slate-800">
-                                <TableCell colSpan={3} className="text-center py-8 text-gray-400">
+                            <TableRow className="border-b border-border dark:border-slate-800">
+                                <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
                                     {searchTerm ? 'No carriers found matching your search' : 'No carriers found'}
                                 </TableCell>
                             </TableRow>
                         ) : (
                             paginatedCarriers.map((carrier) => (
-                                <TableRow
-                                    key={carrier.id}
-                                    className="border-b border-slate-800 hover:bg-slate-900/80 transition-colors"
-                                >
-                                    <TableCell className="font-medium text-slate-100">
+                                <TableRow key={carrier.id} className={adminTableRowInteractive}>
+                                    <TableCell className={cn(adminTdStrong, 'font-medium')}>
                                         {carrier.name}
                                     </TableCell>
-                                    <TableCell className="text-slate-400">
+                                    <TableCell className={adminTdMuted}>
                                         <div className="flex flex-wrap gap-2">
                                             {carrier.agency_carriers.map((ac: any) => (
-                                                <span key={ac.id} className="px-3 py-1 rounded-full bg-slate-800 text-slate-200 text-sm">
+                                                <span
+                                                    key={ac.id}
+                                                    className="rounded-full border border-border bg-muted px-3 py-1 text-sm text-foreground dark:bg-slate-800 dark:text-slate-200"
+                                                >
                                                     {ac.agencies.name}
                                                 </span>
                                             ))}
@@ -355,14 +371,14 @@ export default function CarriersPage() {
                                                     e.stopPropagation()
                                                     openDialog(carrier)
                                                 }}
-                                                className="hover:bg-slate-800 text-slate-200"
+                                                className="text-foreground hover:bg-muted dark:text-slate-200 dark:hover:bg-slate-800"
                                             >
                                                 <Pencil className="h-4 w-4" />
                                             </Button>
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
-                                                className="hover:bg-red-900/40 text-red-300"
+                                                className="text-destructive hover:bg-destructive/10 dark:hover:bg-red-900/40 dark:text-red-300"
                                                 onClick={(e) => {
                                                     e.stopPropagation()
                                                     handleDeleteCarrier(carrier.id)
@@ -377,53 +393,29 @@ export default function CarriersPage() {
                         )}
                     </TableBody>
                 </Table>
-                {/* Pagination Controls */}
                 {filteredCarriers.length > 0 && (
-                    <div className="flex items-center justify-between px-4 py-3 border-t border-slate-800 bg-slate-900/50">
-                        <div className="text-sm text-slate-400">
+                    <div className={cn('flex items-center justify-between border-t border-border px-4 py-3 dark:border-slate-800', adminPaginationBar)}>
+                        <div className="text-sm text-muted-foreground">
                             Page {currentPage} of {totalPages}
                         </div>
                         <div className="flex items-center gap-2">
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(1)}
-                                disabled={currentPage === 1}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(1)} disabled={currentPage === 1} className={adminOutlineBtn}>
                                 First
                             </Button>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                                disabled={currentPage === 1}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className={adminOutlineBtn}>
                                 Previous
                             </Button>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                                disabled={currentPage === totalPages}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className={adminOutlineBtn}>
                                 Next
                             </Button>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(totalPages)}
-                                disabled={currentPage === totalPages}
-                                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
-                            >
+                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} className={adminOutlineBtn}>
                                 Last
                             </Button>
                         </div>
                     </div>
                 )}
-            </div>
+                </CardContent>
+            </Card>
         </div>
     )
 }

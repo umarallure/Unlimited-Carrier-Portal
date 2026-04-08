@@ -45,7 +45,7 @@ const TabsList = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivEl
     <div
       ref={ref}
       className={cn(
-        "inline-flex h-9 items-center justify-center rounded-lg bg-slate-900 p-1 text-slate-400",
+        "inline-flex h-9 items-center justify-center rounded-lg border border-border bg-muted p-1 text-muted-foreground dark:bg-slate-900 dark:text-slate-400",
         className
       )}
       {...props}
@@ -71,10 +71,10 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
         data-state={isActive ? "active" : "inactive"}
         className={cn(
           "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium",
-          "ring-offset-slate-900 transition-all",
+          "ring-offset-background transition-all dark:ring-offset-slate-900",
           isActive
-            ? "bg-slate-800 text-white"
-            : "text-slate-400 hover:text-slate-200",
+            ? "bg-background text-foreground shadow-sm dark:bg-slate-800 dark:text-white"
+            : "text-muted-foreground hover:text-foreground dark:text-slate-400 dark:hover:text-slate-200",
           className
         )}
         onClick={() => ctx.setValue(value)}
@@ -103,7 +103,7 @@ const TabsContent = React.forwardRef<HTMLDivElement, TabsContentProps>(
       <div
         ref={ref}
         className={cn(
-          "mt-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900",
+          "mt-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-background dark:focus-visible:ring-offset-slate-900",
           className
         )}
         {...props}

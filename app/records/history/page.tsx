@@ -177,7 +177,7 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
         return (
             <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4">
                 <Loader2 className="w-10 h-10 animate-spin text-orange-400" />
-                <p className="text-slate-400">Loading version history…</p>
+                <p className="text-muted-foreground">Loading version history…</p>
             </div>
         )
     }
@@ -186,13 +186,13 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
         return (
             <div className="space-y-4">
                 <Link href="/records">
-                    <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">
-                        <ArrowLeft className="w-4 h-4 mr-2" />
+                    <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
+                        <ArrowLeft className="mr-2 h-4 w-4" />
                         Back to Records
                     </Button>
                 </Link>
-                <div className="rounded-xl border border-slate-700 bg-slate-900 p-6 text-center">
-                    <p className="text-slate-300">{error ?? 'Record not found.'}</p>
+                <div className="rounded-xl border border-border bg-card p-6 text-center">
+                    <p className="text-muted-foreground">{error ?? 'Record not found.'}</p>
                 </div>
             </div>
         )
@@ -219,18 +219,18 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
         <div className="space-y-6">
             <div className="flex flex-wrap items-center gap-3">
                 <Link href="/records">
-                    <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">
-                        <ArrowLeft className="w-4 h-4 mr-2" />
+                    <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
+                        <ArrowLeft className="mr-2 h-4 w-4" />
                         Back to Records
                     </Button>
                 </Link>
                 <div className="flex flex-wrap items-center gap-3">
-                    <History className="w-6 h-6 text-orange-400 shrink-0" />
+                    <History className="h-6 w-6 shrink-0 text-orange-500 dark:text-orange-400" />
                     <div>
-                        <h1 className="text-2xl font-bold text-white">
-                            Version history — <span className="font-mono text-orange-300">{record.policy_number}</span>
+                        <h1 className="text-2xl font-bold text-foreground">
+                            Version history — <span className="font-mono text-orange-600 dark:text-orange-300">{record.policy_number}</span>
                         </h1>
-                        <p className="text-slate-400 text-sm mt-0.5">
+                        <p className="mt-0.5 text-sm text-muted-foreground">
                             This record has been updated {(record.version_history || []).length} time{(record.version_history || []).length === 1 ? '' : 's'}.
                         </p>
                     </div>
@@ -238,11 +238,11 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
             </div>
 
             <Tabs defaultValue="summary" className="space-y-4">
-                <TabsList className="bg-slate-900 border border-slate-700">
-                    <TabsTrigger value="summary" className="data-[state=active]:bg-slate-800 data-[state=active]:text-white">
+                <TabsList>
+                    <TabsTrigger value="summary">
                         Summary
                     </TabsTrigger>
-                    <TabsTrigger value="timeline" className="data-[state=active]:bg-slate-800 data-[state=active]:text-white">
+                    <TabsTrigger value="timeline">
                         Timeline
                     </TabsTrigger>
                 </TabsList>
@@ -257,26 +257,26 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                         const allRows = [...changedRows, ...addedRows, ...removedRows].filter(({ key }) => DISPLAY_KEYS.includes(key) || IMPORTANT_KEYS.includes(key))
                         if (allRows.length === 0) return null
                         return (
-                            <div className="rounded-xl border border-slate-600 bg-slate-800/60 overflow-hidden">
-                                <div className="px-4 py-3 border-b border-slate-600 bg-slate-800">
-                                    <h2 className="text-sm font-semibold text-white">What changed in this update</h2>
-                                    <p className="text-xs text-slate-400 mt-0.5">Before → After (current version)</p>
+                            <div className="overflow-hidden rounded-xl border border-border bg-card">
+                                <div className="border-b border-border bg-muted/50 px-4 py-3 dark:border-slate-700 dark:bg-slate-800/60">
+                                    <h2 className="text-sm font-semibold text-foreground">What changed in this update</h2>
+                                    <p className="mt-0.5 text-xs text-muted-foreground">Before → After (current version)</p>
                                 </div>
                                 <div className="overflow-x-auto">
                                     <table className="w-full text-sm">
                                         <thead>
-                                            <tr className="border-b border-slate-600">
-                                                <th className="text-left py-2.5 px-4 font-medium text-slate-400">Field</th>
-                                                <th className="text-left py-2.5 px-4 font-medium text-slate-400 w-[40%]">Before</th>
-                                                <th className="text-left py-2.5 px-4 font-medium text-slate-400 w-[40%]">After</th>
+                                            <tr className="border-b border-border dark:border-slate-600">
+                                                <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Field</th>
+                                                <th className="w-[40%] px-4 py-2.5 text-left font-medium text-muted-foreground">Before</th>
+                                                <th className="w-[40%] px-4 py-2.5 text-left font-medium text-muted-foreground">After</th>
                                             </tr>
                                         </thead>
                                         <tbody>
                                             {allRows.map(({ key, before, after }) => (
-                                                <tr key={key} className="border-b border-slate-700/80 hover:bg-slate-700/30">
-                                                    <td className="py-2 px-4 text-slate-300 font-medium shrink-0">{prettyKey(key)}</td>
-                                                    <td className="py-2 px-4 text-slate-400 max-w-[200px] truncate" title={String(before)}>{before}</td>
-                                                    <td className="py-2 px-4 text-emerald-300 font-medium max-w-[200px] truncate" title={String(after)}>{after}</td>
+                                                <tr key={key} className="border-b border-border hover:bg-muted/50 dark:border-slate-700/80 dark:hover:bg-slate-700/30">
+                                                    <td className="shrink-0 px-4 py-2 font-medium text-foreground dark:text-slate-300">{prettyKey(key)}</td>
+                                                    <td className="max-w-[200px] truncate px-4 py-2 text-muted-foreground" title={String(before)}>{before}</td>
+                                                    <td className="max-w-[200px] truncate px-4 py-2 font-medium text-emerald-700 dark:text-emerald-300" title={String(after)}>{after}</td>
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -290,31 +290,31 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                 <TabsContent value="timeline">
                     {/* Timeline: current then previous snapshots */}
                     <div className="relative pl-6 md:pl-8">
-                        <div className="absolute left-[11px] md:left-[15px] top-0 bottom-0 w-0.5 bg-slate-700 rounded-full" aria-hidden />
+                        <div className="absolute bottom-0 left-[11px] top-0 w-0.5 rounded-full bg-border dark:bg-slate-700" aria-hidden />
 
                         <div className="space-y-6 pb-8">
                             {/* Current version */}
                             <div className="relative flex gap-4">
-                        <div className="absolute -left-6 md:-left-8 top-6 w-4 h-4 rounded-full bg-orange-500 border-2 border-slate-900 shrink-0" aria-hidden />
-                        <div className="flex-1 min-w-0 rounded-xl border border-orange-500/40 bg-slate-800/60 shadow-lg overflow-hidden">
-                            <div className="px-4 py-3 border-b border-slate-700 bg-slate-800/80">
-                                <span className="text-xs font-semibold text-orange-400 uppercase tracking-wide">Current version</span>
+                        <div className="absolute -left-6 top-6 h-4 w-4 shrink-0 rounded-full border-2 border-background bg-orange-500 dark:border-slate-900 md:-left-8" aria-hidden />
+                        <div className="min-w-0 flex-1 overflow-hidden rounded-xl border border-orange-500/40 bg-card shadow-lg dark:bg-slate-800/60">
+                            <div className="border-b border-border bg-muted/50 px-4 py-3 dark:border-slate-700 dark:bg-slate-800/80">
+                                <span className="text-xs font-semibold uppercase tracking-wide text-orange-600 dark:text-orange-400">Current version</span>
                                 {record.updated_at && (
-                                    <span className="ml-2 text-slate-500 text-xs">
+                                    <span className="ml-2 text-xs text-muted-foreground">
                                         As of {new Date(record.updated_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
                                     </span>
                                 )}
                             </div>
-                            <div className="p-4 space-y-3">
+                            <div className="space-y-3 p-4">
                               <div className="flex items-center justify-between gap-3">
-                                <p className="text-xs text-slate-400">
+                                <p className="text-xs text-muted-foreground">
                                   Showing {expandedCurrent ? 'all fields' : 'only important fields that changed'} in this version.
                                 </p>
                                 <Button
                                   type="button"
                                   size="sm"
                                   variant="outline"
-                                  className="h-7 px-2 text-xs border-slate-600 text-slate-200 hover:bg-slate-700"
+                                  className="h-7 border-border px-2 text-xs text-foreground hover:bg-muted dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700"
                                   onClick={() => setExpandedCurrent(v => !v)}
                                 >
                                   {expandedCurrent ? 'Hide details' : 'Show full snapshot'}
@@ -332,18 +332,18 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                                         className={
                                           'shrink-0 ' +
                                           (currentChangedKeys.has(key)
-                                            ? 'text-emerald-300 font-semibold'
-                                            : 'text-slate-500')
+                                            ? 'font-semibold text-emerald-700 dark:text-emerald-300'
+                                            : 'text-muted-foreground')
                                         }
                                       >
                                         {prettyKey(key)}:
                                       </dt>
                                       <dd
                                         className={
-                                          'truncate min-w-0 ' +
+                                          'min-w-0 truncate ' +
                                           (currentChangedKeys.has(key)
-                                            ? 'text-emerald-300 font-semibold'
-                                            : 'text-slate-200')
+                                            ? 'font-semibold text-emerald-700 dark:text-emerald-300'
+                                            : 'text-foreground dark:text-slate-200')
                                         }
                                       >
                                         {String(val)}
@@ -365,32 +365,32 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                         ;[...d.changed, ...d.added, ...d.removed].forEach(([key]) => changedKeys.add(key))
                         return (
                             <div key={idx} className="relative flex gap-4">
-                                <div className="absolute -left-6 md:-left-8 top-6 w-4 h-4 rounded-full bg-slate-600 border-2 border-slate-900 shrink-0" aria-hidden />
-                                <div className="flex-1 min-w-0 rounded-xl border border-slate-700 bg-slate-800/40 shadow overflow-hidden">
-                                    <div className="px-4 py-3 border-b border-slate-700 bg-slate-800/60">
-                                        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wide">
+                                <div className="absolute -left-6 top-6 h-4 w-4 shrink-0 rounded-full border-2 border-background bg-muted-foreground/40 dark:border-slate-900 dark:bg-slate-600 md:-left-8" aria-hidden />
+                                <div className="min-w-0 flex-1 overflow-hidden rounded-xl border border-border bg-muted/30 shadow dark:border-slate-700 dark:bg-slate-800/40">
+                                    <div className="border-b border-border bg-muted/40 px-4 py-3 dark:border-slate-700 dark:bg-slate-800/60">
+                                        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                                             Before this update
                                         </span>
-                                        <span className="ml-2 text-slate-500 text-xs">
+                                        <span className="ml-2 text-xs text-muted-foreground">
                                             {entry.at ? new Date(entry.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '–'}
                                             {idx === 0 && ' (replaced by current version above)'}
                                         </span>
                                     </div>
                                     <div className="p-4 space-y-3">
                                       {idx === 0 && (
-                                        <p className="mb-1 text-xs text-slate-400">
+                                        <p className="mb-1 text-xs text-muted-foreground">
                                           Snapshot of this record before the latest update. See &quot;What changed in this update&quot; above for the exact before → after values.
                                         </p>
                                       )}
                                       <div className="flex items-center justify-between gap-3">
-                                        <p className="text-xs text-slate-400">
+                                        <p className="text-xs text-muted-foreground">
                                           Showing {expandedTimeline[idx] ? 'all fields' : 'only important fields that changed'} in this snapshot.
                                         </p>
                                         <Button
                                           type="button"
                                           size="sm"
                                           variant="outline"
-                                          className="h-7 px-2 text-xs border-slate-600 text-slate-200 hover:bg-slate-700"
+                                          className="h-7 border-border px-2 text-xs text-foreground hover:bg-muted dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700"
                                           onClick={() =>
                                             setExpandedTimeline(prev => ({ ...prev, [idx]: !prev[idx] }))
                                           }
@@ -411,18 +411,18 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                                                   className={
                                                     'shrink-0 ' +
                                                     (changedKeys.has(key)
-                                                      ? 'text-amber-300 font-semibold'
-                                                      : 'text-slate-500')
+                                                      ? 'font-semibold text-amber-700 dark:text-amber-300'
+                                                      : 'text-muted-foreground')
                                                   }
                                                 >
                                                   {prettyKey(key)}:
                                                 </dt>
                                                 <dd
                                                   className={
-                                                    'truncate min-w-0 ' +
+                                                    'min-w-0 truncate ' +
                                                     (changedKeys.has(key)
-                                                      ? 'text-amber-300 font-semibold'
-                                                      : 'text-slate-300')
+                                                      ? 'font-semibold text-amber-700 dark:text-amber-300'
+                                                      : 'text-muted-foreground dark:text-slate-300')
                                                   }
                                                 >
                                                   {String(val)}
@@ -432,7 +432,7 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                                           })}
                                         </dl>
                                       ) : (
-                                        <p className="text-slate-500 text-sm">No snapshot data.</p>
+                                        <p className="text-sm text-muted-foreground">No snapshot data.</p>
                                       )}
                                     </div>
                                 </div>
@@ -442,8 +442,8 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
 
                             {(!record.version_history || record.version_history.length === 0) && (
                                 <div className="relative flex gap-4">
-                                    <div className="absolute -left-6 md:-left-8 top-4 w-4 h-4 rounded-full bg-slate-700 border-2 border-slate-900 shrink-0" aria-hidden />
-                                    <p className="text-slate-500 text-sm pl-2">No previous versions (record has not been updated since creation).</p>
+                                    <div className="absolute -left-6 top-4 h-4 w-4 shrink-0 rounded-full border-2 border-background bg-muted-foreground/50 dark:border-slate-900 dark:bg-slate-700 md:-left-8" aria-hidden />
+                                    <p className="pl-2 text-sm text-muted-foreground">No previous versions (record has not been updated since creation).</p>
                                 </div>
                             )}
                         </div>

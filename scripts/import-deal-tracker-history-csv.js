@@ -363,7 +363,7 @@ async function main () {
   }
 
   console.log('Upserting into deal_tracker...')
-  const BATCH_SIZE = 500
+  const BATCH_SIZE = 100
   let saved = 0
   let failed = 0
 

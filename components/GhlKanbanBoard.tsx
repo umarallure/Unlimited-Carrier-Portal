@@ -1,12 +1,14 @@
 'use client'
 
-import { useState, useRef, useCallback, useMemo } from 'react'
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { GHL_STAGE_ORDER, GHL_STAGE_CATEGORIES, getStageColor } from '@/lib/ghlStageResolver'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
-import { ChevronDown, ChevronRight, User, FileText, Building2, Loader2, ArrowRight } from 'lucide-react'
+import { adminSelectContent, adminSelectItem, adminSelectTrigger } from '@/lib/adminFieldClasses'
+import { User, FileText, Building2, Loader2, ArrowRight } from 'lucide-react'
+
+const UNMAPPED_SECTION = '__unmapped__'
 
 interface KanbanDeal {
   id: string
@@ -30,6 +32,11 @@ interface GhlKanbanBoardProps {
   visibleStages?: string[] | null
   /** Whether to show the "Unmapped" column (default: true). */
   showUnmapped?: boolean
+  /**
+   * When the filter card is locked to one GHL lane, the board stays on that section
+   * and section tabs are read-only.
+   */
+  lockedCategoryKey?: string | null
 }
 
 const STAGE_ALIASES: Record<string, string> = {
@@ -56,8 +63,14 @@ function normalizeStage(stage: string | null): string | null {
   return stage
 }
 
-export default function GhlKanbanBoard({ entries, onStageChange, visibleStages, showUnmapped = true }: GhlKanbanBoardProps) {
-  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
+export default function GhlKanbanBoard({
+  entries,
+  onStageChange,
+  visibleStages,
+  showUnmapped = true,
+  lockedCategoryKey = null,
+}: GhlKanbanBoardProps) {
+  const [activeSectionKey, setActiveSectionKey] = useState<string>(GHL_STAGE_CATEGORIES[0]?.key ?? 'pending')
   const [movingDealId, setMovingDealId] = useState<string | null>(null)
   const [dragOverStage, setDragOverStage] = useState<string | null>(null)
   const [moveDialogDeal, setMoveDialogDeal] = useState<KanbanDeal | null>(null)
@@ -96,13 +109,34 @@ export default function GhlKanbanBoard({ entries, onStageChange, visibleStages, 
     return { stageMap: map, unmapped: unm, dedupedEntries: seen.size, mappedCount: mapped }
   }, [entries, visibleStageSet, showUnmapped])
 
-  const toggleCategory = (key: string) => {
-    setCollapsedCategories(prev => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
+  const sectionKeysToShow = useMemo(
+    () =>
+      GHL_STAGE_CATEGORIES.filter((cat) => cat.stages.some((s) => visibleStageSet.has(s))).map((c) => c.key),
+    [visibleStageSet]
+  )
+
+  const displaySection =
+    lockedCategoryKey && sectionKeysToShow.includes(lockedCategoryKey)
+      ? lockedCategoryKey
+      : activeSectionKey
+
+  useEffect(() => {
+    if (lockedCategoryKey && sectionKeysToShow.includes(lockedCategoryKey)) return
+    if (activeSectionKey === UNMAPPED_SECTION) return
+    if (sectionKeysToShow.length > 0 && !sectionKeysToShow.includes(activeSectionKey)) {
+      setActiveSectionKey(sectionKeysToShow[0])
+    }
+  }, [activeSectionKey, lockedCategoryKey, sectionKeysToShow])
+
+  useEffect(() => {
+    if (activeSectionKey === UNMAPPED_SECTION && (!showUnmapped || unmapped.length === 0)) {
+      setActiveSectionKey(sectionKeysToShow[0] ?? GHL_STAGE_CATEGORIES[0]?.key ?? 'pending')
+    }
+  }, [activeSectionKey, showUnmapped, unmapped.length, sectionKeysToShow])
+
+  const selectSection = (key: string) => {
+    if (lockedCategoryKey) return
+    setActiveSectionKey(key)
   }
 
   const handleDragStart = useCallback((e: React.DragEvent, deal: KanbanDeal) => {
@@ -160,251 +194,291 @@ export default function GhlKanbanBoard({ entries, onStageChange, visibleStages, 
   return (
     <div className="space-y-4">
       {/* Summary */}
-      <div className="flex items-center gap-4 text-sm text-slate-400 flex-wrap">
-        <span className="bg-slate-800/60 px-3 py-1 rounded-full">{dedupedEntries} total</span>
-        <span className="bg-slate-800/60 px-3 py-1 rounded-full">{mappedCount} mapped</span>
+      <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+        <span className="rounded-full bg-muted px-3 py-1 text-foreground/90 dark:bg-slate-800/60 dark:text-slate-300">
+          {dedupedEntries} total
+        </span>
+        <span className="rounded-full bg-muted px-3 py-1 text-foreground/90 dark:bg-slate-800/60 dark:text-slate-300">
+          {mappedCount} mapped
+        </span>
         {showUnmapped && unmapped.length > 0 && (
           <span className="bg-amber-900/30 text-amber-400 px-3 py-1 rounded-full">{unmapped.length} unmapped</span>
         )}
         {isMoving && (
-          <span className="flex items-center gap-1.5 text-blue-400 bg-blue-900/30 px-3 py-1 rounded-full">
-            <Loader2 className="w-3 h-3 animate-spin" />
+          <span className="flex items-center gap-1.5 rounded-full bg-blue-100 px-3 py-1 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+            <Loader2 className="h-3 w-3 animate-spin" />
             Moving...
           </span>
         )}
       </div>
 
-      {/* Board */}
-      <div className="overflow-x-auto pb-4 -mx-4 px-4">
-        <div className="flex gap-4 min-w-max">
-          {GHL_STAGE_CATEGORIES.map(cat => {
-            const isCollapsed = collapsedCategories.has(cat.key)
-            const catStages = cat.stages.filter(s => visibleStageSet.has(s))
+      {/* Board — one GHL section at a time */}
+      <div className="rounded-xl border border-border bg-card/60 p-4 ring-1 ring-black/[0.03] dark:border-slate-800/80 dark:bg-slate-900/40 dark:ring-white/[0.03]">
+        <div className="mb-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Board section</p>
+          <p className="mt-1 max-w-3xl text-[11px] leading-relaxed text-muted-foreground">
+            {lockedCategoryKey
+              ? 'This lane is fixed by the “GHL lane” filter above. Clear that filter to switch sections here.'
+              : 'Pick one lane at a time. Stage columns stretch across the width; lists scroll inside each column.'}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {sectionKeysToShow.map((key) => {
+            const cat = GHL_STAGE_CATEGORIES.find((c) => c.key === key)!
+            const catStages = cat.stages.filter((s) => visibleStageSet.has(s))
             const catDeals = catStages.reduce((sum, stage) => sum + (stageMap.get(stage)?.length ?? 0), 0)
-
-            // If this category has no visible stages under the current filter, skip it completely.
-            if (catStages.length === 0) return null
-
+            const isActive = displaySection === key
             return (
-              <div key={cat.key} className="flex flex-col shrink-0">
-                {/* Category header */}
-                <button
-                  type="button"
-                  onClick={() => toggleCategory(cat.key)}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold mb-2 transition-colors hover:brightness-110"
-                  style={{ backgroundColor: cat.color + '18', border: `1px solid ${cat.color}40` }}
+              <button
+                key={key}
+                type="button"
+                onClick={() => selectSection(key)}
+                disabled={!!lockedCategoryKey}
+                className={cn(
+                  'flex min-w-0 max-w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm font-semibold transition-all sm:max-w-none',
+                  isActive
+                    ? 'border-orange-500/45 bg-orange-500/12 text-foreground shadow-lg shadow-black/10 dark:text-white dark:shadow-black/25'
+                    : 'border-border bg-muted/70 text-muted-foreground hover:border-orange-500/20 hover:bg-muted hover:text-foreground dark:border-slate-700/90 dark:bg-slate-950/60 dark:text-slate-400 dark:hover:border-slate-600 dark:hover:bg-slate-900 dark:hover:text-slate-200',
+                  lockedCategoryKey && 'cursor-not-allowed opacity-95'
+                )}
+              >
+                <span className="min-w-0 truncate" style={{ color: isActive ? cat.color : undefined }}>
+                  {cat.label}
+                </span>
+                <span
+                  className={cn(
+                    'ml-auto shrink-0 rounded-full px-2 py-0.5 text-[11px] tabular-nums',
+                    !isActive && 'bg-muted text-muted-foreground dark:bg-slate-700/75 dark:text-slate-300'
+                  )}
+                  style={{
+                    backgroundColor: isActive ? `${cat.color}33` : undefined,
+                    color: isActive ? cat.color : undefined,
+                  }}
                 >
-                  {isCollapsed ? <ChevronRight className="w-4 h-4" style={{ color: cat.color }} /> : <ChevronDown className="w-4 h-4" style={{ color: cat.color }} />}
-                  <span style={{ color: cat.color }}>{cat.label}</span>
-                  <span
-                    className="ml-auto text-xs font-bold rounded-full px-2 py-0.5"
-                    style={{ backgroundColor: cat.color + '25', color: cat.color }}
-                  >
-                    {catDeals}
-                  </span>
-                </button>
-
-                {/* Columns */}
-                {!isCollapsed && (
-                  <div className="flex gap-2">
-                    {catStages.map(stage => {
-                      const deals = stageMap.get(stage) ?? []
-                      const isDragTarget = dragOverStage === stage
-                      const color = getStageColor(stage)
-
-                      return (
-                        <div
-                          key={stage}
-                          className={cn(
-                            'flex flex-col w-64 rounded-xl border transition-all',
-                            isDragTarget
-                              ? 'border-blue-400 bg-blue-500/5 shadow-lg shadow-blue-500/10'
-                              : 'border-slate-800 bg-slate-900/60'
-                          )}
-                          onDragOver={(e) => handleDragOver(e, stage)}
-                          onDragLeave={handleDragLeave}
-                          onDrop={(e) => handleDrop(e, stage)}
-                        >
-                          {/* Column header */}
-                          <div className="px-3 py-2.5 border-b border-slate-800/60 flex items-center justify-between">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                              <span className="text-xs font-semibold text-slate-300 truncate" title={stage}>
-                                {stage}
-                              </span>
-                            </div>
-                            <span
-                              className="text-[10px] font-bold rounded-full px-1.5 py-0.5 shrink-0"
-                              style={{ backgroundColor: color + '20', color }}
-                            >
-                              {deals.length}
-                            </span>
-                          </div>
-
-                          {/* Cards */}
-                          <div className="flex-1 overflow-y-auto max-h-[calc(100vh-300px)] p-1.5 space-y-1.5 min-h-[60px]">
-                            {deals.length === 0 ? (
-                              <div className="flex items-center justify-center h-14 text-slate-700 text-xs">
-                                Drop deals here
-                              </div>
-                            ) : (
-                              deals.map((deal, idx) => (
-                                <div
-                                  key={`${deal.id}-${idx}`}
-                                  draggable
-                                  onDragStart={(e) => handleDragStart(e, deal)}
-                                  onDragEnd={handleDragEnd}
-                                  className={cn(
-                                    'group rounded-lg p-3 cursor-grab active:cursor-grabbing transition-all',
-                                    'bg-slate-950/80 border border-slate-800/60',
-                                    'hover:border-slate-600 hover:bg-slate-900/80 hover:shadow-md',
-                                    movingDealId === deal.id && 'opacity-40 scale-95'
-                                  )}
-                                >
-                                  <div className="text-[13px] font-medium text-slate-100 leading-tight truncate">
-                                    {deal.name || 'Unknown'}
-                                  </div>
-
-                                  <div className="mt-1.5 flex items-center gap-1.5">
-                                    <FileText className="w-3 h-3 text-slate-600 shrink-0" />
-                                    <span className="text-[11px] text-slate-500 font-mono truncate">{deal.policy_number}</span>
-                                  </div>
-
-                                  <div className="mt-1 flex items-center gap-1.5">
-                                    <Building2 className="w-3 h-3 text-slate-600 shrink-0" />
-                                    <span className="text-[11px] text-slate-500 truncate">{deal.carrier}</span>
-                                  </div>
-
-                                  {deal.carrier_status && (
-                                    <div className="mt-1 text-[10px] text-slate-600 truncate italic" title={deal.carrier_status}>
-                                      {deal.carrier_status}
-                                    </div>
-                                  )}
-
-                                  <div className="mt-2 flex items-center justify-between">
-                                    {deal.deal_value != null && deal.deal_value > 0 ? (
-                                      <span className="text-[11px] font-semibold text-emerald-400">
-                                        ${deal.deal_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                      </span>
-                                    ) : (
-                                      <span />
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation()
-                                        setMoveDialogDeal(deal)
-                                        setSelectedNewStage('')
-                                      }}
-                                      className="flex items-center gap-1 text-[10px] text-slate-600 hover:text-blue-400 transition-colors opacity-0 group-hover:opacity-100"
-                                    >
-                                      Move <ArrowRight className="w-3 h-3" />
-                                    </button>
-                                  </div>
-
-                                  {deal.sales_agent && (
-                                    <div className="mt-1 flex items-center gap-1">
-                                      <User className="w-3 h-3 text-slate-700 shrink-0" />
-                                      <span className="text-[10px] text-slate-600 truncate">{deal.sales_agent}</span>
-                                    </div>
-                                  )}
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-
-                {isCollapsed && (
-                  <div
-                    className="w-12 rounded-lg border border-slate-800 flex items-center justify-center py-4 cursor-pointer hover:border-slate-600 transition-colors"
-                    style={{ backgroundColor: cat.color + '08' }}
-                    onClick={() => toggleCategory(cat.key)}
-                  >
-                    <span className="text-xs font-bold" style={{ color: cat.color, writingMode: 'vertical-lr' }}>
-                      {cat.label} ({catDeals})
-                    </span>
-                  </div>
-                )}
-              </div>
+                  {catDeals}
+                </span>
+              </button>
             )
           })}
-
-          {/* Unmapped */}
           {showUnmapped && unmappedCount > 0 && (
-            <div className="flex flex-col shrink-0">
-              <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold mb-2 bg-amber-500/10 border border-amber-500/30">
-                <span className="text-amber-400">Unmapped</span>
-                <span className="ml-auto text-xs font-bold rounded-full px-2 py-0.5 bg-amber-500/20 text-amber-400">
-                  {unmappedCount}
-                </span>
-              </div>
-              <div className="flex flex-col w-64 rounded-xl border border-slate-800 bg-slate-900/60">
-                <div className="flex-1 overflow-y-auto max-h-[calc(100vh-300px)] p-1.5 space-y-1.5">
-                  {unmapped.map((deal, idx) => (
-                    <div
-                      key={`unmapped-${deal.id}-${idx}`}
-                      className="group rounded-lg p-3 bg-slate-950/80 border border-slate-800/60 hover:border-amber-800/40 transition-all"
-                    >
-                      <div className="text-[13px] font-medium text-slate-100 truncate">
-                        {deal.name || 'Unknown'}
-                      </div>
-                      <div className="mt-1 text-[11px] text-slate-500 font-mono truncate">{deal.policy_number}</div>
-                      <div className="mt-0.5 text-[11px] text-slate-500 truncate">{deal.carrier}</div>
-                      {deal.ghl_stage && (
-                        <div className="mt-1.5 text-[10px] text-amber-500/80 bg-amber-500/10 rounded px-1.5 py-0.5 inline-block truncate max-w-full">
-                          {deal.ghl_stage}
-                        </div>
-                      )}
-                      <div className="mt-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMoveDialogDeal(deal)
-                            setSelectedNewStage('')
-                          }}
-                          className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-blue-400 transition-colors"
-                        >
-                          Assign Stage <ArrowRight className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={() => selectSection(UNMAPPED_SECTION)}
+              disabled={!!lockedCategoryKey}
+              className={cn(
+                'flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-all',
+                displaySection === UNMAPPED_SECTION
+                  ? 'border-amber-500/45 bg-amber-500/12 text-amber-900 shadow-lg shadow-black/10 dark:text-amber-100 dark:shadow-black/25'
+                  : 'border-border bg-muted/70 text-muted-foreground hover:border-amber-500/25 hover:text-foreground dark:border-slate-700/90 dark:bg-slate-950/60 dark:text-slate-400 dark:hover:border-slate-600 dark:hover:text-slate-200',
+                lockedCategoryKey && 'cursor-not-allowed opacity-50'
+              )}
+            >
+              Unmapped
+              <span className="ml-auto rounded-full bg-amber-500/25 px-2 py-0.5 text-[11px] tabular-nums text-amber-900 dark:text-amber-200">
+                {unmappedCount}
+              </span>
+            </button>
           )}
         </div>
+      </div>
+
+      <div className="w-full min-w-0 pt-1">
+        {displaySection === UNMAPPED_SECTION && showUnmapped && unmappedCount > 0 ? (
+          <div className="flex flex-col overflow-hidden rounded-xl border border-amber-500/25 bg-amber-50/40 dark:border-amber-500/20 dark:bg-slate-900/50">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3 dark:border-slate-800/80">
+              <span className="text-sm font-semibold text-amber-800 dark:text-amber-400">Unmapped deals</span>
+              <span className="rounded-full bg-amber-500/20 px-2.5 py-0.5 text-xs font-bold text-amber-900 dark:text-amber-300">
+                {unmappedCount}
+              </span>
+            </div>
+            <div className="max-h-[min(32rem,calc(100vh-22rem))] overflow-y-auto p-3">
+              <div className="mx-auto grid max-w-5xl gap-2">
+                {unmapped.map((deal, idx) => (
+                  <div
+                    key={`unmapped-${deal.id}-${idx}`}
+                    className="group rounded-lg border border-border bg-card p-3 transition-all hover:border-amber-500/35 dark:border-slate-800/60 dark:bg-slate-950/80 dark:hover:border-amber-800/40"
+                  >
+                    <div className="truncate text-[13px] font-medium text-foreground dark:text-slate-100">
+                      {deal.name || 'Unknown'}
+                    </div>
+                    <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{deal.policy_number}</div>
+                    <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{deal.carrier}</div>
+                    {deal.ghl_stage && (
+                      <div className="mt-1.5 inline-block max-w-full truncate rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500/80">
+                        {deal.ghl_stage}
+                      </div>
+                    )}
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMoveDialogDeal(deal)
+                          setSelectedNewStage('')
+                        }}
+                        className="flex items-center gap-1 text-[10px] text-muted-foreground transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+                      >
+                        Assign Stage <ArrowRight className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          (() => {
+            const cat = GHL_STAGE_CATEGORIES.find((c) => c.key === displaySection)
+            if (!cat) {
+              return (
+                <div className="rounded-xl border border-border bg-muted/40 py-12 text-center text-sm text-muted-foreground dark:border-slate-800 dark:bg-slate-900/40">
+                  No section to show — adjust filters above.
+                </div>
+              )
+            }
+            const catStages = cat.stages.filter((s) => visibleStageSet.has(s))
+            if (catStages.length === 0) {
+              return (
+                <div className="rounded-xl border border-border bg-muted/40 py-12 text-center text-sm text-muted-foreground dark:border-slate-800 dark:bg-slate-900/40">
+                  No stages visible for this section with current filters.
+                </div>
+              )
+            }
+            return (
+              <div
+                className="grid w-full gap-3"
+                style={{
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 17rem), 1fr))',
+                }}
+              >
+                {catStages.map((stage) => {
+                  const deals = stageMap.get(stage) ?? []
+                  const isDragTarget = dragOverStage === stage
+                  const color = getStageColor(stage)
+                  return (
+                    <div
+                      key={stage}
+                      className={cn(
+                        'flex min-w-0 flex-col rounded-xl border border-border bg-muted/40 transition-all dark:border-slate-800 dark:bg-slate-900/60',
+                        isDragTarget &&
+                          'border-blue-400 bg-blue-500/5 shadow-lg shadow-blue-500/10 dark:bg-slate-900/50'
+                      )}
+                      onDragOver={(e) => handleDragOver(e, stage)}
+                      onDragLeave={handleDragLeave}
+                      onDrop={(e) => handleDrop(e, stage)}
+                    >
+                      <div className="flex items-center justify-between border-b border-border px-3 py-2.5 dark:border-slate-800/60">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <div className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                          <span className="truncate text-xs font-semibold text-foreground dark:text-slate-300" title={stage}>
+                            {stage}
+                          </span>
+                        </div>
+                        <span
+                          className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold"
+                          style={{ backgroundColor: color + '20', color }}
+                        >
+                          {deals.length}
+                        </span>
+                      </div>
+                      <div
+                        className={cn(
+                          'min-h-[80px] flex-1 space-y-1.5 overflow-y-auto p-1.5',
+                          'max-h-[min(32rem,calc(100vh-22rem))]'
+                        )}
+                      >
+                        {deals.length === 0 ? (
+                          <div className="flex h-14 items-center justify-center text-xs text-muted-foreground">Drop deals here</div>
+                        ) : (
+                          deals.map((deal, idx) => (
+                            <div
+                              key={`${deal.id}-${idx}`}
+                              draggable
+                              onDragStart={(e) => handleDragStart(e, deal)}
+                              onDragEnd={handleDragEnd}
+                              className={cn(
+                                'group cursor-grab rounded-lg border border-border bg-card p-3 transition-all active:cursor-grabbing dark:border-slate-800/60 dark:bg-slate-950/80',
+                                'hover:border-border hover:shadow-md dark:hover:border-slate-600 dark:hover:bg-slate-900/80',
+                                movingDealId === deal.id && 'scale-95 opacity-40'
+                              )}
+                            >
+                              <div className="truncate text-[13px] font-medium leading-tight text-foreground dark:text-slate-100">{deal.name || 'Unknown'}</div>
+                              <div className="mt-1.5 flex items-center gap-1.5">
+                                <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                <span className="truncate font-mono text-[11px] text-muted-foreground">{deal.policy_number}</span>
+                              </div>
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <Building2 className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                <span className="truncate text-[11px] text-muted-foreground">{deal.carrier}</span>
+                              </div>
+                              {deal.carrier_status && (
+                                <div className="mt-1 truncate text-[10px] italic text-muted-foreground" title={deal.carrier_status}>
+                                  {deal.carrier_status}
+                                </div>
+                              )}
+                              <div className="mt-2 flex items-center justify-between">
+                                {deal.deal_value != null && deal.deal_value > 0 ? (
+                                  <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+                                    ${deal.deal_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  </span>
+                                ) : (
+                                  <span />
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setMoveDialogDeal(deal)
+                                    setSelectedNewStage('')
+                                  }}
+                                  className="flex items-center gap-1 text-[10px] text-muted-foreground opacity-0 transition-colors hover:text-blue-600 group-hover:opacity-100 dark:hover:text-blue-400"
+                                >
+                                  Move <ArrowRight className="h-3 w-3" />
+                                </button>
+                              </div>
+                              {deal.sales_agent && (
+                                <div className="mt-1 flex items-center gap-1">
+                                  <User className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                  <span className="truncate text-[10px] text-muted-foreground">{deal.sales_agent}</span>
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })()
+        )}
       </div>
 
       {/* Move dialog */}
       {moveDialogDeal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => { setMoveDialogDeal(null); setSelectedNewStage('') }}>
-          <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 w-full max-w-md shadow-2xl" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-white mb-1">Move Deal</h3>
-            <p className="text-sm text-slate-400 mb-4">
-              <span className="text-slate-200 font-medium">{moveDialogDeal.name || 'Unknown'}</span>
+          <div className="w-full max-w-md rounded-xl border border-border bg-background p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="mb-1 text-lg font-semibold text-foreground">Move Deal</h3>
+            <p className="mb-4 text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">{moveDialogDeal.name || 'Unknown'}</span>
               {' '}
-              <span className="text-slate-500 font-mono text-xs">({moveDialogDeal.policy_number})</span>
+              <span className="font-mono text-xs text-muted-foreground">({moveDialogDeal.policy_number})</span>
             </p>
 
             <div className="mb-3">
-              <label className="text-xs text-slate-500 block mb-1 uppercase tracking-wider">Current Stage</label>
-              <div className="px-3 py-2 bg-slate-950 rounded-lg text-sm text-slate-300 border border-slate-800">
+              <label className="mb-1 block text-xs uppercase tracking-wider text-muted-foreground">Current Stage</label>
+              <div className="rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-foreground dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
                 {moveDialogDeal.ghl_stage || 'None'}
               </div>
             </div>
 
             <div className="mb-6">
-              <label className="text-xs text-slate-500 block mb-1 uppercase tracking-wider">Move to</label>
+              <label className="mb-1 block text-xs uppercase tracking-wider text-muted-foreground">Move to</label>
               <Select value={selectedNewStage} onValueChange={setSelectedNewStage}>
-                <SelectTrigger className="bg-slate-950 border-slate-800 text-white">
+                <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
                   <SelectValue placeholder="Select stage..." />
                 </SelectTrigger>
-                <SelectContent className="bg-slate-800 border-slate-700 max-h-80">
+                <SelectContent className={cn(adminSelectContent, 'max-h-80')}>
                   {GHL_STAGE_CATEGORIES.map(cat => (
                     <div key={cat.key}>
                       <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: cat.color }}>
@@ -414,7 +488,7 @@ export default function GhlKanbanBoard({ entries, onStageChange, visibleStages, 
                         <SelectItem
                           key={stage}
                           value={stage}
-                          className="text-white"
+                          className={adminSelectItem}
                           disabled={stage === moveDialogDeal.ghl_stage}
                         >
                           {stage}
@@ -430,7 +504,7 @@ export default function GhlKanbanBoard({ entries, onStageChange, visibleStages, 
               <Button
                 variant="ghost"
                 size="sm"
-                className="text-slate-400 hover:text-white"
+                className="text-muted-foreground hover:text-foreground"
                 onClick={() => { setMoveDialogDeal(null); setSelectedNewStage('') }}
                 disabled={isMoving}
               >
@@ -438,7 +512,7 @@ export default function GhlKanbanBoard({ entries, onStageChange, visibleStages, 
               </Button>
               <Button
                 size="sm"
-                className="bg-blue-600 hover:bg-blue-500 text-white"
+                className="bg-blue-600 text-white hover:bg-blue-500"
                 onClick={handleMoveConfirm}
                 disabled={!selectedNewStage || isMoving}
               >

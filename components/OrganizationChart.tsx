@@ -10,6 +10,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+import { useTheme } from '@/components/ThemeProvider'
+import { adminOutlineBtn, adminSelectContent, adminSelectItem, adminSelectTrigger } from '@/lib/adminFieldClasses'
 
 type ChartNode = {
   id: string
@@ -28,24 +30,41 @@ function escapeHtml(s: string): string {
   return div.innerHTML
 }
 
-function getNodeHtml(d: ChartNode): string {
-  const base = 'border-radius:10px;padding:12px 16px;min-width:140px;min-height:70px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 2px 4px rgb(0 0 0/0.2);cursor:pointer;'
-  
+function getNodeHtml(d: ChartNode, light: boolean): string {
+  const base = 'border-radius:10px;padding:12px 16px;min-width:140px;min-height:70px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 2px 4px rgb(0 0 0/0.12);cursor:pointer;'
+
   if (d.type === 'Agency') {
+    if (light) {
+      return `<div style="${base}background:linear-gradient(135deg,#fff 0%,#f8fafc 100%);color:#0f172a;border:2px solid #f97316;">
+      <div style="font-weight:600;font-size:14px;">${escapeHtml(d.name)}</div>
+      <div style="font-size:11px;color:#64748b;">Agency</div>
+    </div>`
+    }
     return `<div style="${base}background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);color:#f8fafc;border:2px solid #f97316;">
       <div style="font-weight:600;font-size:14px;">${escapeHtml(d.name)}</div>
       <div style="font-size:11px;color:#94a3b8;">Agency</div>
     </div>`
   }
-  
+
   if (d.type === 'Agent') {
+    if (light) {
+      return `<div style="${base}background:#f1f5f9;color:#0f172a;border:2px solid #94a3b8;flex-direction:column;">
+      <div style="font-weight:600;font-size:13px;">${escapeHtml(d.name)}</div>
+      <div style="font-size:10px;color:#475569;">Agent${d.email ? ' · ' + escapeHtml(d.email) : ''}</div>
+    </div>`
+    }
     return `<div style="${base}background:#475569;color:#f1f5f9;border:2px solid #64748b;flex-direction:column;">
       <div style="font-weight:600;font-size:13px;">${escapeHtml(d.name)}</div>
       <div style="font-size:10px;color:#94a3b8;">Agent${d.email ? ' · ' + escapeHtml(d.email) : ''}</div>
     </div>`
   }
-  
-  // Carrier
+
+  if (light) {
+    return `<div style="${base}background:linear-gradient(135deg,#f8fafc 0%,#e2e8f0 100%);color:#0f172a;border:2px solid #94a3b8;">
+    <div style="font-weight:600;font-size:13px;">${escapeHtml(d.name)}</div>
+    <div style="font-size:10px;color:#475569;">Carrier</div>
+  </div>`
+  }
   return `<div style="${base}background:linear-gradient(135deg,#1e293b 0%,#334155 100%);color:#e2e8f0;border:2px solid #64748b;">
     <div style="font-weight:600;font-size:13px;">${escapeHtml(d.name)}</div>
     <div style="font-size:10px;color:#94a3b8;">Carrier</div>
@@ -53,6 +72,8 @@ function getNodeHtml(d: ChartNode): string {
 }
 
 export function OrganizationChart() {
+  const { theme } = useTheme()
+  const isLight = theme === 'light'
   const containerRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef = useRef<InstanceType<typeof OrgChart> | null>(null)
   const [agencies, setAgencies] = useState<{ id: string; name: string }[]>([])
@@ -178,7 +199,7 @@ export function OrganizationChart() {
         // View-only: no action on click
         // Carrier assignment is done in the Agents page
       })
-      .nodeContent((node: any) => getNodeHtml((node?.data || {}) as ChartNode))
+      .nodeContent((node: any) => getNodeHtml((node?.data || {}) as ChartNode, isLight))
       .render()
 
     // Center the chart after render
@@ -226,35 +247,35 @@ export function OrganizationChart() {
       chartInstanceRef.current = null
       if (containerRef.current?.firstChild) containerRef.current.innerHTML = ''
     }
-  }, [chartData])
+  }, [chartData, isLight])
 
 
   return (
     <div className="space-y-6">
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+      <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-2 border border-slate-700">
-            <Building2 className="w-4 h-4 text-orange-400" />
-            <Label className="text-sm text-slate-300 font-medium">Agency:</Label>
+          <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2 dark:bg-slate-800 dark:border-slate-700">
+            <Building2 className="h-4 w-4 text-orange-500 dark:text-orange-400" />
+            <Label className="text-sm font-medium text-foreground">Agency:</Label>
             <Select value={selectedAgencyId} onValueChange={setSelectedAgencyId}>
-              <SelectTrigger className="w-[220px] bg-slate-900 border-slate-700 text-white">
+              <SelectTrigger className={cn('h-10 w-[220px]', adminSelectTrigger)}>
                 <SelectValue placeholder="Select an agency" />
               </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
+              <SelectContent className={adminSelectContent}>
                 {agencies.map(a => (
-                  <SelectItem key={a.id} value={a.id} className="text-white focus:bg-slate-700">{a.name}</SelectItem>
+                  <SelectItem key={a.id} value={a.id} className={adminSelectItem}>{a.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
           {selectedAgencyId && (
-            <Button 
-              variant="outline" 
-              size="sm" 
-              className="border-slate-700 text-slate-300 hover:bg-slate-800" 
+            <Button
+              variant="outline"
+              size="sm"
+              className={adminOutlineBtn}
               onClick={loadTreeData}
             >
-              <RefreshCw className="w-4 h-4 mr-2" />
+              <RefreshCw className="mr-2 h-4 w-4" />
               Refresh
             </Button>
           )}
@@ -262,33 +283,33 @@ export function OrganizationChart() {
       </div>
 
       {!selectedAgencyId && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl p-16 flex flex-col items-center justify-center min-h-[500px] text-center">
-          <div className="w-16 h-16 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center mb-4">
-            <Building2 className="w-8 h-8 text-slate-400" />
+        <div className="flex min-h-[500px] flex-col items-center justify-center rounded-xl border-2 border-border bg-muted/20 p-16 text-center dark:border-slate-800 dark:bg-slate-900/40">
+          <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-xl border border-border bg-muted dark:border-slate-700 dark:bg-slate-800">
+            <Building2 className="h-8 w-8 text-muted-foreground" />
           </div>
-          <p className="text-slate-300 text-lg font-medium">Select an agency</p>
-          <p className="text-slate-500 text-sm mt-2 max-w-sm">Choose an agency to see the organization hierarchy: Agency → Agents → Carriers.</p>
+          <p className="text-lg font-medium text-foreground">Select an agency</p>
+          <p className="mt-2 max-w-sm text-sm text-muted-foreground">Choose an agency to see the organization hierarchy: Agency → Agents → Carriers.</p>
         </div>
       )}
 
       {selectedAgencyId && loading && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl p-12 flex flex-col items-center justify-center min-h-[500px]">
-          <Loader2 className="w-12 h-12 animate-spin text-orange-400 mb-4" />
-          <p className="text-slate-300">Loading organization chart...</p>
+        <div className="flex min-h-[500px] flex-col items-center justify-center rounded-xl border-2 border-border bg-muted/20 p-12 dark:border-slate-800 dark:bg-slate-900/40">
+          <Loader2 className="mb-4 h-12 w-12 animate-spin text-orange-500 dark:text-orange-400" />
+          <p className="text-muted-foreground">Loading organization chart...</p>
         </div>
       )}
 
       {selectedAgencyId && !loading && chartData.length > 0 && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl overflow-hidden min-h-[600px]" style={{ minHeight: '700px', width: '100%' }}>
-          <div ref={containerRef} className="w-full h-full min-h-[600px] [&>svg]:max-w-full [&>svg]:h-auto [&>svg]:mx-auto [&>svg]:block" style={{ overflow: 'auto' }} />
+        <div className="min-h-[600px] overflow-hidden rounded-xl border-2 border-border bg-muted/10 dark:border-slate-800 dark:bg-slate-900/40" style={{ minHeight: '700px', width: '100%' }}>
+          <div ref={containerRef} className="h-full min-h-[600px] w-full [&>svg]:mx-auto [&>svg]:block [&>svg]:h-auto [&>svg]:max-w-full" style={{ overflow: 'auto' }} />
         </div>
       )}
 
       {selectedAgencyId && !loading && chartData.length === 0 && (
-        <div className="bg-slate-900 border-2 border-slate-800 rounded-xl p-12 flex flex-col items-center justify-center min-h-[500px] text-center">
-          <Users className="w-12 h-12 text-slate-400 mb-4" />
-          <p className="text-slate-300 text-lg font-medium">No agents found</p>
-          <p className="text-slate-500 text-sm mt-2">Add agents to this agency to see the organization chart.</p>
+        <div className="flex min-h-[500px] flex-col items-center justify-center rounded-xl border-2 border-border bg-muted/20 p-12 text-center dark:border-slate-800 dark:bg-slate-900/40">
+          <Users className="mb-4 h-12 w-12 text-muted-foreground" />
+          <p className="text-lg font-medium text-foreground">No agents found</p>
+          <p className="mt-2 text-sm text-muted-foreground">Add agents to this agency to see the organization chart.</p>
         </div>
       )}
     </div>

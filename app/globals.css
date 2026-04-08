@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
@@ -34,16 +36,20 @@
 }
 
 :root {
-  /* Muted, professional dark palette */
-  --background: 222 47% 7%;          /* bg-slate-950 */
+  --radius: 0.75rem;
+}
+
+/* Dark theme (default class on <html>) */
+html.dark {
+  --background: 222 47% 7%;
   --foreground: 210 40% 98%;
-  --card: 222 36% 10%;               /* bg-slate-900 */
+  --card: 222 36% 10%;
   --card-foreground: 210 40% 96%;
   --popover: 222 36% 10%;
   --popover-foreground: 210 40% 96%;
-  --primary: 221 83% 53%;            /* blue-600 */
+  --primary: 221 83% 53%;
   --primary-foreground: 210 40% 98%;
-  --secondary: 215 20% 20%;          /* subtle slate */
+  --secondary: 215 20% 20%;
   --secondary-foreground: 210 40% 96%;
   --muted: 215 16% 17%;
   --muted-foreground: 217 15% 65%;
@@ -54,17 +60,126 @@
   --border: 215 19% 24%;
   --input: 215 19% 24%;
   --ring: 221 83% 53%;
-  --radius: 0.75rem;
+  --scrollbar-thumb: rgba(148, 163, 184, 0.5);
+  --scrollbar-track: rgba(15, 23, 42, 0.5);
+}
+
+html.light {
+  --background: 210 40% 98%;
+  --foreground: 222 47% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 47% 11%;
+  --primary: 221 83% 53%;
+  --primary-foreground: 210 40% 98%;
+  --secondary: 214 32% 91%;
+  --secondary-foreground: 222 47% 11%;
+  --muted: 210 40% 96%;
+  --muted-foreground: 215 16% 40%;
+  --accent: 210 40% 96%;
+  --accent-foreground: 222 47% 11%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214 32% 88%;
+  --input: 214 32% 88%;
+  --ring: 221 83% 53%;
+  --scrollbar-thumb: rgba(100, 116, 139, 0.45);
+  --scrollbar-track: rgba(241, 245, 249, 0.95);
 }
 
 @layer base {
   * {
     @apply border-border;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+
+  *::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+    border-radius: 100px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 100px;
+    border: 2px solid var(--scrollbar-track);
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    filter: brightness(1.12);
+  }
+
+  *::-webkit-scrollbar-corner {
+    background: var(--scrollbar-track);
   }
 
   body {
     @apply bg-background text-foreground;
-    font-family: 'Inter', system-ui, sans-serif;
+    font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .font-display {
+    font-family: var(--font-display), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  }
+}
+
+/* Main content: depth + subtle grid */
+html.dark .admin-main {
+  background-color: rgb(15 23 42);
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% -30%, rgba(59, 130, 246, 0.14), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 100% 0%, rgba(251, 146, 60, 0.06), transparent 45%),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.3), rgba(15, 23, 42, 1)),
+    linear-gradient(rgba(148, 163, 184, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.03) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    24px 24px,
+    24px 24px;
+  background-attachment: local;
+}
+
+html.light .admin-main {
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(ellipse 100% 80% at 50% -20%, rgba(59, 130, 246, 0.08), transparent 50%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(251, 146, 60, 0.04), transparent 40%),
+    linear-gradient(to bottom, hsl(var(--background)), hsl(var(--background))),
+    linear-gradient(rgba(100, 116, 139, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(100, 116, 139, 0.06) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    24px 24px,
+    24px 24px;
+  background-attachment: local;
+}
+
+.admin-main-inner {
+  animation: admin-fade-in 0.45s ease-out;
+}
+
+.admin-page {
+  @apply w-full min-w-0;
+}
+
+@keyframes admin-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

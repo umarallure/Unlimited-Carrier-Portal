@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@/components/ui/table'
@@ -8,6 +8,32 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Calendar, Loader2, Search } from 'lucide-react'
+import { Plus } from 'lucide-react'
+import { DealTrackerPolicyDialog, type AgencyCarrierOption, type DealTrackerPolicyForm } from '@/components/DealTrackerPolicyDialog'
+import {
+  ActiveFilterChips,
+  FilterBarHeader,
+  QuickDateRangeChips,
+} from '@/components/filters/SmartFilters'
+import { PageHeader } from '@/components/PageHeader'
+import { cn } from '@/lib/utils'
+import {
+  adminCardHeaderBar,
+  adminCardTitle,
+  adminDateInput,
+  adminExpandRowBg,
+  adminInputSm,
+  adminNestedTableShell,
+  adminOutlineBtn,
+  adminPaginationShell,
+  adminSelectContent,
+  adminSelectItem,
+  adminSelectTrigger,
+  adminTableRowInteractive,
+  adminTdMuted,
+  adminTdStrong,
+  adminThPlain,
+} from '@/lib/adminFieldClasses'
 
 type CommissionRow = {
   id?: string
@@ -31,17 +57,20 @@ type CarrierRecord = {
   code: string | null
 }
 
-type CarrierFilter = 'ALL' | 'AMAM' | 'AETNA'
-
 function policyGroupKey(row: { agency_carrier_id: string; policy_number: string }) {
   return `${row.agency_carrier_id}::${row.policy_number}`
 }
 
 export default function CommissionReportPage() {
+  const inlineEditInput = 'h-9 min-w-[110px] px-2 text-sm'
+  const inlineEditInputWide = 'h-9 min-w-[150px] px-2 text-sm'
+  const inlineEditInputNarrow = 'h-9 min-w-[90px] px-2 text-sm'
+
   const [rows, setRows] = useState<CommissionRow[]>([])
   const [allRows, setAllRows] = useState<CommissionRow[]>([])
   const [loading, setLoading] = useState(true)
-  const [carrierCode, setCarrierCode] = useState<CarrierFilter>('ALL')
+  const [carrierCode, setCarrierCode] = useState<string>('ALL')
+  const [sourceFilter, setSourceFilter] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
@@ -50,11 +79,18 @@ export default function CommissionReportPage() {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
+  const [agencyCarrierOptions, setAgencyCarrierOptions] = useState<AgencyCarrierOption[]>([])
+  const [policyDialogOpen, setPolicyDialogOpen] = useState(false)
+  const [policyDialogMode, setPolicyDialogMode] = useState<'create' | 'edit'>('create')
+  const [policyDraft, setPolicyDraft] = useState<Partial<DealTrackerPolicyForm>>({})
+  const [savingPolicy, setSavingPolicy] = useState(false)
+  const [editMode, setEditMode] = useState(false)
+  const [savingInlineEdits, setSavingInlineEdits] = useState(false)
+  const [draftByPolicyKey, setDraftByPolicyKey] = useState<Record<string, any>>({})
 
-  useEffect(() => {
-    const fetchAllCommissionRows = async () => {
-      setLoading(true)
-      try {
+  const fetchAllCommissionRows = async () => {
+    setLoading(true)
+    try {
         const PAGE_SIZE = 1000
         let all: CommissionRow[] = []
         let from = 0
@@ -136,17 +172,66 @@ export default function CommissionReportPage() {
           setCarrierCodeById(byId)
           setCarrierCodeByName(byName)
         }
-      } catch (err) {
-        console.error('Error loading commission report:', err)
-        setRows([])
-        setAllRows([])
-      } finally {
-        setLoading(false)
-      }
-    }
+      const { data: agencyCarrierRows } = await supabase
+        .from('agency_carriers')
+        .select(`
+          id,
+          carrier_id,
+          agencies ( name ),
+          carriers ( id, name )
+        `)
+        .order('created_at', { ascending: true })
 
+      const options: AgencyCarrierOption[] = (agencyCarrierRows || []).map((row: any) => ({
+        id: row.id,
+        agencyName: row.agencies?.name || 'Unknown agency',
+        carrierName: row.carriers?.name || 'Unknown carrier',
+        carrierId: row.carriers?.id || row.carrier_id || null,
+      }))
+      setAgencyCarrierOptions(options)
+    } catch (err) {
+      console.error('Error loading commission report:', err)
+      setRows([])
+      setAllRows([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
     fetchAllCommissionRows()
   }, [])
+
+  const sourcesByPolicyKey = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const r of allRows) {
+      const k = policyGroupKey(r)
+      if (!m.has(k)) m.set(k, new Set())
+      const st = r.source_table
+      if (st) m.get(k)!.add(st)
+    }
+    return m
+  }, [allRows])
+
+  const uniqueSources = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of allRows) {
+      if (r.source_table) s.add(r.source_table)
+    }
+    return Array.from(s).sort()
+  }, [allRows])
+
+  const carrierCodeOptions = useMemo(() => {
+    const codes = new Set<string>()
+    for (const r of allRows) {
+      const code =
+        (r.carrier_id && carrierCodeById.get(r.carrier_id)) ??
+        carrierCodeByName.get(r.carrier) ??
+        (r.carrier ? String(r.carrier).trim().toUpperCase() : '')
+      if (code) codes.add(String(code).toUpperCase())
+    }
+    return Array.from(codes).sort()
+  }, [allRows, carrierCodeById, carrierCodeByName])
 
   const normalizeDate = (value: any): Date | null => {
     if (!value) return null
@@ -176,16 +261,18 @@ export default function CommissionReportPage() {
       if (!dt || dt > to) return false
     }
 
-    // Carrier filter using carrier codes when possible
-    const code =
+    const code = String(
       (row.carrier_id && carrierCodeById.get(row.carrier_id)) ??
-      carrierCodeByName.get(row.carrier) ??
-      row.carrier.toUpperCase()
+        carrierCodeByName.get(row.carrier) ??
+        row.carrier ??
+        ''
+    ).toUpperCase()
 
-    if (carrierCode === 'AMAM') {
-      if (code !== 'AMAM') return false
-    } else if (carrierCode === 'AETNA') {
-      if (code !== 'AETNA') return false
+    if (carrierCode !== 'ALL' && code !== carrierCode.toUpperCase()) return false
+
+    if (sourceFilter !== 'all') {
+      const set = sourcesByPolicyKey.get(policyGroupKey(row))
+      if (!set || !set.has(sourceFilter)) return false
     }
 
     if (!searchTerm) return true
@@ -201,123 +288,348 @@ export default function CommissionReportPage() {
   useEffect(() => {
     setCurrentPage(1)
     setExpandedKey(null)
-  }, [carrierCode, searchTerm, dateFrom, dateTo])
+  }, [carrierCode, sourceFilter, searchTerm, dateFrom, dateTo])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const startIndex = (currentPage - 1) * pageSize
   const endIndex = startIndex + pageSize
   const paginated = filtered.slice(startIndex, endIndex)
 
-  return (
-    <div className="space-y-4 animate-in fade-in duration-500">
-      <div className="flex items-center space-x-3">
-        <div className="w-12 h-12 rounded-xl bg-slate-900 flex items-center justify-center border border-slate-800">
-          <span className="text-lg font-semibold text-orange-400">$</span>
-        </div>
-        <div>
-          <h1 className="text-3xl font-bold text-white">Commission Report</h1>
-          <p className="text-gray-400">
-            Read-only view of normalized commission rows from all carriers, formatted like your Excel report.
-          </p>
-        </div>
-      </div>
+  const filterActiveCount = useMemo(() => {
+    let n = 0
+    if (searchTerm.trim()) n++
+    if (carrierCode !== 'ALL') n++
+    if (sourceFilter !== 'all') n++
+    if (dateFrom || dateTo) n++
+    return n
+  }, [searchTerm, carrierCode, sourceFilter, dateFrom, dateTo])
 
-      <Card className="bg-slate-900 border-slate-800">
-        <CardHeader className="border-b border-slate-800">
-          <CardTitle className="text-white text-base">Filters</CardTitle>
+  const activeChips = useMemo(() => {
+    const items: { key: string; label: string; onRemove: () => void }[] = []
+    if (searchTerm.trim())
+      items.push({
+        key: 'q',
+        label: `Search: ${searchTerm.trim()}`,
+        onRemove: () => setSearchTerm(''),
+      })
+    if (carrierCode !== 'ALL')
+             items.push({
+        key: 'car',
+        label: `Carrier: ${carrierCode}`,
+        onRemove: () => setCarrierCode('ALL'),
+      })
+    if (sourceFilter !== 'all')
+      items.push({
+        key: 'src',
+        label: `Source: ${sourceFilter}`,
+        onRemove: () => setSourceFilter('all'),
+      })
+    if (dateFrom || dateTo)
+      items.push({
+        key: 'd',
+        label: `Date: ${dateFrom || '…'} → ${dateTo || '…'}`,
+        onRemove: () => {
+          setDateFrom('')
+          setDateTo('')
+        },
+      })
+    return items
+  }, [searchTerm, carrierCode, sourceFilter, dateFrom, dateTo])
+
+  const clearAllFilters = () => {
+    setSearchTerm('')
+    setCarrierCode('ALL')
+    setSourceFilter('all')
+    setDateFrom('')
+    setDateTo('')
+  }
+
+  const openCreatePolicyDialog = () => {
+    setPolicyDialogMode('create')
+    setPolicyDraft({})
+    setPolicyDialogOpen(true)
+  }
+
+  const startInlineEdit = () => {
+    const next: Record<string, any> = {}
+    filtered.forEach((row) => {
+      const key = policyGroupKey(row)
+      const detailRows = allRows.filter(
+        (r) => r.agency_carrier_id === row.agency_carrier_id && r.policy_number === row.policy_number
+      )
+      const advanceTotal = detailRows.reduce((sum, r) => sum + (r.advance_amount ?? 0), 0)
+      const chargeBackTotal = detailRows.reduce((sum, r) => sum + (r.charge_back_amount ?? 0), 0)
+      next[key] = {
+        name: row.name ?? '',
+        date: row.date ?? '',
+        policy_number: row.policy_number ?? '',
+        carrier: row.carrier ?? '',
+        sales_agent: row.sales_agent ?? '',
+        commission_rate: row.commission_rate != null ? String(row.commission_rate) : '',
+        advance_amount: String(advanceTotal || ''),
+        charge_back_amount: String(chargeBackTotal || ''),
+      }
+    })
+    setDraftByPolicyKey(next)
+    setEditMode(true)
+  }
+
+  const cancelInlineEdit = () => {
+    setEditMode(false)
+    setDraftByPolicyKey({})
+  }
+
+  const updateDraft = (key: string, field: string, value: string) => {
+    setDraftByPolicyKey((prev) => ({
+      ...prev,
+      [key]: { ...(prev[key] || {}), [field]: value },
+    }))
+  }
+
+  const saveInlineEdits = async () => {
+    setSavingInlineEdits(true)
+    try {
+      for (const row of filtered) {
+        const key = policyGroupKey(row)
+        const draft = draftByPolicyKey[key]
+        if (!draft || !row.id) continue
+        const payload = {
+          name: String(draft.name ?? '').trim() || null,
+          date: String(draft.date ?? '').trim() || null,
+          policy_number: String(draft.policy_number ?? '').trim(),
+          carrier: String(draft.carrier ?? '').trim(),
+          sales_agent: String(draft.sales_agent ?? '').trim() || null,
+          commission_rate:
+            String(draft.commission_rate ?? '').trim() === '' ? null : Number.parseFloat(String(draft.commission_rate)),
+          advance_amount:
+            String(draft.advance_amount ?? '').trim() === '' ? null : Number.parseFloat(String(draft.advance_amount)),
+          charge_back_amount:
+            String(draft.charge_back_amount ?? '').trim() === '' ? null : Number.parseFloat(String(draft.charge_back_amount)),
+          updated_at: new Date().toISOString(),
+        }
+        const { error } = await supabase.from('commission_tracker').update(payload).eq('id', row.id)
+        if (error) throw error
+      }
+      await fetchAllCommissionRows()
+      setEditMode(false)
+      setDraftByPolicyKey({})
+    } catch (error: any) {
+      alert(error?.message || 'Failed to save commission edits.')
+    } finally {
+      setSavingInlineEdits(false)
+    }
+  }
+
+  const handleSavePolicy = async (form: DealTrackerPolicyForm) => {
+    const selected = agencyCarrierOptions.find((o) => o.id === form.agency_carrier_id)
+    if (!selected) {
+      alert('Please select a valid agency + carrier.')
+      return
+    }
+
+    const now = new Date().toISOString()
+    const dealValue =
+      form.deal_value.trim() === '' ? null : Number.parseFloat(form.deal_value)
+    if (form.deal_value.trim() !== '' && Number.isNaN(dealValue)) {
+      alert('Deal value must be a valid number.')
+      return
+    }
+
+    const payload = {
+      agency_carrier_id: form.agency_carrier_id,
+      carrier: selected.carrierName,
+      carrier_id: selected.carrierId,
+      policy_number: form.policy_number.trim(),
+      name: form.name.trim() || null,
+      policy_status: form.policy_status.trim() || null,
+      deal_value: dealValue,
+      sales_agent: form.sales_agent.trim() || null,
+      writing_number: form.writing_number.trim() || null,
+      call_center: form.call_center.trim() || null,
+      phone_number: form.phone_number.trim() || null,
+      deal_creation_date: form.deal_creation_date || null,
+      effective_date: form.effective_date || null,
+      ghl_stage: form.ghl_stage.trim() || null,
+      notes: form.notes.trim() || null,
+      last_updated: now,
+      updated_at: now,
+    }
+
+    setSavingPolicy(true)
+    try {
+      if (policyDialogMode === 'edit' && form.id) {
+        const { error } = await supabase
+          .from('deal_tracker')
+          .update(payload)
+          .eq('id', form.id)
+        if (error) throw error
+      } else {
+        const { error } = await supabase
+          .from('deal_tracker')
+          .insert({ ...payload, created_at: now })
+        if (error) throw error
+      }
+      setPolicyDialogOpen(false)
+      await fetchAllCommissionRows()
+    } catch (error: any) {
+      alert(error?.message || 'Failed to save policy.')
+    } finally {
+      setSavingPolicy(false)
+    }
+  }
+
+  return (
+    <div className="admin-page space-y-6">
+      <PageHeader
+        title="Commission Report"
+        description="Read-only view of normalized commission rows from all carriers, formatted like your Excel report."
+        icon={<span className="text-xl font-bold text-orange-400">$</span>}
+      />
+
+      <Card>
+        <CardHeader className={`space-y-3 pb-5 ${adminCardHeaderBar}`}>
+          <FilterBarHeader
+            title="Find commissions"
+            description="Search any policy, narrow by carrier and data source, or jump to a common date range. Filters apply to one row per policy (transactions stay grouped)."
+            activeCount={filterActiveCount}
+            onClearAll={filterActiveCount ? clearAllFilters : undefined}
+          />
         </CardHeader>
-        <CardContent className="space-y-4 pt-4">
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="relative min-w-[220px] flex-1 max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+        <CardContent className="space-y-5 pt-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative min-w-[220px] flex-1 max-w-md">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 transform text-muted-foreground" />
               <Input
-                placeholder="Search by name, policy number, or sales agent..."
+                placeholder="Name, policy #, sales agent…"
                 value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                className="pl-8 h-9 bg-slate-950 border-slate-800 text-white placeholder:text-slate-500 text-sm"
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className={cn(adminInputSm, 'pl-8')}
               />
             </div>
 
-            <Select value={carrierCode} onValueChange={value => setCarrierCode(value as CarrierFilter)}>
-              <SelectTrigger className="h-9 w-[160px] bg-slate-950 border-slate-800 text-white text-sm">
-                <SelectValue placeholder="Select carrier" />
+            <Select value={carrierCode} onValueChange={setCarrierCode}>
+              <SelectTrigger className={cn(adminSelectTrigger, 'h-9 w-[min(100%,200px)] text-sm')}>
+                <SelectValue placeholder="Carrier" />
               </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
-                <SelectItem value="ALL" className="text-white">
-                  All Carriers
+              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
+                <SelectItem value="ALL" className={adminSelectItem}>
+                  All carriers
                 </SelectItem>
-                <SelectItem value="AMAM" className="text-white">
-                  AMAM
-                </SelectItem>
-                <SelectItem value="AETNA" className="text-white">
-                  Aetna
-                </SelectItem>
+                {carrierCodeOptions.map((c) => (
+                  <SelectItem key={c} value={c} className={adminSelectItem}>
+                    {c}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
 
-            <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-orange-400 shrink-0" />
-              <Input
-                type="date"
-                value={dateFrom}
-                onChange={e => setDateFrom(e.target.value)}
-                className="bg-slate-950 border-slate-800 text-white w-[150px] h-9 text-sm"
-                title="From date"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-orange-400 shrink-0" />
-              <Input
-                type="date"
-                value={dateTo}
-                onChange={e => setDateTo(e.target.value)}
-                className="bg-slate-950 border-slate-800 text-white w-[150px] h-9 text-sm"
-                title="To date"
-              />
-            </div>
-
-            {(searchTerm || dateFrom || dateTo) && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setSearchTerm('')
-                  setDateFrom('')
-                  setDateTo('')
-                }}
-                className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800"
-              >
-                Clear filters
-              </Button>
-            )}
+            <Select value={sourceFilter} onValueChange={setSourceFilter}>
+              <SelectTrigger className={cn(adminSelectTrigger, 'h-9 w-[min(100%,220px)] text-sm')}>
+                <SelectValue placeholder="Source" />
+              </SelectTrigger>
+              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
+                <SelectItem value="all" className={adminSelectItem}>
+                  All sources
+                </SelectItem>
+                {uniqueSources.map((s) => (
+                  <SelectItem key={s} value={s} className={cn(adminSelectItem, 'font-mono text-xs')}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
+
+          <QuickDateRangeChips
+            dateFrom={dateFrom}
+            dateTo={dateTo}
+            onRangeChange={(f, t) => {
+              setDateFrom(f)
+              setDateTo(t)
+            }}
+          />
+
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex flex-col gap-1">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">From</span>
+              <div className="flex items-center gap-2">
+                <Calendar className="h-4 w-4 shrink-0 text-orange-500 dark:text-orange-400" />
+                <Input
+                  type="date"
+                  value={dateFrom}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                  className={adminDateInput}
+                  title="From date"
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">To</span>
+              <div className="flex items-center gap-2">
+                <Calendar className="h-4 w-4 shrink-0 text-orange-500 dark:text-orange-400" />
+                <Input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  className={adminDateInput}
+                  title="To date"
+                />
+              </div>
+            </div>
+          </div>
+
+          <ActiveFilterChips items={activeChips} />
         </CardContent>
       </Card>
 
-      <Card className="bg-slate-900 border-slate-800">
-        <CardHeader className="border-b border-slate-800 flex flex-row items-center justify-between">
-          <CardTitle className="text-white text-base">
-            Commission report table{' '}
-            <span className="text-xs text-slate-400 font-normal">
-              ({filtered.length} row{filtered.length === 1 ? '' : 's'})
-            </span>
-          </CardTitle>
+      <Card>
+        <CardHeader className={cn('flex flex-row items-center justify-between pb-5', adminCardHeaderBar)}>
+          <div className="flex items-center gap-3">
+            <CardTitle className={adminCardTitle}>
+              Commission report{' '}
+              <span className="text-xs font-normal text-muted-foreground">
+                ({filtered.length} row{filtered.length === 1 ? '' : 's'})
+              </span>
+            </CardTitle>
+            <Button variant="outline" size="sm" onClick={openCreatePolicyDialog} className={adminOutlineBtn}>
+              <Plus className="mr-1 h-4 w-4" />
+              Add policy
+            </Button>
+            {!editMode ? (
+              <Button variant="outline" size="sm" onClick={startInlineEdit} className={adminOutlineBtn}>
+                Edit table
+              </Button>
+            ) : (
+              <>
+                <Button variant="outline" size="sm" onClick={cancelInlineEdit} className={adminOutlineBtn}>
+                  Cancel edit
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={saveInlineEdits}
+                  disabled={savingInlineEdits}
+                  className="bg-blue-600 text-white hover:bg-blue-700"
+                >
+                  {savingInlineEdits ? 'Saving...' : 'Save changes'}
+                </Button>
+              </>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
-                <TableRow className="border-b border-slate-800 hover:bg-transparent">
-                  <TableHead className="text-slate-300 font-semibold">Name</TableHead>
-                  <TableHead className="text-slate-300 font-semibold">Date</TableHead>
-                  <TableHead className="text-slate-300 font-semibold">Policy Number</TableHead>
-                  <TableHead className="text-slate-300 font-semibold">Carrier</TableHead>
-                  <TableHead className="text-slate-300 font-semibold">Sales Agent</TableHead>
-                  <TableHead className="text-slate-300 font-semibold text-right">Commission Rate</TableHead>
-                  <TableHead className="text-slate-300 font-semibold text-right">Advance</TableHead>
-                  <TableHead className="text-slate-300 font-semibold text-right">Charge Back</TableHead>
-                  <TableHead className="text-slate-300 font-semibold text-center">Transactions</TableHead>
+                <TableRow className="border-b border-border hover:bg-transparent odd:bg-transparent even:bg-transparent dark:border-slate-800">
+                  <TableHead className={adminThPlain}>Name</TableHead>
+                  <TableHead className={adminThPlain}>Date</TableHead>
+                  <TableHead className={adminThPlain}>Policy Number</TableHead>
+                  <TableHead className={adminThPlain}>Carrier</TableHead>
+                  <TableHead className={adminThPlain}>Sales Agent</TableHead>
+                  <TableHead className={`${adminThPlain} text-right`}>Commission Rate</TableHead>
+                  <TableHead className={`${adminThPlain} text-right`}>Advance</TableHead>
+                  <TableHead className={`${adminThPlain} text-right`}>Charge Back</TableHead>
+                  <TableHead className={`${adminThPlain} text-center`}>Transactions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -329,7 +641,7 @@ export default function CommissionReportPage() {
                   </TableRow>
                 ) : filtered.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center text-slate-400 py-8">
+                    <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
                       No commission rows found for the current filters.
                     </TableCell>
                   </TableRow>
@@ -366,57 +678,65 @@ export default function CommissionReportPage() {
 
                     return (
                       <Fragment key={row.id || `${policyNumber}-${idx}`}>
-                        <TableRow className="border-b border-slate-800 hover:bg-slate-800/40">
-                          <TableCell className="text-slate-100">{name}</TableCell>
-                          <TableCell className="text-slate-300">
-                            {row.date || '-'}
+                        <TableRow className={adminTableRowInteractive}>
+                          <TableCell className={adminTdStrong}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.name ?? ''} onChange={(e) => updateDraft(key, 'name', e.target.value)} className={inlineEditInputWide} /> : name}
                           </TableCell>
-                          <TableCell className="text-slate-300 font-mono text-sm">{policyNumber}</TableCell>
-                          <TableCell className="text-slate-300">{carrierCodeDisplay}</TableCell>
-                          <TableCell className="text-slate-300">{salesAgent}</TableCell>
-                          <TableCell className="text-slate-300 text-right">
-                            {commissionRate != null ? String(commissionRate) : ''}
+                          <TableCell className={adminTdMuted}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.date ?? ''} onChange={(e) => updateDraft(key, 'date', e.target.value)} className={inlineEditInput} /> : (row.date || '-')}
                           </TableCell>
-                          <TableCell className="text-slate-300 text-right">
-                            {advanceTotal !== 0 ? formatMoney(advanceTotal) : ''}
+                          <TableCell className={`${adminTdMuted} font-mono text-sm`}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.policy_number ?? ''} onChange={(e) => updateDraft(key, 'policy_number', e.target.value)} className={cn(inlineEditInput, 'font-mono')} /> : policyNumber}
                           </TableCell>
-                          <TableCell className="text-slate-300 text-right">
-                            {chargeBackTotal !== 0 ? formatMoney(chargeBackTotal) : ''}
+                          <TableCell className={adminTdMuted}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.carrier ?? ''} onChange={(e) => updateDraft(key, 'carrier', e.target.value)} className={inlineEditInput} /> : carrierCodeDisplay}
                           </TableCell>
-                          <TableCell className="text-center text-slate-300 text-sm whitespace-nowrap">
+                          <TableCell className={adminTdMuted}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.sales_agent ?? ''} onChange={(e) => updateDraft(key, 'sales_agent', e.target.value)} className={inlineEditInput} /> : salesAgent}
+                          </TableCell>
+                          <TableCell className={`${adminTdMuted} text-right`}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.commission_rate ?? ''} onChange={(e) => updateDraft(key, 'commission_rate', e.target.value)} className={inlineEditInputNarrow} /> : (commissionRate != null ? String(commissionRate) : '')}
+                          </TableCell>
+                          <TableCell className={`${adminTdMuted} text-right`}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.advance_amount ?? ''} onChange={(e) => updateDraft(key, 'advance_amount', e.target.value)} className={inlineEditInputNarrow} /> : (advanceTotal !== 0 ? formatMoney(advanceTotal) : '')}
+                          </TableCell>
+                          <TableCell className={`${adminTdMuted} text-right`}>
+                            {editMode ? <Input value={draftByPolicyKey[key]?.charge_back_amount ?? ''} onChange={(e) => updateDraft(key, 'charge_back_amount', e.target.value)} className={inlineEditInputNarrow} /> : (chargeBackTotal !== 0 ? formatMoney(chargeBackTotal) : '')}
+                          </TableCell>
+                          <TableCell className={`${adminTdMuted} whitespace-nowrap text-center text-sm`}>
                             {transactionCount > 1 ? (
                               <button
                                 type="button"
                                 onClick={() => setExpandedKey(prev => (prev === key ? null : key))}
-                                className="inline-flex items-center px-2 py-1.5 rounded-md text-orange-400 hover:text-orange-300 hover:bg-slate-800 transition-colors"
+                                className="inline-flex items-center rounded-md px-2 py-1.5 text-orange-600 transition-colors hover:bg-muted hover:text-orange-500 dark:text-orange-400 dark:hover:bg-slate-800 dark:hover:text-orange-300"
                                 title="View individual commission transactions for this policy"
                               >
-                                <span className="font-mono mr-1">{transactionCount}</span>
+                                <span className="mr-1 font-mono">{transactionCount}</span>
                                 <span>{expandedKey === key ? 'Hide' : 'Details'}</span>
                               </button>
                             ) : (
-                              <span className="text-slate-500">1</span>
+                              <span className="text-muted-foreground">1</span>
                             )}
                           </TableCell>
                         </TableRow>
                         {expandedKey === key && transactionCount > 1 && (
-                          <TableRow className="border-b border-slate-900 bg-slate-950/60">
+                          <TableRow className={adminExpandRowBg}>
                             <TableCell colSpan={9} className="p-0">
-                              <div className="px-4 py-3 border-t border-slate-800">
-                                <div className="text-xs font-semibold text-slate-300 mb-2">
+                              <div className="border-t border-border px-4 py-3 dark:border-slate-800">
+                                <div className="mb-2 text-xs font-semibold text-foreground dark:text-slate-300">
                                   Individual commission transactions for policy {policyNumber}
                                 </div>
-                                <div className="overflow-x-auto rounded-md border border-slate-800 bg-slate-950/80">
+                                <div className={adminNestedTableShell}>
                                   <Table>
                                     <TableHeader>
-                                      <TableRow className="border-b border-slate-800">
-                                        <TableHead className="text-slate-300 text-xs">Date</TableHead>
-                                        <TableHead className="text-slate-300 text-xs">Name</TableHead>
-                                        <TableHead className="text-slate-300 text-xs">Sales Agent</TableHead>
-                                        <TableHead className="text-slate-300 text-xs text-right">Commission Rate</TableHead>
-                                        <TableHead className="text-slate-300 text-xs text-right">Advance</TableHead>
-                                        <TableHead className="text-slate-300 text-xs text-right">Charge Back</TableHead>
-                                        <TableHead className="text-slate-300 text-xs">Source</TableHead>
+                                      <TableRow className="border-b border-border dark:border-slate-800">
+                                        <TableHead className={`${adminThPlain} text-xs`}>Date</TableHead>
+                                        <TableHead className={`${adminThPlain} text-xs`}>Name</TableHead>
+                                        <TableHead className={`${adminThPlain} text-xs`}>Sales Agent</TableHead>
+                                        <TableHead className={`${adminThPlain} text-right text-xs`}>Commission Rate</TableHead>
+                                        <TableHead className={`${adminThPlain} text-right text-xs`}>Advance</TableHead>
+                                        <TableHead className={`${adminThPlain} text-right text-xs`}>Charge Back</TableHead>
+                                        <TableHead className={`${adminThPlain} text-xs`}>Source</TableHead>
                                       </TableRow>
                                     </TableHeader>
                                     <TableBody>
@@ -429,26 +749,26 @@ export default function CommissionReportPage() {
                                         })
                                         .map((tx, i) => {
                                           return (
-                                            <TableRow key={tx.id || `${key}-tx-${i}`} className="border-b border-slate-900/60">
-                                              <TableCell className="text-slate-300 text-xs">
+                                            <TableRow key={tx.id || `${key}-tx-${i}`} className="border-b border-border/80 dark:border-slate-900/60">
+                                              <TableCell className={`${adminTdMuted} text-xs`}>
                                                 {tx.date || '-'}
                                               </TableCell>
-                                              <TableCell className="text-slate-200 text-xs">
+                                              <TableCell className={`${adminTdStrong} text-xs`}>
                                                 {tx.name || '-'}
                                               </TableCell>
-                                              <TableCell className="text-slate-300 text-xs">
+                                              <TableCell className={`${adminTdMuted} text-xs`}>
                                                 {tx.sales_agent || '-'}
                                               </TableCell>
-                                              <TableCell className="text-slate-300 text-right text-xs">
+                                              <TableCell className={`${adminTdMuted} text-right text-xs`}>
                                                 {tx.commission_rate != null ? String(tx.commission_rate) : ''}
                                               </TableCell>
-                                              <TableCell className="text-slate-300 text-right text-xs">
+                                              <TableCell className={`${adminTdMuted} text-right text-xs`}>
                                                 {tx.advance_amount != null ? formatMoney(tx.advance_amount) : ''}
                                               </TableCell>
-                                              <TableCell className="text-slate-300 text-right text-xs">
+                                              <TableCell className={`${adminTdMuted} text-right text-xs`}>
                                                 {tx.charge_back_amount != null ? formatMoney(tx.charge_back_amount) : ''}
                                               </TableCell>
-                                              <TableCell className="text-slate-400 text-xs">
+                                              <TableCell className="text-xs text-muted-foreground dark:text-slate-400">
                                                 {tx.source_table || ''}
                                               </TableCell>
                                             </TableRow>
@@ -472,27 +792,27 @@ export default function CommissionReportPage() {
       </Card>
 
       {filtered.length > 0 && (
-        <div className="flex items-center justify-between px-4 py-3 border border-slate-800 bg-slate-900/50 rounded-lg">
-          <div className="text-sm text-slate-400">
+        <div className={adminPaginationShell}>
+          <div className="text-sm text-muted-foreground">
             Showing {filtered.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, filtered.length)} of {filtered.length} rows
           </div>
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-sm text-slate-400">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <span>Rows per page:</span>
               <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1) }}>
-                <SelectTrigger className="h-8 w-24 bg-slate-950 border-slate-800 text-white text-xs">
+                <SelectTrigger className={cn(adminSelectTrigger, 'h-8 w-24 text-xs')}>
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent className="bg-slate-800 border-slate-700">
-                  <SelectItem value="25" className="text-white">25</SelectItem>
-                  <SelectItem value="50" className="text-white">50</SelectItem>
-                  <SelectItem value="100" className="text-white">100</SelectItem>
-                  <SelectItem value="250" className="text-white">250</SelectItem>
+                <SelectContent className={adminSelectContent}>
+                  <SelectItem value="25" className={adminSelectItem}>25</SelectItem>
+                  <SelectItem value="50" className={adminSelectItem}>50</SelectItem>
+                  <SelectItem value="100" className={adminSelectItem}>100</SelectItem>
+                  <SelectItem value="250" className={adminSelectItem}>250</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-slate-400">
+              <span className="text-sm text-muted-foreground">
                 Page {currentPage} of {totalPages}
               </span>
               <div className="flex items-center gap-2">
@@ -501,7 +821,7 @@ export default function CommissionReportPage() {
                   size="sm"
                   onClick={() => setCurrentPage(1)}
                   disabled={currentPage === 1}
-                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                  className={adminOutlineBtn}
                 >
                   First
                 </Button>
@@ -510,7 +830,7 @@ export default function CommissionReportPage() {
                   size="sm"
                   onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                   disabled={currentPage === 1}
-                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                  className={adminOutlineBtn}
                 >
                   Previous
                 </Button>
@@ -519,7 +839,7 @@ export default function CommissionReportPage() {
                   size="sm"
                   onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                   disabled={currentPage === totalPages}
-                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                  className={adminOutlineBtn}
                 >
                   Next
                 </Button>
@@ -528,7 +848,7 @@ export default function CommissionReportPage() {
                   size="sm"
                   onClick={() => setCurrentPage(totalPages)}
                   disabled={currentPage === totalPages}
-                  className="bg-slate-950 border-slate-800 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                  className={adminOutlineBtn}
                 >
                   Last
                 </Button>
@@ -536,6 +856,17 @@ export default function CommissionReportPage() {
             </div>
           </div>
         </div>
+      )}
+      {policyDialogOpen && (
+        <DealTrackerPolicyDialog
+          open={policyDialogOpen}
+          onOpenChange={setPolicyDialogOpen}
+          saving={savingPolicy}
+          mode={policyDialogMode}
+          initialValue={policyDraft}
+          agencyCarrierOptions={agencyCarrierOptions}
+          onSave={handleSavePolicy}
+        />
       )}
     </div>
   )

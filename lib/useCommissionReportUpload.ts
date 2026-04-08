@@ -7,6 +7,7 @@
 
 import { useState, useCallback, useRef } from 'react'
 import { supabase } from './supabaseClient'
+import { toYmdForDateInput } from './calendarDate'
 
 type DealTrackerRow = {
   policy_number: string
@@ -61,6 +62,35 @@ export type CommissionDuplicateIssue = {
   amountDisplay: string
 }
 
+/** Name, policy #, or carrier cannot be empty or a lone "-" when saving commission rows. */
+export function isCommissionRowIncomplete(row: CommissionDisplayRow): boolean {
+  const bad = (v: string) => {
+    const t = (v || '').trim()
+    return t === '' || t === '-'
+  }
+  return bad(row.name) || bad(row.policy_number) || bad(row.carrier)
+}
+
+/** Returns an error message if any row is invalid; otherwise null. */
+export function validateCommissionRowsForSave(rows: CommissionDisplayRow[]): string | null {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    const n = (row.name || '').trim()
+    const p = (row.policy_number || '').trim()
+    const c = (row.carrier || '').trim()
+    if (n === '' || n === '-') {
+      return `Row ${i + 1}: Name cannot be empty or "-" before saving.`
+    }
+    if (p === '' || p === '-') {
+      return `Row ${i + 1}: Policy number cannot be empty or "-" before saving.`
+    }
+    if (c === '' || c === '-') {
+      return `Row ${i + 1}: Carrier cannot be empty or "-" before saving.`
+    }
+  }
+  return null
+}
+
 function normalizePolicyNumber(p: string | undefined): string {
   return (p || '').trim()
 }
@@ -77,12 +107,9 @@ function netCommissionAmountForDupes(row: CommissionDisplayRow): number | null {
 function resolveRowDateYmdForDupes(
   row: CommissionDisplayRow,
   carrierCode: string,
-  corebridgeStatementDate: string
+  fileStatementDate: string
 ): string {
-  const raw =
-    carrierCode === 'COREBRIDGE' && corebridgeStatementDate.trim()
-      ? corebridgeStatementDate
-      : row.date
+  const raw = fileStatementDate.trim() ? fileStatementDate : row.date
   if (!raw?.trim()) return ''
   const d = new Date(raw.includes('T') ? raw : `${raw}T12:00:00`)
   if (Number.isNaN(d.getTime())) return String(raw).trim().slice(0, 10)
@@ -93,11 +120,11 @@ function resolveRowDateYmdForDupes(
 export function buildCommissionDuplicateKey(
   row: CommissionDisplayRow,
   carrierCode: string,
-  corebridgeStatementDate: string
+  fileStatementDate: string
 ): string | null {
   const policy = normalizePolicyNumber(row.policy_number)
   if (!policy) return null
-  const dateYmd = resolveRowDateYmdForDupes(row, carrierCode, corebridgeStatementDate)
+  const dateYmd = resolveRowDateYmdForDupes(row, carrierCode, fileStatementDate)
   if (!dateYmd) return null
   const amt = netCommissionAmountForDupes(row)
   if (amt == null) return null
@@ -107,13 +134,13 @@ export function buildCommissionDuplicateKey(
 export function findWithinFileCommissionDuplicates(
   rows: CommissionDisplayRow[],
   carrierCode: string,
-  corebridgeStatementDate: string
+  fileStatementDate: string
 ): CommissionDuplicateIssue[] {
   const byKey = new Map<string, { indices: number[]; policy: string; dateYmd: string; amt: number }>()
   rows.forEach((row, idx) => {
     const policy = normalizePolicyNumber(row.policy_number)
     if (!policy) return
-    const dateYmd = resolveRowDateYmdForDupes(row, carrierCode, corebridgeStatementDate)
+    const dateYmd = resolveRowDateYmdForDupes(row, carrierCode, fileStatementDate)
     if (!dateYmd) return
     const amt = netCommissionAmountForDupes(row)
     if (amt == null) return
@@ -156,12 +183,13 @@ function netAmountFromTrackerRow(t: {
   return null
 }
 
-/** Compare payload to commission_tracker (historical imports + other uploads). Skips rows that map to the same corebridge_commissions source id. */
+/** Compare payload to commission_tracker (historical imports + other uploads). Skips rows from the same file (source_file_id) and same source row. */
 export async function findTrackerCommissionDuplicates(
   agencyCarrierId: string,
   rows: CommissionDisplayRow[],
   carrierCode: string,
-  corebridgeStatementDate: string
+  fileStatementDate: string,
+  currentFileId?: string | null
 ): Promise<CommissionDuplicateIssue[]> {
   const policies = [
     ...new Set(rows.map((r) => normalizePolicyNumber(r.policy_number)).filter(Boolean)),
@@ -179,6 +207,7 @@ export async function findTrackerCommissionDuplicates(
   type TRow = (typeof data)[number]
   const trackerByKey: { key: string; t: TRow }[] = []
   for (const t of data as TRow[]) {
+    if (currentFileId && String(t.source_file_id ?? '') === String(currentFileId)) continue
     const policy = normalizePolicyNumber(t.policy_number as string)
     const dateYmd = normalizeTrackerDate(t.date)
     if (!policy || !dateYmd) continue
@@ -192,13 +221,13 @@ export async function findTrackerCommissionDuplicates(
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]
-    const key = buildCommissionDuplicateKey(row, carrierCode, corebridgeStatementDate)
+    const key = buildCommissionDuplicateKey(row, carrierCode, fileStatementDate)
     if (!key) continue
     const rowId = row.id
 
     for (const { key: tk, t } of trackerByKey) {
       if (tk !== key) continue
-      if (t.source_table === 'corebridge_commissions' && rowId && String(t.source_row_id ?? '') === String(rowId)) {
+      if (rowId && String(t.source_row_id ?? '') === String(rowId)) {
         continue
       }
       const dedupe = `${key}|${t.source_table ?? ''}|${t.source_row_id ?? ''}`
@@ -210,20 +239,13 @@ export async function findTrackerCommissionDuplicates(
         kind: 'existing_record',
         summary: `Row ${i + 1} matches an existing commission in the tracker (${src}). You can remove or edit duplicates, or save anyway if intentional.`,
         policy_number: normalizePolicyNumber(row.policy_number),
-        date: resolveRowDateYmdForDupes(row, carrierCode, corebridgeStatementDate),
+        date: resolveRowDateYmdForDupes(row, carrierCode, fileStatementDate),
         amountDisplay: amt < 0 ? `Charge back ${amt.toFixed(2)}` : `Advance ${amt.toFixed(2)}`,
       })
     }
   }
 
   return issues
-}
-
-function toDateInputValue(val: unknown): string {
-  if (val == null) return ''
-  const d = new Date(String(val))
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toISOString().slice(0, 10)
 }
 
 /** True if value looks like only a number (e.g. agent number in AMAM commission file). */
@@ -276,12 +298,19 @@ function dbRowToDisplay(
     advance = ''
     chargeBack = String(parsedAdvance.toFixed(2))
   }
-  const carrierLabel = carrierCode === 'AMAM' ? 'AMAM' : carrierCode === 'MOH' ? 'MOH' : 'Aetna'
+  const carrierLabel =
+    carrierCode === 'AMAM'
+      ? 'AMAM'
+      : carrierCode === 'MOH'
+        ? 'MOH'
+        : carrierCode === 'AHL'
+          ? 'AHL'
+          : 'Aetna'
   const effectiveCarrierLabel = carrierCode === 'COREBRIDGE' ? 'Corebridge' : carrierLabel
   return {
     id: row.id,
     name: String(name ?? ''),
-    date: toDateInputValue(dateRaw),
+    date: toYmdForDateInput(dateRaw),
     policy_number: policyNumber,
     carrier: row.__carrier ?? effectiveCarrierLabel,
     sales_agent: String(salesAgent ?? ''),
@@ -317,7 +346,7 @@ function displayToDbRow(
     policy_number: display.policy_number || (raw.policy_number as string),
   } as Record<string, unknown>
 
-  if (carrierCode === 'AETNA' || carrierCode === 'AFLAC') {
+  if (carrierCode === 'AETNA' || carrierCode === 'AFLAC' || carrierCode === 'AHL') {
     base.client = name
     base.writingagentname = salesAgent
     base.rate_pct = display.commission_rate || (raw.rate_pct as string)
@@ -385,6 +414,7 @@ function commissionTableForCarrier(carrierCode: string): string | null {
   if (c === 'COREBRIDGE') return 'corebridge_commissions'
   if (c === 'AFLAC') return 'aflac_commissions'
   if (c === 'AETNA') return 'aetna_commissions'
+  if (c === 'AHL') return 'ahl_commissions'
   return null
 }
 
@@ -485,7 +515,8 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         carrierCode !== 'AMAM' &&
         carrierCode !== 'MOH' &&
         carrierCode !== 'COREBRIDGE' &&
-        carrierCode !== 'AFLAC'
+        carrierCode !== 'AFLAC' &&
+        carrierCode !== 'AHL'
       )
         return
       deleteCommissionRowsOnAbandonRef.current = openOpts?.deleteOnAbandon !== false
@@ -529,6 +560,10 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
   const saveCommissionReport = useCallback(
     async (editedRows: CommissionDisplayRow[]) => {
       if (!context || editedRows.length === 0) return
+      const validationError = validateCommissionRowsForSave(editedRows)
+      if (validationError) {
+        throw new Error(validationError)
+      }
       const { agencyCarrierId, fileId, carrierCode } = context
       const table = commissionTableForCarrier(carrierCode)
       if (!table) return
@@ -576,6 +611,18 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
     handleCommissionReportOpenChange(false)
   }, [handleCommissionReportOpenChange])
 
+  /**
+   * After saving deal tracker only (and rolling back this file's commission rows externally),
+   * close the dialog without running abandon rollback again.
+   */
+  const closeAfterDealTrackerOnly = useCallback(() => {
+    deleteCommissionRowsOnAbandonRef.current = false
+    closedAfterSaveRef.current = false
+    setShowCommissionReport(false)
+    setCommissionRows([])
+    setContext(null)
+  }, [])
+
   return {
     showCommissionReport,
     /** Use this for Dialog onOpenChange so closing (X / overlay / Cancel) rolls back unpersisted upload data when appropriate. */
@@ -589,5 +636,6 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
     openCommissionReport,
     saveCommissionReport,
     cancelCommissionReport,
+    closeAfterDealTrackerOnly,
   }
 }

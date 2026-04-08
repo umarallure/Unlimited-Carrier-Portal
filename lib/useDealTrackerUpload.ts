@@ -24,6 +24,7 @@ export function useDealTrackerUpload() {
     ghl_stage: null,
     policy_status: null,
     deal_creation_date: null,
+    commission_date: null,
     policy_number: '',
     carrier: carrierCode,
     carrier_id: null,

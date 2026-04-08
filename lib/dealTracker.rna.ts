@@ -11,14 +11,17 @@ import {
   getChangedFieldsAndPrevious,
   financialsUnchanged,
   carrierStatusUnchanged,
+  resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
 import { resolveGhlStage } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
 
 /**
  * Normalize RNA policy number for consistent matching with existing deal_tracker rows.
  * Strips leading zeros so both 000008204677 and 8204677 map to the same key.
+ * Exported for Deal Tracker Compare and any tool that must key policies the same way as saves/upserts.
  */
-function normalizeRnaPolicyKey(value: string | null | undefined): string {
+export function normalizeRnaPolicyKey(value: string | null | undefined): string {
   if (!value) return ''
   const trimmed = String(value).trim()
   const stripped = trimmed.replace(/^0+/, '')
@@ -158,7 +161,12 @@ export async function processRNAFilesForDealTracker(
     const ex = existingMap.get(normalizeRnaPolicyKey(p.policy_number))
     const comm = commissionMap.get(p.policy_number)
     const needsContact = !ex || (ex.call_center == null && ex.phone_number == null)
-    const dealFromSource = (comm?.issue_date as string | undefined) || (p.certificate_activation_date as string | undefined) || (p.application_entry_date as string | undefined) || ex?.deal_creation_date
+    // Deal date on policy is application_entry_date; DDF only if still empty after existing + policy.
+    const dealFromSource =
+      ex?.deal_creation_date ||
+      p.application_entry_date ||
+      comm?.issue_date ||
+      p.certificate_activation_date
     const effectiveFromSource = (p.certificate_activation_date as string | undefined) || (comm?.effective_date as string | undefined) || (comm?.issue_date as string | undefined) || ex?.effective_date
     const needsDealDate = !dealFromSource || String(dealFromSource).trim() === ''
     const needsEffectiveDate = !effectiveFromSource || String(effectiveFromSource).trim() === ''
@@ -186,17 +194,22 @@ export async function processRNAFilesForDealTracker(
     const insuredName = buildRnaInsuredName(policy)
     // Use current_contract_status_reason for policy_status (and GHL) mapping instead of current_contract_status
     const originalStatus = policy.current_contract_status_reason || null
-    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const carrierUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      originalStatus,
+      !!carrierUnchanged,
+      existing?.policy_status
+    )
+    const normalizedName = normalizeNameForSearch(insuredName)
+    const ddfInfo = insuredName ? dailyDealFlowMap.get(normalizedName) || null : null
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
-    let effectiveDateFromDdf: string | null = null
-    if ((callCenter == null && phoneNumber == null) && insuredName) {
-      const normalizedName = normalizeNameForSearch(insuredName)
-      const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
-      callCenter = ddfInfo?.call_center ?? null
-      phoneNumber = ddfInfo?.phone_number ?? null
-      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+    if (callCenter == null && phoneNumber == null && ddfInfo) {
+      callCenter = ddfInfo.call_center ?? null
+      phoneNumber = ddfInfo.phone_number ?? null
     }
+    const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
     const advance = commission?.advance_amount != null ? (typeof commission.advance_amount === 'string' ? parseFloat(commission.advance_amount) : commission.advance_amount) : 0
     const earned = commission?.earned_amount != null ? (typeof commission.earned_amount === 'string' ? parseFloat(commission.earned_amount) : commission.earned_amount) : 0
@@ -209,29 +222,22 @@ export async function processRNAFilesForDealTracker(
     }
     const ccValue = dealValue != null ? dealValue / 2 : null
 
-    // Deal date: use policy/commission/existing first; only use DDF draft_date when still empty.
-    const dealCreationDateFromSource =
-      (commission?.issue_date as string | undefined) ||
-      (policy.certificate_activation_date as string | undefined) ||
-      (policy.application_entry_date as string | undefined) ||
-      (existing?.deal_creation_date as string | undefined) ||
-      null
-    const dealCreationDate =
-      (dealCreationDateFromSource && String(dealCreationDateFromSource).trim() !== '')
-        ? dealCreationDateFromSource
-        : (effectiveDateFromDdf || null)
+    // Deal date: keep deal_tracker value if set; else RNA policy application_entry_date, then fallbacks.
+    const dealCreationDate = mergeEffectiveDate(
+      existing?.deal_creation_date,
+      null,
+      policy.application_entry_date,
+      commission?.issue_date,
+      policy.certificate_activation_date,
+    )
 
-    // Effective date: use policy/commission/existing first; only use DDF draft_date when still empty.
-    const effectiveDateExisting =
-      (policy.certificate_activation_date as string | undefined) ||
-      (commission?.effective_date as string | undefined) ||
-      (commission?.issue_date as string | undefined) ||
-      (existing?.effective_date as string | undefined) ||
-      null
-    const effectiveDate =
-      (effectiveDateExisting && String(effectiveDateExisting).trim() !== '')
-        ? effectiveDateExisting
-        : (effectiveDateFromDdf || null)
+    const effectiveDate = mergeEffectiveDate(
+      existing?.effective_date,
+      effectiveDateFromDdf,
+      policy.certificate_activation_date,
+      commission?.effective_date,
+      commission?.issue_date,
+    )
 
     // Re-resolve GHL stage even when raw carrier status is unchanged so that
     // time-based transitions (draft/effective date) still trigger.
@@ -240,16 +246,12 @@ export async function processRNAFilesForDealTracker(
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealValue,
       commissionType: commission?.activity_type ?? null,
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
-
-    // Used to decide whether we should keep an existing policy_status when
-    // only re-processing financials/deal values (commission upload must not
-    // overwrite carrier/policy status unless deal-derived mapping changed).
-    const statusUnchanged = existing && financialsUnchanged(existing, dealValue, null)
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
@@ -257,9 +259,7 @@ export async function processRNAFilesForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: statusUnchanged
-        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
-        : (mappedStatus ?? originalStatus),
+      policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: normPolicyNumber || policy.policy_number,
       carrier: carrierName,
@@ -428,7 +428,11 @@ export async function processRNACommissionsForDealTracker(
     const policy = policiesMap.get(pn)
     const comm = commissionMap.get(pn)
     const needsContact = !existing || (existing.call_center == null && existing.phone_number == null)
-    const dealFromSource = (comm?.issue_date as string | undefined) || (policy?.certificate_activation_date as string | undefined) || (policy?.application_entry_date as string | undefined) || existing?.deal_creation_date
+    const dealFromSource =
+      existing?.deal_creation_date ||
+      policy?.application_entry_date ||
+      comm?.issue_date ||
+      policy?.certificate_activation_date
     const effectiveFromSource = (policy?.certificate_activation_date as string | undefined) || (comm?.effective_date as string | undefined) || (comm?.issue_date as string | undefined) || existing?.effective_date
     const needsDealDate = !dealFromSource || String(dealFromSource).trim() === ''
     const needsEffectiveDate = !effectiveFromSource || String(effectiveFromSource).trim() === ''
@@ -468,8 +472,19 @@ export async function processRNACommissionsForDealTracker(
     const policy = policiesMap.get(policyNumber)
 
     const insuredName = policy ? buildRnaInsuredName(policy) : (comm.insured_name ?? null)
-    const originalStatus = policy?.current_contract_status ?? existing?.carrier_status ?? existing?.policy_status ?? null
-    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+    const originalStatus =
+      policy?.current_contract_status_reason ??
+      policy?.current_contract_status ??
+      existing?.carrier_status ??
+      existing?.policy_status ??
+      null
+    const carrierUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      originalStatus,
+      !!carrierUnchanged,
+      existing?.policy_status
+    )
 
     const totalAmount = commissionAmountsMap.get(policyNumber)
     let dealValue: number | null = null
@@ -509,30 +524,24 @@ export async function processRNACommissionsForDealTracker(
       }
     }
 
-    // Deal date and effective date: use policy/commission/existing first; only use DDF when still empty.
-    const dealFromSource =
-      (comm.issue_date as string | undefined) ||
-      (policy?.certificate_activation_date as string | undefined) ||
-      (policy?.application_entry_date as string | undefined) ||
-      (existing?.deal_creation_date as string | undefined) ||
-      null
-    const effectiveFromSource =
-      (policy?.certificate_activation_date as string | undefined) ||
-      (comm.effective_date as string | undefined) ||
-      (comm.issue_date as string | undefined) ||
-      (existing?.effective_date as string | undefined) ||
-      null
+    const ddfDraftDate =
+      insuredName ? (dailyDealFlowMap.get(normalizeNameForSearch(insuredName))?.draft_date ?? null) : null
 
-    let ddfDraftDate: string | null = null
-    if (((!dealFromSource || String(dealFromSource).trim() === '') || (!effectiveFromSource || String(effectiveFromSource).trim() === '')) && insuredName) {
-      const ddfInfo = dailyDealFlowMap.get(normalizeNameForSearch(insuredName))
-      ddfDraftDate = ddfInfo?.draft_date ?? null
-    }
-
-    const dealCreationDate =
-      (dealFromSource && String(dealFromSource).trim() !== '') ? dealFromSource : (ddfDraftDate || null)
-    const effectiveDate =
-      (effectiveFromSource && String(effectiveFromSource).trim() !== '') ? effectiveFromSource : (ddfDraftDate || null)
+    // Deal date: keep deal_tracker if set; else policy application_entry_date, then fallbacks (not DDF draft).
+    const dealCreationDate = mergeEffectiveDate(
+      existing?.deal_creation_date,
+      null,
+      policy?.application_entry_date,
+      comm.issue_date,
+      policy?.certificate_activation_date,
+    )
+    const effectiveDate = mergeEffectiveDate(
+      existing?.effective_date,
+      ddfDraftDate,
+      policy?.certificate_activation_date,
+      comm.effective_date,
+      comm.issue_date,
+    )
 
     const statusForEntry =
       existing && financialsUnchanged(existing, dealValue, null)
@@ -545,8 +554,7 @@ export async function processRNACommissionsForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: existing?.ghl_stage ?? null,
-      // Commission upload must NOT change carrier/policy status.
-      policy_status: existing?.policy_status ?? mappedStatus,
+      policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: normPolicyNumber || policyNumber,
       carrier: carrierName,
@@ -564,7 +572,11 @@ export async function processRNACommissionsForDealTracker(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: existing?.carrier_status ?? originalStatus,
+      carrier_status:
+        policy?.current_contract_status_reason ??
+        policy?.current_contract_status ??
+        existing?.carrier_status ??
+        originalStatus,
       policy_type: policy?.product_id ?? comm.product_id ?? null,
       daily_deal_flow_fetched: dailyDealFlowFetched,
       daily_deal_flow_fetched_at: dailyDealFlowFetchedAt,

@@ -16,8 +16,11 @@ import {
   getChangedFieldsAndPrevious,
   financialsUnchanged,
   carrierStatusUnchanged,
+  policyNeedsDdfLookup,
+  resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
 import { resolveGhlStage } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
 
 export async function processAhlFilesForDealTracker(
   agencyCarrierId: string,
@@ -100,10 +103,7 @@ export async function processAhlFilesForDealTracker(
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
   const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
 
-  const policiesNeedingDdf = policies.filter(p => {
-    const ex = existingMap.get(p.policy_number)
-    return !ex || (ex.call_center == null && ex.phone_number == null)
-  })
+  const policiesNeedingDdf = policies.filter(p => policyNeedsDdfLookup(existingMap.get(p.policy_number)))
   const uniqueInsuredNames = Array.from(
     new Set(policiesNeedingDdf.map(p => (p.insuredname || '').trim()).filter(n => n.length > 0))
   )
@@ -119,21 +119,19 @@ export async function processAhlFilesForDealTracker(
     const existing = existingMap.get(policy.policy_number)
 
     const originalStatus = policy.statusdisplaytext || policy.statuscategory
-    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
+    const normalizedName = normalizeNameForSearch(policy.insuredname || '')
+    const ddfInfo = dailyDealFlowMap.get(normalizedName) ?? null
+    const alreadyHasDdfContact = existing?.call_center != null || existing?.phone_number != null
     let callCenter: string | null
     let phoneNumber: string | null
-    let effectiveDateFromDdf: string | null = null
-    if (alreadyHasDdf) {
+    if (alreadyHasDdfContact) {
       callCenter = existing!.call_center
       phoneNumber = existing!.phone_number
     } else {
-      const normalizedName = normalizeNameForSearch(policy.insuredname || '')
-      const ddfInfo = dailyDealFlowMap.get(normalizedName) ?? null
       callCenter = ddfInfo?.call_center ?? null
       phoneNumber = ddfInfo?.phone_number ?? null
-      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
     }
+    const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
     let dealValue: number | null = null
     let ccValue: number | null = null
@@ -177,10 +175,11 @@ export async function processAhlFilesForDealTracker(
       if (Number.isNaN(ccValue as number)) ccValue = null
     }
 
-    const effectiveDate =
-      existing?.effective_date ??
-      effectiveDateFromDdf ??
-      (existing ? null : (policy.issuedate as string | undefined) || null)
+    const effectiveDate = mergeEffectiveDate(
+      existing?.effective_date,
+      effectiveDateFromDdf,
+      existing ? null : policy.issuedate,
+    )
 
     const derivedStatus = statusFromDealValue(dealValue)
     const chargeBackForEntry = existing?.charge_back ?? null
@@ -190,11 +189,18 @@ export async function processAhlFilesForDealTracker(
         : derivedStatus
 
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      originalStatus,
+      !!statusUnchanged,
+      existing?.policy_status
+    )
 
     const mappedGhlStage = resolveGhlStage({
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealValue,
       commissionType: commission?.commissiontype || null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -207,9 +213,7 @@ export async function processAhlFilesForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: statusUnchanged
-        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
-        : (mappedStatus ?? originalStatus),
+      policy_status: policyStatusResolved,
       deal_creation_date: existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null),
       policy_number: policy.policy_number,
       carrier: carrierName,
@@ -338,32 +342,36 @@ export async function processAhlCommissionsForDealTracker(
     }
   })
 
-  const missingPolicyNumbers = Array.from(commissionMap.keys()).filter(pn => !existingMap.has(pn))
+  const allCommissionPolicyNumbers = Array.from(commissionMap.keys())
 
   let policiesMap = new Map<string, any>()
-  if (missingPolicyNumbers.length > 0) {
+  if (allCommissionPolicyNumbers.length > 0) {
     const policies = await fetchAllPaginated(() =>
       supabase
         .from('ahl_policies')
         .select('*')
         .eq('agency_carrier_id', agencyCarrierId)
-        .in('policy_number', missingPolicyNumbers)
+        .in('policy_number', allCommissionPolicyNumbers)
     )
     policies?.forEach((p: any) => policiesMap.set(p.policy_number, p))
   }
 
-  let statusMappingMap = new Map<string, string>()
-  let ghlStageMappingMap = new Map<string, string[]>()
+  const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
-  if (missingPolicyNumbers.length > 0) {
-    statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
-    ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
-    const policyNamesForDDF = Array.from(policiesMap.values())
-      .map((p: any) => p.insuredname)
-      .filter((name: string) => name && name.trim().length > 0)
-    if (policyNamesForDDF.length > 0) {
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier)
-    }
+  const policyNamesForDDF = Array.from(
+    new Set(
+      allCommissionPolicyNumbers
+        .map(pn => {
+          const p = policiesMap.get(pn)
+          const ex = existingMap.get(pn)
+          return (p?.insuredname || ex?.name || '').trim()
+        })
+        .filter((n): n is string => n.length > 0)
+    )
+  )
+  if (policyNamesForDDF.length > 0) {
+    dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier)
   }
 
   const previewEntries: DealTrackerPreviewEntry[] = []
@@ -392,17 +400,50 @@ export async function processAhlCommissionsForDealTracker(
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, effectiveChargeBack)
 
     if (existing) {
+      const policy = policiesMap.get(policyNumber)
+      const carrierStatusForGhl =
+        policy?.statusdisplaytext ??
+        policy?.statuscategory ??
+        existing.carrier_status ??
+        null
+      const carrierUnchanged = carrierStatusUnchanged(existing, carrierStatusForGhl)
+      const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+        statusMappingMap,
+        carrierStatusForGhl,
+        !!carrierUnchanged,
+        existing.policy_status
+      )
+      const normalizedName = normalizeNameForSearch(policy?.insuredname || existing.name || '')
+      const draftFromDdf = dailyDealFlowMap.get(normalizedName)?.draft_date ?? null
+      const mergedEffective = mergeEffectiveDate(
+        existing.effective_date,
+        draftFromDdf,
+        commission.effectivedate,
+      )
+      const mappedGhlStage = resolveGhlStage({
+        carrierStatus: carrierStatusForGhl,
+        allMappings: ghlStageMappingMap,
+        effectiveDate: mergedEffective,
+        effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, mergedEffective),
+        dealValue,
+        chargeBack: effectiveChargeBack,
+        commissionType: commission.commissiontype || existing.commission_type || null,
+        existingGhlStage: existing.ghl_stage ?? null,
+        carrierCode,
+      })
       const entry: DealTrackerPreviewEntry = {
         ...existing,
+        ghl_stage: mappedGhlStage ?? existing.ghl_stage,
+        carrier_status: carrierStatusForGhl,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: effectiveChargeBack,
-        policy_status: existing.policy_status,
+        policy_status: policyStatusResolved,
         status: derivedStatus,
         sales_agent: commission.writingagentname || existing.sales_agent,
         writing_number: commission.writingagentnumber || existing.writing_number,
         commission_type: commission.commissiontype || existing.commission_type,
-        effective_date: existing.effective_date,
+        effective_date: mergedEffective,
         source_commission_table: 'ahl_commissions',
         source_commission_id: commission.id,
         isNew: false,
@@ -410,13 +451,17 @@ export async function processAhlCommissionsForDealTracker(
       }
       const newSnapshot = {
         ...existing,
+        ghl_stage: mappedGhlStage ?? existing.ghl_stage,
+        carrier_status: carrierStatusForGhl,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: effectiveChargeBack,
+        policy_status: policyStatusResolved,
         status: derivedStatus,
         sales_agent: commission.writingagentname || existing.sales_agent,
         writing_number: commission.writingagentnumber || existing.writing_number,
         commission_type: commission.commissiontype || existing.commission_type,
+        effective_date: mergedEffective,
       } as Record<string, unknown>
       const { changedFields, previousValues } = getChangedFieldsAndPrevious(
         existing as Record<string, unknown>,
@@ -429,17 +474,23 @@ export async function processAhlCommissionsForDealTracker(
       const policy = policiesMap.get(policyNumber)
       if (policy) {
         const originalStatus = policy.statusdisplaytext || policy.statuscategory
-        const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
+        const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+          statusMappingMap,
+          originalStatus,
+          false,
+          undefined
+        )
         const normalizedName = normalizeNameForSearch(policy.insuredname || '')
         const ddfInfo = dailyDealFlowMap.get(normalizedName)
         const callCenter = ddfInfo?.call_center ?? null
         const phoneNumber = ddfInfo?.phone_number ?? null
-        const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+        const proposedEff = mergeEffectiveDate(null, ddfInfo?.draft_date ?? null, commission.effectivedate)
 
         const mappedGhlStage = resolveGhlStage({
           carrierStatus: originalStatus,
           allMappings: ghlStageMappingMap,
-          effectiveDate: effectiveDateFromDdf,
+          effectiveDate: proposedEff,
+          effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(null, proposedEff),
           dealValue,
           commissionType: commission.commissiontype || null,
           existingGhlStage: null,
@@ -452,7 +503,7 @@ export async function processAhlCommissionsForDealTracker(
           tasks: null,
           ghl_name: null,
           ghl_stage: mappedGhlStage,
-          policy_status: mappedStatus,
+          policy_status: policyStatusResolved,
           deal_creation_date: policy.apprecddate || policy.issuedate || null,
           policy_number: policyNumber,
           carrier: carrierName,
@@ -466,7 +517,7 @@ export async function processAhlCommissionsForDealTracker(
           sales_agent: policy.agentcompletename || commission.writingagentname || null,
           writing_number: policy.agentnumber || commission.writingagentnumber || null,
           commission_type: commission.commissiontype || null,
-          effective_date: effectiveDateFromDdf ?? null,
+          effective_date: proposedEff,
           call_center: callCenter,
           phone_number: phoneNumber,
           cc_pmt_ws: null,

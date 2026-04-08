@@ -11,8 +11,11 @@ import {
   getChangedFieldsAndPrevious,
   financialsUnchanged,
   carrierStatusUnchanged,
+  policyNeedsDdfLookup,
+  resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
 import { resolveGhlStage } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
 
 /**
  * Build insured name from MOH policy fields for DDF lookup.
@@ -27,6 +30,11 @@ function buildMohInsuredName(p: { insured_nme?: string | null; insured2_nme?: st
 function normalizePolicyNumberSoft(value: any): string {
   if (value == null) return ''
   return String(value).replace(/\s+/g, ' ').trim()
+}
+
+function normalizeStatusKey(v: unknown): string {
+  const s = (v == null ? '' : String(v)).trim()
+  return s.replace(/\s+/g, ' ')
 }
 
 /**
@@ -148,11 +156,9 @@ export async function processMohFilesForDealTracker(
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
   const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
 
-  // Only fetch DDF for policies that don't already have call_center/phone
-  const policiesNeedingDdf = policies.filter(p => {
-    const ex = existingMap.get(normalizePolicyNumberSoft(p.policy_number))
-    return !ex || (ex.call_center == null && ex.phone_number == null)
-  })
+  const policiesNeedingDdf = policies.filter(p =>
+    policyNeedsDdfLookup(existingMap.get(normalizePolicyNumberSoft(p.policy_number)))
+  )
   const uniqueInsuredNamesMoh = Array.from(
     new Set(
       policiesNeedingDdf
@@ -181,22 +187,20 @@ export async function processMohFilesForDealTracker(
     const existing = existingMap.get(normalizePolicyNumberSoft(policy.policy_number))
     const insuredName = buildMohInsuredName(policy)
     const originalStatus = policy.policy_status_nme || null
-    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
-    // Use existing call_center/phone if already set; else use DDF
-    const alreadyHasDdf = existing?.call_center != null || existing?.phone_number != null
+    // Use existing call_center/phone if already set; else use DDF. Always read draft_date from bulk map when fetched (fill missing effective_date).
+    const alreadyHasDdfContact = existing?.call_center != null || existing?.phone_number != null
+    const normalizedNameMoh = normalizeNameForSearch(insuredName)
+    const ddfInfoMoh = dailyDealFlowMap.get(normalizedNameMoh) || null
     let callCenter: string | null
     let phoneNumber: string | null
-    let effectiveDateFromDdf: string | null = null
-    if (alreadyHasDdf) {
+    if (alreadyHasDdfContact) {
       callCenter = existing!.call_center
       phoneNumber = existing!.phone_number
     } else {
-      const normalizedName = normalizeNameForSearch(insuredName)
-      const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
-      callCenter = ddfInfo?.call_center ?? null
-      phoneNumber = ddfInfo?.phone_number ?? null
-      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
+      callCenter = ddfInfoMoh?.call_center ?? null
+      phoneNumber = ddfInfoMoh?.phone_number ?? null
     }
+    const effectiveDateFromDdf = ddfInfoMoh?.draft_date ?? null
 
     const rawDealValue =
       commission && commission.comm_amt != null
@@ -251,13 +255,13 @@ export async function processMohFilesForDealTracker(
       (policy.policy_effective_dte as string | undefined) ||
       null
 
-    // Effective date: from DDF (draft_date) first, like Aetna/AMAM; not from file
-    const effectiveDate =
-      effectiveDateFromDdf ||
-      (existing?.effective_date ?? null) ||
-      (policy.policy_effective_dte as string | undefined) ||
-      (commission?.issue_date as string | undefined) ||
-      null
+    // Effective date: keep deal_tracker value; else DDF draft_date; else policy/commission fallbacks (deal date stays on deal_creation_date).
+    const effectiveDate = mergeEffectiveDate(
+      existing?.effective_date,
+      effectiveDateFromDdf,
+      policy?.policy_effective_dte,
+      commission?.issue_date,
+    )
 
     const entryIndex = previewEntries.length
     if (entryIndex < 3) {
@@ -267,6 +271,12 @@ export async function processMohFilesForDealTracker(
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
 
     const shouldPreserveMappedStatus = existing && carrierStatusUnchanged(existing, originalStatus)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      originalStatus,
+      !!shouldPreserveMappedStatus,
+      existing?.policy_status
+    )
 
     // Re-resolve GHL stage even when raw carrier status is unchanged so that
     // time-based transitions still trigger.
@@ -275,6 +285,7 @@ export async function processMohFilesForDealTracker(
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealValue,
       commissionType: commission?.activity_type ?? null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -287,7 +298,7 @@ export async function processMohFilesForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: shouldPreserveMappedStatus ? (existing?.policy_status ?? mappedStatus) : mappedStatus,
+      policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
@@ -460,10 +471,9 @@ export async function processMohCommissionsForDealTracker(
     }
   })
 
-  // Figure out which policies need DDF
   const allPolicyNumbersNeedingDDF = Array.from(commissionMap.keys()).filter(pn => {
     const existing = existingMap.get(pn)
-    return !existing || (existing.call_center == null && existing.phone_number == null)
+    return policyNeedsDdfLookup(existing)
   })
 
   let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
@@ -493,7 +503,6 @@ export async function processMohCommissionsForDealTracker(
 
     const insuredName = policy ? buildMohInsuredName(policy) : (comm.insureds_name ?? null)
     const originalStatus = policy?.policy_status_nme || existing?.policy_status || null
-    const mappedStatus = statusMappingMap.get(originalStatus || '') || originalStatus || null
     const totalAmount = commissionAmountsMap.get(policyNumber)
     let dealValue: number | null = totalAmount != null ? totalAmount : null
     let chargeBack: number | null = existing?.charge_back ?? null
@@ -546,17 +555,17 @@ export async function processMohCommissionsForDealTracker(
     let dailyDealFlowFetchedAt = existing?.daily_deal_flow_fetched_at ?? null
     let effectiveDateFromDdf: string | null = null
 
-    if ((!callCenter && !phoneNumber) && policy) {
+    if (policy) {
       const nameForDdf = buildMohInsuredName(policy)
       const normalizedName = normalizeNameForSearch(nameForDdf)
       const ddfInfo = dailyDealFlowMap.get(normalizedName)
-      if (ddfInfo) {
+      if (ddfInfo && callCenter == null && phoneNumber == null) {
         callCenter = ddfInfo.call_center ?? null
         phoneNumber = ddfInfo.phone_number ?? null
         dailyDealFlowFetched = !!(callCenter || phoneNumber)
         dailyDealFlowFetchedAt = (callCenter || phoneNumber) ? new Date().toISOString() : null
-        effectiveDateFromDdf = ddfInfo.draft_date ?? null
       }
+      effectiveDateFromDdf = ddfInfo?.draft_date ?? null
     }
 
     // Deal date: CARRIER_RECEIVED (application_received_dte) is the deal date for MOH
@@ -568,16 +577,21 @@ export async function processMohCommissionsForDealTracker(
       (policy?.policy_effective_dte as string | undefined) ||
       null
 
-    // Effective date: from DDF (draft_date) first, like Aetna/AMAM; not from file
-    const effectiveDate =
-      effectiveDateFromDdf ||
-      (existing?.effective_date ?? null) ||
-      (policy?.policy_effective_dte as string | undefined) ||
-      (comm.issue_date as string | undefined) ||
-      null
+    const effectiveDate = mergeEffectiveDate(
+      existing?.effective_date,
+      effectiveDateFromDdf,
+      policy?.policy_effective_dte,
+      comm.issue_date,
+    )
 
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
+    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+      statusMappingMap,
+      originalStatus,
+      !!statusUnchanged,
+      existing?.policy_status
+    )
 
     // Re-resolve GHL stage even when raw carrier status is unchanged so that
     // time-based transitions still trigger.
@@ -586,6 +600,7 @@ export async function processMohCommissionsForDealTracker(
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealValue,
       commissionType: comm.activity_type ?? null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -598,9 +613,7 @@ export async function processMohCommissionsForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: statusUnchanged
-        ? (existing?.policy_status ?? mappedStatus ?? originalStatus)
-        : (mappedStatus ?? originalStatus),
+      policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: policyNumber,
       carrier: carrierName,

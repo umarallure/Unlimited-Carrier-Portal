@@ -53,6 +53,16 @@ const PENDING_LAPSE_STAGES = new Set([
   'Pending Lapse Pending Reason',
 ])
 
+/** Advanced / Earned / 3M+ imply commission was paid — only when deal_value > 0 (see resolveGhlStage). */
+function stageRequiresPositiveDealValue(stage: string): boolean {
+  const t = stage.trim().toLowerCase()
+  return (
+    t === 'active placed - paid as advanced' ||
+    t === 'active placed - paid as earned' ||
+    t === 'active - 3 months +'
+  )
+}
+
 /**
  * Stages that require manual auditing/approval.
  * During auto-mapping we must never overwrite an existing manual stage,
@@ -170,20 +180,60 @@ export function getStageCategory(stage: string): string {
 }
 
 function parseDate(dateStr: string | null): Date | null {
-  if (!dateStr) return null
-  const d = new Date(dateStr)
+  if (dateStr == null) return null
+  const s = String(dateStr).trim()
+  if (!s) return null
+  const d = new Date(s.includes('T') ? s : `${s}T12:00:00`)
   return isNaN(d.getTime()) ? null : d
 }
 
-function monthsBetween(d1: Date, d2: Date): number {
-  return (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth())
+/** Local calendar day (no time-of-day drift). */
+function startOfLocalDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+
+/** Add n calendar months in local time (e.g. Jan 5 + 3 → Apr 5). */
+function addCalendarMonths(d: Date, n: number): Date {
+  const result = new Date(d.getTime())
+  result.setMonth(result.getMonth() + n)
+  return result
+}
+
+/**
+ * ACTIVE - 3 Months + only after the effective date plus three full calendar months
+ * (same day-of-month anniversary). Using only (year/month) month-index difference
+ * incorrectly fires on e.g. Apr 3 when effective is Jan 5 (3 month boundaries) even
+ * though Apr 5 is the true 3-month mark.
+ */
+function qualifiesForActiveThreeMonthsPlus(effDate: Date | null, today: Date): boolean {
+  if (!effDate || isNaN(effDate.getTime())) return false
+  const anchor = startOfLocalDay(effDate)
+  const threeMonthMark = addCalendarMonths(anchor, 3)
+  const now = startOfLocalDay(today)
+  return now >= threeMonthMark
 }
 
 export interface GhlStageResolutionContext {
   carrierStatus: string | null
   allMappings: Map<string, string[]>
+  /**
+   * Policy effective / draft date used for time-based rules (Issued vs FDPF, chargeback grace, etc.).
+   * May include DDF draft when filling gaps — not commission paid/statement dates.
+   */
   effectiveDate: string | null
+  /**
+   * Calendar anchor for ACTIVE - 3 Months + only: must be `deal_tracker.effective_date`.
+   * When omitted, falls back to `effectiveDate` (legacy). When null/empty, never auto-promote to 3M+.
+   */
+  effectiveDateForThreeMonthRule?: string | null
+  /**
+   * Deal creation date used by pending-aging rules.
+   * If pending lasts over 30 calendar days from this date, stage becomes Application Withdrawn.
+   */
+  dealCreationDate?: string | null
   dealValue: number | null
+  /** When negative, aligns with deal_tracker charge_back / Status "Charge Back" (commission chargeback lines net separately from positive advance). */
+  chargeBack?: number | null
   commissionType: string | null
   existingGhlStage: string | null
   carrierCode: string | null
@@ -193,19 +243,118 @@ export interface GhlStageResolutionContext {
  * Resolve the correct GHL stage from multiple possible mappings using
  * time, commission, previous-stage, and grace-period conditions.
  */
+function normCarrierStatusKey(s: string): string {
+  return String(s).trim().replace(/\s+/g, ' ')
+}
+
+/** Match `carrier_ghl_stage_mappings.carrier_status_in_carrier_portal` when file text differs slightly from DB key. */
+function lookupStagesForCarrierStatus(
+  allMappings: Map<string, string[]>,
+  carrierStatus: string
+): string[] | null {
+  const direct = allMappings.get(carrierStatus)
+  if (direct && direct.length > 0) return direct
+  const n = normCarrierStatusKey(carrierStatus)
+  for (const [k, v] of allMappings.entries()) {
+    if (v.length > 0 && normCarrierStatusKey(k) === n) return v
+  }
+  const nl = n.toLowerCase()
+  for (const [k, v] of allMappings.entries()) {
+    if (v.length > 0 && normCarrierStatusKey(k).toLowerCase() === nl) return v
+  }
+  return null
+}
+
+/** Index in `GHL_STAGE_ORDER` (later = further in the pipeline). Unknown stages return -1. */
+function ghlStageOrderIndex(stage: string | null): number {
+  if (!stage) return -1
+  const exact = GHL_STAGE_ORDER.indexOf(stage as GhlStageName)
+  if (exact >= 0) return exact
+  const n = stage.trim().toLowerCase()
+  for (let i = 0; i < GHL_STAGE_ORDER.length; i++) {
+    if (GHL_STAGE_ORDER[i].toLowerCase() === n) return i
+  }
+  return -1
+}
+
+/** Outcomes that sit *before* "Issued" in `GHL_STAGE_ORDER` but are correct when the carrier portal says withdrawn/declined/not found. */
+function isCarrierOutcomeStageBeforeIssued(stage: string | null): boolean {
+  if (!stage) return false
+  const t = stage.trim().toLowerCase()
+  return (
+    t === 'application withdrawn' ||
+    t === 'declined underwriting' ||
+    t === 'cannot be found in carrier'
+  )
+}
+
+/**
+ * Commission-only (or partial) runs can temporarily lack deal_value > 0, which used to make
+ * `resolveGhlStage` pick an earlier funnel stage (e.g. Issued) even when deal_tracker already
+ * had a later stage (e.g. Active). Never regress along `GHL_STAGE_ORDER` unless financial or
+ * cancellation/chargeback signals justify it.
+ */
+function applyNonRegressiveGhlClamp(
+  existing: string | null,
+  candidate: string | null,
+  ctx: GhlStageResolutionContext
+): string | null {
+  if (candidate == null) return existing ?? null
+
+  const ex = ghlStageOrderIndex(existing)
+  const ca = ghlStageOrderIndex(candidate)
+
+  // Legacy / non-canonical label on deal_tracker: prefer a canonical mapped candidate when available.
+  if (existing && ex < 0) {
+    if (ca >= 0) return candidate
+    return existing
+  }
+  if (ca < 0) return existing ?? candidate
+
+  // Withdrawn / declined / not found are earlier in the array than Issued but are not "bad" regressions —
+  // they must win when carrier_status + DB mapping say so (e.g. deal_value still 0).
+  if (isCarrierOutcomeStageBeforeIssued(candidate)) return candidate
+
+  if (ca >= ex) return candidate
+
+  const chargeBackNum =
+    ctx.chargeBack != null && !Number.isNaN(Number(ctx.chargeBack)) ? Number(ctx.chargeBack) : null
+  if (chargeBackNum != null && chargeBackNum < 0) return candidate
+  if (ctx.dealValue != null && ctx.dealValue < 0) return candidate
+
+  const statusLower = (ctx.carrierStatus || '').toLowerCase()
+  const looksLikeInitiatedCancellation =
+    statusLower.includes('terminat') ||
+    statusLower.includes('cancel') ||
+    statusLower.includes('surrender') ||
+    statusLower.includes('free look')
+  if (looksLikeInitiatedCancellation) return candidate
+
+  if (candidate === 'Chargeback Failed Payment' || candidate === 'Chargeback Cancellation') return candidate
+
+  return existing ?? candidate
+}
+
 export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
+  return applyNonRegressiveGhlClamp(ctx.existingGhlStage, resolveGhlStageRaw(ctx), ctx)
+}
+
+function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   const {
     carrierStatus,
     allMappings,
     effectiveDate,
+    effectiveDateForThreeMonthRule,
+    dealCreationDate,
     dealValue,
+    chargeBack,
     commissionType,
     existingGhlStage,
     carrierCode,
   } = ctx
 
   if (!carrierStatus) return null
-  let possibleStages = allMappings.get(carrierStatus)
+  let possibleStages = lookupStagesForCarrierStatus(allMappings, carrierStatus)
   if (!possibleStages || possibleStages.length === 0) return null
   const sanitizeManualStage = (stage: string): string => {
     if (!MANUAL_APPROVAL_STAGES.has(stage)) return stage
@@ -214,6 +363,29 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
   const addStageIfMissing = (stage: string) => {
     if (!possibleStages) return
     if (!possibleStages.includes(stage)) possibleStages.push(stage)
+  }
+
+  const chargeBackNum =
+    chargeBack != null && !Number.isNaN(Number(chargeBack)) ? Number(chargeBack) : null
+  const statusLower = carrierStatus.toLowerCase()
+  const looksLikeInitiatedCancellation =
+    statusLower.includes('terminat') ||
+    statusLower.includes('cancel') ||
+    statusLower.includes('surrender') ||
+    statusLower.includes('free look')
+
+  // Align with statusFromDealValueAndChargeback: negative charge_back means "Charge Back" in deal_tracker
+  // even when deal_value is still positive (common for AMAM/Aetna commission files with offsetting lines).
+  // Without this, resolveGhlStage only saw dealValue > 0 and promoted to Active/Premium while Status flipped to Charge Back.
+  if (chargeBackNum != null && chargeBackNum < 0) {
+    const stageSetCb = new Set(possibleStages)
+    if (looksLikeInitiatedCancellation && stageSetCb.has('Chargeback Cancellation')) {
+      return sanitizeManualStage('Chargeback Cancellation')
+    }
+    if (stageSetCb.has('Chargeback Failed Payment')) return sanitizeManualStage('Chargeback Failed Payment')
+    if (stageSetCb.has('Chargeback Cancellation')) return sanitizeManualStage('Chargeback Cancellation')
+    const named = possibleStages.find(s => /chargeback/i.test(s))
+    if (named) return sanitizeManualStage(named)
   }
 
   // Some carriers/statuses in DB have only one mapped GHL stage (commonly
@@ -234,59 +406,60 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
       addStageIfMissing('Active Placed - Paid as Earned')
       addStageIfMissing('ACTIVE - 3 Months +')
     } else {
+      // DB may map a pre-payment carrier status only to Advanced — never use that without payment proof.
+      if (!hasPositiveDealSignal && stageRequiresPositiveDealValue(only)) {
+        return sanitizeManualStage('Issued - Pending First Draft')
+      }
       return sanitizeManualStage(only)
     }
   }
 
-  const stageOrderIndex = (stage: string): number => {
-    const idx = GHL_STAGE_ORDER.findIndex(s => s.toLowerCase() === stage.toLowerCase())
-    return idx
+  // Commission not paid / no deal amount: drop Advanced, Earned, 3M+ from allowed targets so
+  // carrier_status_mapping cannot force those stages without deal_value > 0.
+  const hasPaymentProof = dealValue != null && dealValue > 0
+  if (!hasPaymentProof) {
+    const filtered = possibleStages.filter(s => !stageRequiresPositiveDealValue(s))
+    if (filtered.length > 0) {
+      possibleStages = filtered
+    } else {
+      possibleStages = ['Issued - Pending First Draft']
+    }
   }
 
   const today = new Date()
   const effDate = parseDate(effectiveDate)
+  const dealCreated = parseDate(dealCreationDate ?? null)
+  const effDateForThreeMonth =
+    effectiveDateForThreeMonthRule !== undefined
+      ? parseDate(
+          effectiveDateForThreeMonthRule != null && String(effectiveDateForThreeMonthRule).trim() !== ''
+            ? String(effectiveDateForThreeMonthRule).trim()
+            : null
+        )
+      : effDate
   const grace = CARRIER_GRACE_PERIODS[(carrierCode || '').toUpperCase()] ?? 31
-  const statusLower = carrierStatus.toLowerCase()
-  const looksLikeInitiatedCancellation =
-    statusLower.includes('terminat') ||
-    statusLower.includes('cancel') ||
-    statusLower.includes('surrender') ||
-    statusLower.includes('free look')
 
   // If already in a manual stage, preserve it and do not overwrite.
   if (existingGhlStage && MANUAL_APPROVAL_STAGES.has(existingGhlStage)) {
     return existingGhlStage
   }
 
-  // When financial signals are missing (dealValue null/0), avoid "downgrades"
-  // to earlier stages. This prevents Active -> Premium Paid flips on runs
-  // that didn't include commission amounts.
-  const missingFinancialSignals = dealValue == null || dealValue === 0
-  if (missingFinancialSignals && existingGhlStage) {
-    const existingIdx = stageOrderIndex(existingGhlStage)
-    if (existingIdx >= 0) {
-      const filtered = possibleStages.filter(s => stageOrderIndex(s) >= existingIdx)
-      if (filtered.length > 0) possibleStages = filtered
-    }
-  }
-
   const stageSet = new Set(possibleStages)
-
-  // Prevent backward transitions:
-  // If the deal is already in an Active stage, don't auto-downgrade it to
-  // "Premium Paid - Commission Pending" just because the current import run
-  // didn't include commission/financial signals (dealValue null/<=0).
-  // Manual forward moves should still work via the Kanban "Move" action.
-  if (
-    existingGhlStage &&
-    ACTIVE_STAGES.has(existingGhlStage) &&
-    stageSet.has('Premium Paid - Commission Pending')
-  ) {
-    // Only protect when we actually have missing/zero financial signals.
-    // If deal_value just became positive (commission paid), we must allow
-    // promotion to Earned/Advanced.
-    if (dealValue == null || dealValue <= 0) return existingGhlStage
+  const effectiveDatePassed = !!(effDate && today > effDate)
+  const fdpfPendingReasonAllowed = effectiveDatePassed
+  const selectPreFdpfStage = (): string => {
+    if (stageSet.has('Issued - Pending First Draft')) return sanitizeManualStage('Issued - Pending First Draft')
+    if (stageSet.has('Pending Approval')) return sanitizeManualStage('Pending Approval')
+    return sanitizeManualStage('Issued - Pending First Draft')
   }
+  const pendingAnchorDate = dealCreated ?? effDate
+  const pendingOlderThan30Days = (() => {
+    if (!pendingAnchorDate) return false
+    const createdDay = startOfLocalDay(pendingAnchorDate).getTime()
+    const todayDay = startOfLocalDay(today).getTime()
+    const days = Math.floor((todayDay - createdDay) / (1000 * 60 * 60 * 24))
+    return days > 30
+  })()
 
   // If the carrier/client initiated cancellation, prefer Chargeback Cancellation
   // even if the commission net looks like a chargeback (negative deal value).
@@ -302,7 +475,7 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
 
   // ── Rule 1: Issued - Pending First Draft vs FDPF Pending Reason ────
   if (stageSet.has('Issued - Pending First Draft') && stageSet.has('FDPF Pending Reason')) {
-    if (effDate && today > effDate) return sanitizeManualStage('FDPF Pending Reason')
+    if (fdpfPendingReasonAllowed) return sanitizeManualStage('FDPF Pending Reason')
     return sanitizeManualStage('Issued - Pending First Draft')
   }
 
@@ -327,33 +500,23 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
 
     if (dealValue == null || dealValue <= 0) {
       if (hasPremPaid) return sanitizeManualStage('Premium Paid - Commission Pending')
-      if (existingGhlStage && ACTIVE_STAGES.has(existingGhlStage)) return existingGhlStage
     }
 
     if (dealValue != null && dealValue > 0) {
-      if (has3M && effDate && monthsBetween(effDate, today) >= 3) return sanitizeManualStage('ACTIVE - 3 Months +')
+      if (has3M && qualifiesForActiveThreeMonthsPlus(effDateForThreeMonth, today))
+        return sanitizeManualStage('ACTIVE - 3 Months +')
 
       if (commissionType) {
         const ct = commissionType.toLowerCase()
         if (ct.includes('advance') && hasAdvanced) return sanitizeManualStage('Active Placed - Paid as Advanced')
-        if (ct.includes('earn') && hasEarned) return sanitizeManualStage('Active Placed - Paid as Earned')
+        if (ct.includes('earn') && hasAdvanced) return sanitizeManualStage('Active Placed - Paid as Advanced')
       }
 
-      // Business rule: paid amount under 300 = earned, otherwise advanced.
-      // Apply even when a carrier mapping only exposes a subset of active stages.
-      if (dealValue < 300) {
-        if (hasEarned) return sanitizeManualStage('Active Placed - Paid as Earned')
-        return sanitizeManualStage('Active Placed - Paid as Earned')
-      }
-      if (dealValue >= 300) {
-        if (hasAdvanced) return sanitizeManualStage('Active Placed - Paid as Advanced')
-        return sanitizeManualStage('Active Placed - Paid as Advanced')
-      }
-
+      // Current business rule: we do not classify into "Paid as Earned".
+      // Any paid policy is treated as "Paid as Advanced".
       if (hasAdvanced) return sanitizeManualStage('Active Placed - Paid as Advanced')
-      if (hasEarned) return sanitizeManualStage('Active Placed - Paid as Earned')
-      if (has3M) return sanitizeManualStage('ACTIVE - 3 Months +')
-      if (hasPremPaid) return sanitizeManualStage('Premium Paid - Commission Pending')
+      return sanitizeManualStage('Active Placed - Paid as Advanced')
+
     }
 
     if (hasPremPaid) return sanitizeManualStage('Premium Paid - Commission Pending')
@@ -361,6 +524,10 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
 
   // ── Rule 3: Chargeback Failed Payment vs Chargeback Cancellation ───
   if (stageSet.has('Chargeback Failed Payment') && stageSet.has('Chargeback Cancellation')) {
+    // Requested termination / client-initiated cancellation must stay Cancellation.
+    if (looksLikeInitiatedCancellation) {
+      return sanitizeManualStage('Chargeback Cancellation')
+    }
     if (
       statusLower.includes('not taken') ||
       statusLower.includes('nottaken') ||
@@ -369,9 +536,10 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
       statusLower.includes('not issued')
     ) {
       if (effDate) {
-        const cutoff = new Date(effDate)
+        const cutoff = startOfLocalDay(effDate)
         cutoff.setDate(cutoff.getDate() + grace)
-        return today <= cutoff
+        const todayDay = startOfLocalDay(today)
+        return todayDay <= cutoff
           ? sanitizeManualStage('Chargeback Cancellation')
           : sanitizeManualStage('Chargeback Failed Payment')
       }
@@ -379,12 +547,6 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
     }
 
     if (statusLower.includes('lapse')) return sanitizeManualStage('Chargeback Failed Payment')
-
-    if (
-      looksLikeInitiatedCancellation
-    ) {
-      return sanitizeManualStage('Chargeback Cancellation')
-    }
 
     return sanitizeManualStage('Chargeback Failed Payment')
   }
@@ -400,6 +562,9 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
   // ── Rule 5: Pending Approval vs Pending Manual Action ──────────────
   // Pending Manual Action is ONLY set manually by auditors
   if (stageSet.has('Pending Approval') && stageSet.has('Pending Manual Action')) {
+    if (pendingOlderThan30Days) {
+      return sanitizeManualStage('Application Withdrawn')
+    }
     return sanitizeManualStage('Pending Approval')
   }
 
@@ -438,11 +603,15 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
     stageSet.has('FDPF Pending Reason') &&
     (stageSet.has('FDPF Insufficient Funds') || stageSet.has('FDPF Incorrect Banking Info'))
   ) {
+    if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
     return sanitizeManualStage('FDPF Pending Reason')
   }
 
   // ── Rule 10: Pending Approval vs Pending Lapse ─────────────────────
   if (stageSet.has('Pending Approval') && stageSet.has('Pending Lapse')) {
+    if (pendingOlderThan30Days) {
+      return sanitizeManualStage('Application Withdrawn')
+    }
     if (existingGhlStage && ACTIVE_STAGES.has(existingGhlStage)) return sanitizeManualStage('Pending Lapse')
     return sanitizeManualStage('Pending Approval')
   }
@@ -454,13 +623,34 @@ export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
   const hasChargebackFailed = stageSet.has('Chargeback Failed Payment')
   if (hasFdpf && hasPendingLapse && hasChargebackFailed) {
     if (existingGhlStage && ACTIVE_STAGES.has(existingGhlStage)) return sanitizeManualStage('Pending Lapse')
-    if (existingGhlStage && ISSUED_STAGES.has(existingGhlStage)) return sanitizeManualStage('FDPF Pending Reason')
+    if (existingGhlStage && ISSUED_STAGES.has(existingGhlStage)) {
+      if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
+      return sanitizeManualStage('FDPF Pending Reason')
+    }
     if (existingGhlStage && PENDING_LAPSE_STAGES.has(existingGhlStage))
       return sanitizeManualStage('Chargeback Failed Payment')
+    if (!fdpfPendingReasonAllowed) return sanitizeManualStage('Pending Lapse')
     return sanitizeManualStage('FDPF Pending Reason')
   }
 
   // ── Fallback: first mapping ────────────────────────────────────────
   const firstNonManual = possibleStages.find(s => !MANUAL_APPROVAL_STAGES.has(s))
-  return sanitizeManualStage(firstNonManual ?? possibleStages[0])
+  const fallback = sanitizeManualStage(firstNonManual ?? possibleStages[0])
+  if (
+    fallback === 'FDPF Pending Reason' ||
+    fallback === 'FDPF Insufficient Funds' ||
+    fallback === 'FDPF Incorrect Banking Info'
+  ) {
+    if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
+    return sanitizeManualStage('FDPF Pending Reason')
+  }
+  if (fallback === 'Pending Approval') {
+    if (pendingOlderThan30Days) {
+      return sanitizeManualStage('Application Withdrawn')
+    }
+    // Pending with past draft date: roll draft date forward by one month in stage logic
+    // by keeping policy in Pending Approval until the refreshed month window.
+    if (effDate && today > effDate) return sanitizeManualStage('Pending Approval')
+  }
+  return fallback
 }
