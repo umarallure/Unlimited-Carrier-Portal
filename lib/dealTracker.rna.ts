@@ -13,7 +13,7 @@ import {
   carrierStatusUnchanged,
   resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
-import { resolveGhlStage } from './ghlStageResolver'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
 
 /**
@@ -231,7 +231,8 @@ export async function processRNAFilesForDealTracker(
       policy.certificate_activation_date,
     )
 
-    const effectiveDate = mergeEffectiveDate(
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.certificate_activation_date,
@@ -247,6 +248,7 @@ export async function processRNAFilesForDealTracker(
       allMappings: ghlStageMappingMap,
       effectiveDate,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate,
       dealValue,
       commissionType: commission?.activity_type ?? null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -398,6 +400,7 @@ export async function processRNACommissionsForDealTracker(
   }
 
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
+  const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
 
   const commissionMap = new Map<string, any>()
   const commissionAmountsMap = new Map<string, number>()
@@ -535,7 +538,8 @@ export async function processRNACommissionsForDealTracker(
       comm.issue_date,
       policy?.certificate_activation_date,
     )
-    const effectiveDate = mergeEffectiveDate(
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
       existing?.effective_date,
       ddfDraftDate,
       policy?.certificate_activation_date,
@@ -548,12 +552,24 @@ export async function processRNACommissionsForDealTracker(
         ? (existing.status ?? statusFromDealValue(dealValue))
         : statusFromDealValue(dealValue)
 
+    const mappedGhlStage = resolveGhlStage({
+      carrierStatus: originalStatus,
+      allMappings: ghlStageMappingMap,
+      effectiveDate,
+      effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate,
+      dealValue,
+      commissionType: comm.activity_type ?? null,
+      existingGhlStage: existing?.ghl_stage ?? null,
+      carrierCode,
+    })
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
-      ghl_stage: existing?.ghl_stage ?? null,
+      ghl_stage: mappedGhlStage ?? existing?.ghl_stage ?? null,
       policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: normPolicyNumber || policyNumber,

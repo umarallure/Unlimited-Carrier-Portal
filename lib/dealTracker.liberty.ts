@@ -13,8 +13,8 @@ import {
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
-import { resolveGhlStage } from './ghlStageResolver'
-import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
 
 /**
  * Build insured name from Liberty policy for DDF lookup.
@@ -150,7 +150,8 @@ export async function processLibertyFilesForDealTracker(
     const dealCreationDate =
       (policy.issued as string | undefined) || (policy.submitted as string | undefined) || null
 
-    const effectiveDate = mergeEffectiveDate(
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.issued,
@@ -172,6 +173,7 @@ export async function processLibertyFilesForDealTracker(
       allMappings: ghlStageMappingMap,
       effectiveDate,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate: existing?.deal_creation_date ?? dealCreationDate,
       dealValue,
       commissionType: null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -185,7 +187,7 @@ export async function processLibertyFilesForDealTracker(
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
       policy_status: policyStatusResolved,
-      deal_creation_date: dealCreationDate,
+      deal_creation_date: existing?.deal_creation_date ?? dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,

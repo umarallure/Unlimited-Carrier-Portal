@@ -13,8 +13,8 @@ import {
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
-import { resolveGhlStage } from './ghlStageResolver'
-import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
 
 /**
  * Build insured/owner name from Transamerica policy for DDF lookup.
@@ -145,7 +145,8 @@ export async function processTransamericaFilesForDealTracker(
     const dealCreationDate =
       (policy.issue_date as string | undefined) || null
 
-    const effectiveDate = mergeEffectiveDate(
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.issue_date,
@@ -180,7 +181,7 @@ export async function processTransamericaFilesForDealTracker(
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
       policy_status: policyStatusResolved,
-      deal_creation_date: dealCreationDate,
+      deal_creation_date: existing?.deal_creation_date ?? dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,

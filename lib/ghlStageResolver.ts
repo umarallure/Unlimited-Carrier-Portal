@@ -1,3 +1,5 @@
+import { extractYmdFromDbValue, mergeEffectiveDate } from './calendarDate'
+
 /**
  * GHL Stage Resolution Logic
  *
@@ -211,6 +213,81 @@ function qualifiesForActiveThreeMonthsPlus(effDate: Date | null, today: Date): b
   const threeMonthMark = addCalendarMonths(anchor, 3)
   const now = startOfLocalDay(today)
   return now >= threeMonthMark
+}
+
+/** True when today is a strictly later calendar day than effective (FDPF starts the day after effective). */
+function isEffectiveDateFullyPassed(effDate: Date | null, today: Date): boolean {
+  if (!effDate || isNaN(effDate.getTime())) return false
+  return startOfLocalDay(today).getTime() > startOfLocalDay(effDate).getTime()
+}
+
+function toLocalYmd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * Pending policies with draft/effective date still before today: roll forward by whole calendar months
+ * until the date is on or after today's calendar day (same rule as +1 month until caught up).
+ */
+function rollPastDraftMonthsUntilCurrent(effDate: Date | null, today: Date): Date | null {
+  if (!effDate || isNaN(effDate.getTime())) return null
+  const todayDay = startOfLocalDay(today)
+  let cur = startOfLocalDay(effDate)
+  while (cur.getTime() < todayDay.getTime()) {
+    cur = startOfLocalDay(addCalendarMonths(cur, 1))
+  }
+  return cur
+}
+
+/**
+ * Carrier portal text suggests "pending approval" style pending (draft-date roll applies),
+ * not issued/active/lapse/decline/withdrawn.
+ */
+function looksLikePendingDraftCarrierStatus(carrierStatus: string | null): boolean {
+  if (!carrierStatus) return false
+  const s = carrierStatus.toLowerCase()
+  if (s.includes('issued')) return false
+  if (s.includes('lapse') || s.includes('lapsing')) return false
+  if (s.includes('declin')) return false
+  if (s.includes('withdraw')) return false
+  if (s.includes('cannot be found')) return false
+  if (s.includes('premium paid') || s.includes('active - premium') || s.includes('in force')) return false
+  if (s.includes('pending lapse') || s.includes('lapse pending')) return false
+  if (s.includes('pending payment') || s.includes('commission pending')) return false
+  if (s.includes('pending approval')) return true
+  if (s.includes('application pending') || s.includes('pending application')) return true
+  if (s.includes('pending') && s.includes('underwriting')) return true
+  return false
+}
+
+/**
+ * If pending + effective/draft date is before today, return rolled YYYY-MM-DD; otherwise null (no change).
+ * Call after mergeEffectiveDate so stored effective_date advances month-by-month until current.
+ */
+export function applyPendingDraftRollToEffectiveDate(
+  effectiveYmd: string | null | undefined,
+  carrierStatus: string | null | undefined,
+): string | null {
+  if (!looksLikePendingDraftCarrierStatus(carrierStatus ?? null)) return null
+  const ymd = extractYmdFromDbValue(effectiveYmd ?? '') || (effectiveYmd != null ? String(effectiveYmd).trim().slice(0, 10) : '')
+  if (!ymd) return null
+  const parsed = parseDate(ymd)
+  if (!parsed) return null
+  const rolled = rollPastDraftMonthsUntilCurrent(parsed, new Date())
+  if (!rolled) return null
+  const out = toLocalYmd(rolled)
+  return out === ymd ? null : out
+}
+
+/** Merge effective date (DDF + fallbacks), then roll month-by-month if pending + draft still before today. */
+export function mergeEffectiveDateWithPendingRoll(
+  carrierStatus: string | null | undefined,
+  existingEffective: unknown,
+  draftDateFromDdf: unknown,
+  ...fallbacks: unknown[]
+): string | null {
+  const base = mergeEffectiveDate(existingEffective, draftDateFromDdf, ...fallbacks)
+  return applyPendingDraftRollToEffectiveDate(base, carrierStatus ?? null) ?? base
 }
 
 export interface GhlStageResolutionContext {
@@ -445,17 +522,17 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   }
 
   const stageSet = new Set(possibleStages)
-  const effectiveDatePassed = !!(effDate && today > effDate)
-  const fdpfPendingReasonAllowed = effectiveDatePassed
+  // FDPF only from the calendar day *after* effective (effective day itself stays Issued / pre-FDPF).
+  const fdpfPendingReasonAllowed = isEffectiveDateFullyPassed(effDate, today)
   const selectPreFdpfStage = (): string => {
     if (stageSet.has('Issued - Pending First Draft')) return sanitizeManualStage('Issued - Pending First Draft')
     if (stageSet.has('Pending Approval')) return sanitizeManualStage('Pending Approval')
     return sanitizeManualStage('Issued - Pending First Draft')
   }
-  const pendingAnchorDate = dealCreated ?? effDate
+  // Withdrawn after >30 calendar days from deal *creation* only (not effective-date fallback).
   const pendingOlderThan30Days = (() => {
-    if (!pendingAnchorDate) return false
-    const createdDay = startOfLocalDay(pendingAnchorDate).getTime()
+    if (!dealCreated) return false
+    const createdDay = startOfLocalDay(dealCreated).getTime()
     const todayDay = startOfLocalDay(today).getTime()
     const days = Math.floor((todayDay - createdDay) / (1000 * 60 * 60 * 24))
     return days > 30
@@ -535,6 +612,14 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
       statusLower.includes('nt no pay') ||
       statusLower.includes('not issued')
     ) {
+      // "Not Taken" classification depends on when the carrier portal first reports it.
+      // Do not reclassify existing Not Taken chargeback rows on subsequent uploads.
+      if (
+        existingGhlStage === 'Chargeback Cancellation' ||
+        existingGhlStage === 'Chargeback Failed Payment'
+      ) {
+        return sanitizeManualStage(existingGhlStage)
+      }
       if (effDate) {
         const cutoff = startOfLocalDay(effDate)
         cutoff.setDate(cutoff.getDate() + grace)
@@ -648,9 +733,7 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
     if (pendingOlderThan30Days) {
       return sanitizeManualStage('Application Withdrawn')
     }
-    // Pending with past draft date: roll draft date forward by one month in stage logic
-    // by keeping policy in Pending Approval until the refreshed month window.
-    if (effDate && today > effDate) return sanitizeManualStage('Pending Approval')
+    return sanitizeManualStage('Pending Approval')
   }
   return fallback
 }

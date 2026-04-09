@@ -5,10 +5,11 @@
 
 import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
-import { resolveGhlStage } from './ghlStageResolver'
-import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
 
 export { mergeEffectiveDate } from './calendarDate'
+export { mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 
 /** Bulk-fetch DDF when there is no row, no contact on row, or no effective_date (need external draft_date). */
 export function policyNeedsDdfLookup(
@@ -1444,19 +1445,30 @@ export async function processAetnaCommissionsForDealTracker(
       const policyRow = policiesMap.get(policyNumber)
       const normalizedName = normalizeNameForSearch(policyRow?.insuredname || existing.name || '')
       const draftFromDdf = dailyDealFlowMap.get(normalizedName)?.draft_date ?? null
-      const mergedEffective = mergeEffectiveDate(
+      const carrierForRoll =
+        policyRow?.statusdisplaytext ||
+        policyRow?.statuscategory ||
+        existing.carrier_status ||
+        null
+      const mergedEffective = mergeEffectiveDateWithPendingRoll(
+        carrierForRoll,
         existing.effective_date,
         draftFromDdf,
         commission.effectivedate,
       )
       const mappedGhlStage = resolveGhlStage({
-        carrierStatus: existing.carrier_status ?? null,
+        carrierStatus: carrierForRoll ?? existing.carrier_status ?? null,
         allMappings: ghlStageMappingMap,
         effectiveDate: mergedEffective,
         effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(
           existing,
           mergedEffective,
         ),
+        dealCreationDate:
+          existing.deal_creation_date ??
+          policyRow?.apprecddate ??
+          policyRow?.issuedate ??
+          null,
         dealValue,
         chargeBack: effectiveChargeBack,
         commissionType: commission.commissiontype || existing.commission_type || null,
@@ -1513,12 +1525,18 @@ export async function processAetnaCommissionsForDealTracker(
         const phoneNumber = ddfInfo?.phone_number || null
         const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
-        const proposedEff = mergeEffectiveDate(null, effectiveDateFromDdf, commission.effectivedate)
+        const proposedEff = mergeEffectiveDateWithPendingRoll(
+          originalStatus || null,
+          null,
+          effectiveDateFromDdf,
+          commission.effectivedate,
+        )
         const mappedGhlStage = resolveGhlStage({
           carrierStatus: originalStatus || null,
           allMappings: ghlStageMappingMap,
           effectiveDate: proposedEff,
           effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(null, proposedEff),
+          dealCreationDate: policy.apprecddate || policy.issuedate || null,
           dealValue,
           chargeBack,
           commissionType: commission.commissiontype || null,
@@ -1777,7 +1795,12 @@ export async function processAetnaFilesForDealTracker(
       if (Number.isNaN(chargeBackForEntry as number)) chargeBackForEntry = null
     }
 
-    const effectiveDate = mergeEffectiveDate(existing?.effective_date, effectiveDateFromDdf)
+    const carrierStatusForPolicy = policy.statusdisplaytext || policy.statuscategory || null
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      carrierStatusForPolicy,
+      existing?.effective_date,
+      effectiveDateFromDdf,
+    )
     const effectiveDateForGhl = effectiveDate
 
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBackForEntry)
@@ -1785,8 +1808,6 @@ export async function processAetnaFilesForDealTracker(
       existing && financialsUnchanged(existing, dealValue, chargeBackForEntry)
         ? (existing.status ?? derivedStatus)
         : derivedStatus
-
-    const carrierStatusForPolicy = policy.statusdisplaytext || policy.statuscategory || null
     const statusUnchanged = existing && carrierStatusUnchanged(existing, carrierStatusForPolicy)
     const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
       statusMappingMap,
@@ -1803,6 +1824,7 @@ export async function processAetnaFilesForDealTracker(
       allMappings: ghlStageMappingMap,
       effectiveDate: effectiveDateForGhl,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate: existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null),
       dealValue,
       chargeBack: chargeBackForEntry,
       commissionType: existing?.commission_type || null,
@@ -2016,7 +2038,11 @@ export async function processAmamFilesForDealTracker(
     const dealCreationDate =
       existing?.deal_creation_date ??
       (policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null)
-    const effectiveDate = mergeEffectiveDate(existing?.effective_date, effectiveDateFromDdf)
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
+      existing?.effective_date,
+      effectiveDateFromDdf,
+    )
     const effectiveDateForGhl = effectiveDate
 
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBackPreserved)
@@ -2040,6 +2066,7 @@ export async function processAmamFilesForDealTracker(
       allMappings: ghlStageMappingMap,
       effectiveDate: effectiveDateForGhl,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate,
       dealValue,
       chargeBack: chargeBackPreserved,
       commissionType: existing?.commission_type || null,
@@ -2188,7 +2215,11 @@ export async function processAmamFilesForDealTrackerFromRows(
     const dealCreationDate =
       existing?.deal_creation_date ??
       (policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null)
-    const effectiveDate = mergeEffectiveDate(existing?.effective_date, effectiveDateFromDdf)
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
+      existing?.effective_date,
+      effectiveDateFromDdf,
+    )
     const preserveDealValue = existing?.deal_value != null ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value) : null
     const preserveCcValue = existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : (preserveDealValue != null ? preserveDealValue / 2 : null)
     const preserveChargeBack =
@@ -2221,6 +2252,7 @@ export async function processAmamFilesForDealTrackerFromRows(
       allMappings: ghlStageMappingMap,
       effectiveDate,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate,
       dealValue: dealValueFromRows,
       chargeBack: chargeBackFromRows,
       commissionType: existing?.commission_type || null,
@@ -2481,14 +2513,15 @@ export async function processAmamCommissionsForDealTracker(
         effectiveDateFromDdf = ddfInfo?.draft_date ?? null
       }
       const policyForWriting = policiesMap.get(policyNumber)
-      const effectiveDate = mergeEffectiveDate(
+      const carrierStatusForGhl = policyForWriting?.status_raw ?? existing.carrier_status ?? null
+      const effectiveDate = mergeEffectiveDateWithPendingRoll(
+        carrierStatusForGhl,
         existing.effective_date,
         effectiveDateFromDdf,
         commission.issdate,
       )
       const effectiveDateForGhl = effectiveDate
       const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
-      const carrierStatusForGhl = policyForWriting?.status_raw ?? existing.carrier_status ?? null
       const carrierUnchanged = carrierStatusUnchanged(existing, carrierStatusForGhl)
       const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
         statusMappingMap,
@@ -2504,6 +2537,12 @@ export async function processAmamCommissionsForDealTracker(
         allMappings: ghlStageMappingMap,
         effectiveDate: effectiveDateForGhl,
         effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+        dealCreationDate:
+          existing.deal_creation_date ??
+          policyForWriting?.recvdate_raw ??
+          policyForWriting?.policydate_raw ??
+          policyForWriting?.app_date_raw ??
+          null,
         dealValue,
         chargeBack,
         commissionType: commission.action || existing.commission_type || null,
@@ -2556,14 +2595,21 @@ export async function processAmamCommissionsForDealTracker(
     const ddfInfo = dailyDealFlowMap.get(normalizedName)
     const callCenter = ddfInfo?.call_center ?? null
     const phoneNumber = ddfInfo?.phone_number ?? null
-    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
-    const effectiveDate = mergeEffectiveDate(null, ddfInfo?.draft_date ?? null, commission.issdate)
+    const dealCreationDate =
+      policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
+      null,
+      ddfInfo?.draft_date ?? null,
+      commission.issdate,
+    )
 
     const mappedGhlStage = resolveGhlStage({
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(null, effectiveDate),
+      dealCreationDate,
       dealValue,
       chargeBack,
       commissionType: commission.action || null,
@@ -2776,14 +2822,15 @@ export async function processAmamCommissionsForDealTrackerFromRows(
         effectiveDateFromDdf = ddfInfo?.draft_date ?? null
       }
       const policyForWriting = policiesMap.get(policyNumber)
-      const effectiveDate = mergeEffectiveDate(
+      const carrierStatusForGhl = policyForWriting?.status_raw ?? existing.carrier_status ?? null
+      const effectiveDate = mergeEffectiveDateWithPendingRoll(
+        carrierStatusForGhl,
         existing.effective_date,
         effectiveDateFromDdf,
         commission.issdate,
       )
       const effectiveDateForGhl = effectiveDate
       const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
-      const carrierStatusForGhl = policyForWriting?.status_raw ?? existing.carrier_status ?? null
       const carrierUnchanged = carrierStatusUnchanged(existing, carrierStatusForGhl)
       const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
         statusMappingMap,
@@ -2796,6 +2843,12 @@ export async function processAmamCommissionsForDealTrackerFromRows(
         allMappings: ghlStageMappingMap,
         effectiveDate: effectiveDateForGhl,
         effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+        dealCreationDate:
+          existing.deal_creation_date ??
+          policyForWriting?.recvdate_raw ??
+          policyForWriting?.policydate_raw ??
+          policyForWriting?.app_date_raw ??
+          null,
         dealValue,
         chargeBack,
         commissionType: commission.action || existing.commission_type || null,
@@ -2846,13 +2899,20 @@ export async function processAmamCommissionsForDealTrackerFromRows(
     const ddfInfo = dailyDealFlowMap.get(normalizedName)
     const callCenter = ddfInfo?.call_center ?? null
     const phoneNumber = ddfInfo?.phone_number ?? null
-    const dealCreationDate = policy.policydate_raw || policy.app_date_raw || null
-    const effectiveDate = mergeEffectiveDate(null, ddfInfo?.draft_date ?? null, commission.issdate)
+    const dealCreationDate =
+      policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
+      null,
+      ddfInfo?.draft_date ?? null,
+      commission.issdate,
+    )
     const mappedGhlNew = resolveGhlStage({
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(null, effectiveDate),
+      dealCreationDate,
       dealValue,
       chargeBack,
       commissionType: commission.action || null,

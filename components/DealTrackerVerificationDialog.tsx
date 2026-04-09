@@ -145,15 +145,32 @@ export function DealTrackerVerificationDialog({
   // Keep user-typed spacing while editing; only convert truly empty input to null.
   const asNullableInput = (raw: string): string | null => (raw === '' ? null : raw)
 
+  const isMissingRequired = (v: unknown): boolean => {
+    if (v == null) return true
+    const t = String(v).trim()
+    return t === '' || t === '-'
+  }
+
+  const isEntryIncomplete = (e: DealTrackerPreviewEntry): boolean => {
+    // If DDF lookup does not find a match, call_center/phone stay empty.
+    // Business rule: keep these rows "Incomplete" so user fills effective date + contact.
+    return (
+      isInvalidGhlStageForSave(e.ghl_stage) ||
+      isMissingRequired(e.effective_date) ||
+      isMissingRequired(e.call_center) ||
+      isMissingRequired(e.phone_number)
+    )
+  }
+
   const handleConfirm = async () => {
-    const badGhl = editableEntries.find((e) => isInvalidGhlStageForSave(e.ghl_stage))
-    if (badGhl) {
+    const bad = editableEntries.find(isEntryIncomplete)
+    if (bad) {
       setError(
-        'GHL Stage cannot be empty or "-" for any row. Use the Incomplete tab to find and fix those rows before saving.'
+        'Incomplete rows found. Fill Effective Date, Call Center, and Phone (and ensure GHL Stage is valid) for every row before saving.'
       )
       const snap = new Set<number>()
       editableEntries.forEach((e, idx) => {
-        if (isInvalidGhlStageForSave(e.ghl_stage)) snap.add(idx)
+        if (isEntryIncomplete(e)) snap.add(idx)
       })
       setIncompleteSnapshot(snap)
       setFilter('incomplete')
@@ -172,14 +189,14 @@ export function DealTrackerVerificationDialog({
   }
 
   const handleNextStep = () => {
-    const badGhl = editableEntries.find((e) => isInvalidGhlStageForSave(e.ghl_stage))
-    if (badGhl) {
+    const bad = editableEntries.find(isEntryIncomplete)
+    if (bad) {
       setError(
-        'GHL Stage cannot be empty or "-" for any row. Use the Incomplete tab to fix rows before continuing to Commission Report.'
+        'Incomplete rows found. Fill Effective Date, Call Center, and Phone (and ensure GHL Stage is valid) for every row before continuing to Commission Report.'
       )
       const snap = new Set<number>()
       editableEntries.forEach((e, idx) => {
-        if (isInvalidGhlStageForSave(e.ghl_stage)) snap.add(idx)
+        if (isEntryIncomplete(e)) snap.add(idx)
       })
       setIncompleteSnapshot(snap)
       setFilter('incomplete')
@@ -215,8 +232,8 @@ export function DealTrackerVerificationDialog({
     return n && duplicateNames.has(n)
   }).length
 
-  const incompleteGhlCount = editableEntries.filter((e) => isInvalidGhlStageForSave(e.ghl_stage)).length
-  const hasIncompleteGhl = incompleteGhlCount > 0
+  const incompleteCount = editableEntries.filter((e) => isEntryIncomplete(e)).length
+  const hasIncomplete = incompleteCount > 0
 
   const filteredEntries =
     filter === 'new'
@@ -232,7 +249,7 @@ export function DealTrackerVerificationDialog({
                 return n && duplicateNames.has(n)
               })
             : filter === 'incomplete'
-              ? editableEntries.filter((e, idx) => incompleteSnapshot.has(idx) || isInvalidGhlStageForSave(e.ghl_stage))
+              ? editableEntries.filter((e, idx) => incompleteSnapshot.has(idx) || isEntryIncomplete(e))
               : editableEntries
 
   const loadDdfMatches = useCallback(async (rowKey: string, carrier: string | null, name: string | null) => {
@@ -376,20 +393,20 @@ export function DealTrackerVerificationDialog({
               className={
                 filter === 'incomplete'
                   ? 'bg-rose-600 text-white hover:bg-rose-700 dark:bg-rose-700 dark:hover:bg-rose-800'
-                  : cn(adminOutlineBtn, 'h-8', hasIncompleteGhl && 'border-rose-400/80 text-rose-800 dark:border-rose-500/60 dark:text-rose-300')
+                  : cn(adminOutlineBtn, 'h-8', hasIncomplete && 'border-rose-400/80 text-rose-800 dark:border-rose-500/60 dark:text-rose-300')
               }
               onClick={() => {
                 const snap = new Set<number>()
                 editableEntries.forEach((e, idx) => {
-                  if (isInvalidGhlStageForSave(e.ghl_stage)) snap.add(idx)
+                  if (isEntryIncomplete(e)) snap.add(idx)
                 })
                 setIncompleteSnapshot(snap)
                 setFilter('incomplete')
               }}
-              title="Rows where GHL Stage is missing or set to “-” (cannot save until fixed)"
+              title="Rows missing Effective Date, Call Center, Phone, or a valid GHL Stage (cannot save until fixed)"
             >
               <ClipboardList className="mr-1 h-3.5 w-3.5" />
-              Incomplete ({incompleteGhlCount})
+              Incomplete ({incompleteCount})
             </Button>
             </div>
             <div className="flex items-center gap-2">
@@ -448,16 +465,17 @@ export function DealTrackerVerificationDialog({
           </div>
         )}
 
-        {!isLoading && hasIncompleteGhl && (
+        {!isLoading && hasIncomplete && (
           <div
             role="status"
             className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900 dark:border-rose-800/80 dark:bg-rose-950/50 dark:text-rose-100"
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
             <span>
-              <strong>{incompleteGhlCount}</strong> row{incompleteGhlCount === 1 ? ' has' : 's have'} no valid{' '}
-              <strong>GHL Stage</strong> (empty or &quot;-&quot;). Fix them on the <strong>Incomplete</strong> tab — saving and
-              continuing to Commission Report are blocked until every row has a real stage.
+              <strong>{incompleteCount}</strong> row{incompleteCount === 1 ? ' is' : 's are'} incomplete. Fill{' '}
+              <strong>Effective Date</strong>, <strong>Call Center</strong>, and <strong>Phone</strong> (and a valid{' '}
+              <strong>GHL Stage</strong>) on the <strong>Incomplete</strong> tab — saving and continuing to Commission Report are
+              blocked until every row is complete.
             </span>
           </div>
         )}
@@ -859,10 +877,10 @@ export function DealTrackerVerificationDialog({
           {fileType === 'Commission' && onNext ? (
             <Button
               onClick={handleNextStep}
-              disabled={isLoading || editableEntries.length === 0 || hasIncompleteGhl}
+              disabled={isLoading || editableEntries.length === 0 || hasIncomplete}
               title={
-                hasIncompleteGhl
-                  ? 'Set a valid GHL Stage on every row (use Incomplete tab) before continuing'
+                hasIncomplete
+                  ? 'Fill Effective Date, Call Center, Phone, and set a valid GHL Stage on every row (use Incomplete tab) before continuing'
                   : undefined
               }
               className="min-w-[120px] bg-orange-600 font-semibold text-white hover:bg-orange-700"
@@ -872,10 +890,10 @@ export function DealTrackerVerificationDialog({
           ) : (
             <Button
               onClick={handleConfirm}
-              disabled={saving || isLoading || editableEntries.length === 0 || hasIncompleteGhl}
+              disabled={saving || isLoading || editableEntries.length === 0 || hasIncomplete}
               title={
-                hasIncompleteGhl
-                  ? 'Set a valid GHL Stage on every row (use Incomplete tab) before saving'
+                hasIncomplete
+                  ? 'Fill Effective Date, Call Center, Phone, and set a valid GHL Stage on every row (use Incomplete tab) before saving'
                   : undefined
               }
               className="min-w-[140px] bg-blue-600 font-semibold text-white hover:bg-blue-700"

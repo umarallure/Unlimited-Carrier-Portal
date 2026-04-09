@@ -267,195 +267,148 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Fallback: vertical layout where each policy appears as a block.
-    // IMPORTANT: parse each block in isolation; never scan tail of whole document.
+    // Fallback: vertical layout where pdf-parse extracts each column value on its own line.
+    // A single LIFE / First Year header is followed by multiple policy entries, each spanning
+    // a fixed sequence of lines: WritingAgent#, WritingAgentName, PolicyNumber, ClientName,
+    // State, PlanCode, EffMo/Yr, MthsPaid, PaidToDate, PolicyDur, CommPremium, CommRate,
+    // PayableComm, AppliedToAdvance.
     if (!rows.length) {
       for (let i = 0; i < lines.length; i++) {
         if (lines[i]?.trim() !== 'LIFE') continue
         if ((lines[i + 1] || '').trim() !== 'First Year') continue
 
-        const writingAgentNumber = (lines[i + 2] || '').trim()
-        const writingAgentName = (lines[i + 3] || '').trim() || null
-        const policyNumber = normalizeSentinelPolicyNumber((lines[i + 4] || '').trim())
-        const possibleClient = (lines[i + 5] || '').trim()
-        const possibleState = (lines[i + 6] || '').trim()
-
-        if (!writingAgentNumber || !policyNumber) continue
-
-        // Heuristic: state is 2-letter code; if the next line isn't, assume client name spans more lines.
-        let state = possibleState
-        let clientName = possibleClient
-        let cursor = i + 7
-        if (!/^[A-Z]{2}$/.test(possibleState)) {
-          clientName = [possibleClient, possibleState].filter(Boolean).join(' ')
-          state = (lines[i + 7] || '').trim()
-          cursor = i + 8
-        }
-        if (!/^[A-Z]{2}$/.test(state)) continue
-
-        const planCode = (lines[cursor++] || '').trim() || null
-        const effMonthYear = (lines[cursor++] || '').trim() || null
-        const monthsPaidStr = (lines[cursor++] || '').trim()
-        const paidToDate = (lines[cursor++] || '').trim() || null
-        const policyDurationStr = (lines[cursor++] || '').trim()
-
-        // Determine the end of this block (before next LIFE/First Year or TOTAL).
-        let blockEnd = lines.length
-        for (let j = cursor; j < lines.length; j++) {
+        // Find the end of this section (next TOTAL or another LIFE/First Year block).
+        let sectionEnd = lines.length
+        for (let j = i + 2; j < lines.length; j++) {
           const cur = (lines[j] || '').trim()
-          const next = (lines[j + 1] || '').trim()
-          if (cur === 'LIFE' && next === 'First Year') {
-            blockEnd = j
-            break
-          }
           if (/^TOTAL\b/i.test(cur)) {
-            blockEnd = j
+            sectionEnd = j
             break
           }
         }
 
-        const blockText = lines.slice(cursor, blockEnd).join(' ')
-        const tailMoney = blockText.match(moneyRegex) || []
-        const tailPct = blockText.match(pctRegex) || []
-
-        let commissionPremiumStr: string | undefined
-        let commissionRatePctStr: string | undefined
-        let payableCommStr: string | undefined
-        let appliedToAdvanceStr: string | undefined
-
-        // Map money strings → numeric values so we can choose by magnitude.
-        const moneyWithVals = tailMoney
-          .map(raw => ({ raw, val: parseMoney(raw) }))
-          .filter(m => typeof m.val === 'number' && !Number.isNaN(m.val as number)) as {
-            raw: string
-            val: number
-          }[]
-
-        const positiveMoney = moneyWithVals.filter(m => m.val > 0)
-
-        if (moneyWithVals.length > 0) {
-          // Prefer explicit row shape "... <rate> <payable> <applied>" when available.
-          const rowTailMatch = blockText.match(
-            /(?:\d+(?:\.\d+)?\s*%)\s+(\(?\$?\d[\d,]*\.\d{2}\)?)\s+(\(?\$?\d[\d,]*\.\d{2}\)?)/i
-          )
-          if (rowTailMatch) {
-            payableCommStr = rowTailMatch[1]
-            appliedToAdvanceStr = rowTailMatch[2]
-          } else {
-            // Fallback heuristic within block only.
-            const nonZeroByAbs = moneyWithVals
-              .filter(m => m.val !== 0)
-              .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
-            if (nonZeroByAbs.length > 0) {
-              payableCommStr = nonZeroByAbs[0].raw
-            } else if (moneyWithVals.length > 0) {
-              payableCommStr = moneyWithVals[0].raw
-            }
-            const afterPayable = moneyWithVals.find(m => m.raw !== payableCommStr)
-            if (afterPayable) appliedToAdvanceStr = afterPayable.raw
+        // Iterate through policy entries within this section.
+        let cursor = i + 2
+        while (cursor < sectionEnd) {
+          const writingAgentNumber = (lines[cursor] || '').trim()
+          // Writing agent numbers start with a letter followed by digits (e.g. K999999622)
+          if (!writingAgentNumber || !/^[A-Z]?\d{5,}$/i.test(writingAgentNumber)) {
+            cursor++
+            continue
           }
-          const firstMoney = moneyWithVals[0]
-          if (firstMoney && firstMoney.raw !== payableCommStr) commissionPremiumStr = firstMoney.raw
+
+          const writingAgentName = (lines[cursor + 1] || '').trim() || null
+          const policyNumber = normalizeSentinelPolicyNumber((lines[cursor + 2] || '').trim())
+          if (!policyNumber) {
+            cursor++
+            continue
+          }
+
+          // Client name: may span 1 or 2 lines before the 2-letter state code.
+          const possibleClient = (lines[cursor + 3] || '').trim()
+          const possibleState = (lines[cursor + 4] || '').trim()
+
+          let state: string
+          let clientName: string
+          let fieldCursor: number
+          if (/^[A-Z]{2}$/.test(possibleState)) {
+            clientName = possibleClient
+            state = possibleState
+            fieldCursor = cursor + 5
+          } else if (/^[A-Z]{2}$/.test((lines[cursor + 5] || '').trim())) {
+            clientName = [possibleClient, possibleState].filter(Boolean).join(' ')
+            state = (lines[cursor + 5] || '').trim()
+            fieldCursor = cursor + 6
+          } else {
+            cursor++
+            continue
+          }
+
+          const planCode = (lines[fieldCursor] || '').trim() || null
+          const effMonthYear = (lines[fieldCursor + 1] || '').trim() || null
+          const monthsPaidStr = (lines[fieldCursor + 2] || '').trim()
+          const paidToDate = (lines[fieldCursor + 3] || '').trim() || null
+          const policyDurationStr = (lines[fieldCursor + 4] || '').trim()
+          const commPremiumStr = (lines[fieldCursor + 5] || '').trim() || null
+          const commRateStr = (lines[fieldCursor + 6] || '').trim() || null
+          const payableCommStr = (lines[fieldCursor + 7] || '').trim() || null
+          const appliedToAdvanceStr = (lines[fieldCursor + 8] || '').trim() || null
+
+          // Validate key fields to ensure we're reading a real entry.
+          if (!effMonthYear || !/^\d{2}\/\d{4}$/.test(effMonthYear)) {
+            cursor++
+            continue
+          }
+
+          rowNumber += 1
+          rows.push({
+            agency_carrier_id: agencyCarrierId,
+            file_id: fileId,
+            row_number: rowNumber,
+            policy_number: policyNumber,
+            writing_agent_number: writingAgentNumber,
+            writing_agent_name: writingAgentName,
+            client_name: clientName || null,
+            state,
+            plan_code: planCode,
+            eff_month_year: effMonthYear,
+            months_paid: monthsPaidStr ? Number(monthsPaidStr) : null,
+            paid_to_date: paidToDate,
+            policy_duration: policyDurationStr ? Number(policyDurationStr) : null,
+            commission_premium: parseMoney(commPremiumStr),
+            commission_rate_pct: commRateStr
+              ? Number(commRateStr.replace(/[%\s]/g, ''))
+              : null,
+            payable_commission: parseMoney(payableCommStr),
+            applied_to_advance: parseMoney(appliedToAdvanceStr),
+            statement_date: commissionPeriodStart,
+            commission_period_start: commissionPeriodStart,
+            commission_period_end: commissionPeriodEnd,
+            source_file: storagePath,
+            source_format: 'SENTINEL_COMMISSION_PDF',
+          })
+
+          // Advance cursor past this entry (fieldCursor + 9 fields read).
+          cursor = fieldCursor + 9
         }
 
-        if (tailPct.length >= 1) {
-          commissionRatePctStr = tailPct[0]
-        }
-
-        if (!payableCommStr) {
-          // We at least need payable commission; skip if we truly couldn't infer it.
-          continue
-        }
-
-        rowNumber += 1
-        rows.push({
-          agency_carrier_id: agencyCarrierId,
-          file_id: fileId,
-          row_number: rowNumber,
-          policy_number: policyNumber,
-          writing_agent_number: writingAgentNumber,
-          writing_agent_name: writingAgentName,
-          client_name: clientName || null,
-          state,
-          plan_code: planCode,
-          eff_month_year: effMonthYear,
-          months_paid: monthsPaidStr ? Number(monthsPaidStr) : null,
-          paid_to_date: paidToDate,
-          policy_duration: policyDurationStr ? Number(policyDurationStr) : null,
-          commission_premium: parseMoney(commissionPremiumStr),
-          commission_rate_pct: commissionRatePctStr
-            ? Number(commissionRatePctStr.replace(/[%]/g, ''))
-            : null,
-          payable_commission: parseMoney(payableCommStr),
-          applied_to_advance: parseMoney(appliedToAdvanceStr),
-          statement_date: commissionPeriodStart,
-          commission_period_start: commissionPeriodStart,
-          commission_period_end: commissionPeriodEnd,
-          source_file: storagePath,
-          source_format: 'SENTINEL_COMMISSION_PDF',
-        })
-        // Move outer index forward to this block end to avoid duplicate parsing.
-        i = blockEnd - 1
+        // Move outer index forward to section end.
+        i = sectionEnd - 1
       }
     }
 
     if (!rows.length) {
       console.warn('[Sentinel PDF] No policy rows detected for file:', storagePath)
-      // Log a sample of raw lines so we can tune the parser to real output.
       console.log('[Sentinel PDF][debug] raw line sample:', lines.slice(0, 80))
-      return NextResponse.json({ rowsInserted: 0 })
-    }
-
-    // Ignore zero-payable rows; only keep rows with real commission movement.
-    // Parentheses are already parsed as negative by parseMoney(), so chargebacks
-    // (e.g. "($436.88)") remain and are processed.
-    const rowsWithPayable = rows.filter((r) => {
-      const amt =
-        r.payable_commission != null
-          ? (typeof r.payable_commission === 'number'
-              ? r.payable_commission
-              : Number(String(r.payable_commission).replace(/,/g, '')))
-          : NaN
-      return !Number.isNaN(amt) && amt !== 0
-    })
-    const zeroPayableCount = rows.length - rowsWithPayable.length
-
-    if (!rowsWithPayable.length) {
-      console.warn(
-        '[Sentinel PDF] Parsed rows found but all payable_commission values are zero.',
-        { parsedRows: rows.length }
-      )
       return NextResponse.json({ rowsInserted: 0 })
     }
 
     console.log(
       '[Sentinel PDF] Parsed sample:',
-      rowsWithPayable.slice(0, 5).map((r) => ({
+      rows.slice(0, 5).map((r) => ({
         policy_number: r.policy_number,
         payable_commission: r.payable_commission,
         applied_to_advance: r.applied_to_advance,
         client_name: r.client_name,
       }))
     )
-    console.log('[Sentinel PDF] Parse stats:', {
-      parsedRows: rows.length,
-      insertedRows: rowsWithPayable.length,
-      filteredZeroPayable: zeroPayableCount,
-    })
+    console.log('[Sentinel PDF] Parse stats:', { totalRows: rows.length })
 
     // Append-only behavior (same as other commission uploads):
-    // keep historical rows; do not replace prior uploads.
+    // Store all rows including zero-payable ones for record keeping.
+    // The deal tracker aggregates positive (deal value) and negative (chargeback)
+    // payable_commission amounts per policy separately.
     const { error: insertError } = await supabase
       .from('sentinel_commissions')
-      .insert(rowsWithPayable)
+      .insert(rows)
 
     if (insertError) {
       console.error('[Sentinel PDF] Insert error:', insertError.message)
       return NextResponse.json({ error: insertError.message }, { status: 500 })
     }
 
-    console.log('[Sentinel PDF] Inserted sentinel_commissions rows:', rowsWithPayable.length)
-    return NextResponse.json({ rowsInserted: rowsWithPayable.length })
+    console.log('[Sentinel PDF] Inserted sentinel_commissions rows:', rows.length)
+    return NextResponse.json({ rowsInserted: rows.length })
   } catch (e: any) {
     console.error('[Sentinel PDF] Error handling request:', e)
     return NextResponse.json({ error: 'Failed to parse Sentinel commission PDF.' }, { status: 500 })

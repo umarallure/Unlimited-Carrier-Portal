@@ -14,8 +14,8 @@ import {
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
-import { resolveGhlStage } from './ghlStageResolver'
-import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
 
 /**
  * Build insured name from Corebridge policy for DDF lookup.
@@ -148,9 +148,13 @@ export async function processCorebridgeFilesForDealTracker(
     let dealValue: number | null = existing?.deal_value != null ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value) : null
     let ccValue: number | null = dealValue != null ? (existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : dealValue / 2) : null
 
-    const dealCreationDate = (policy.date_of_issue as string | undefined) || null
+    // Preserve existing deal creation date; only set from policy for new rows.
+    const dealCreationDate =
+      existing?.deal_creation_date ??
+      ((policy.date_of_issue as string | undefined) || null)
 
-    const effectiveDate = mergeEffectiveDate(
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.effective_date,
@@ -173,6 +177,7 @@ export async function processCorebridgeFilesForDealTracker(
       allMappings: ghlStageMappingMap,
       effectiveDate,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate,
       dealValue,
       commissionType: null,
       existingGhlStage: existing?.ghl_stage ?? null,

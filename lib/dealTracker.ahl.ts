@@ -19,8 +19,8 @@ import {
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
 } from './dealTracker'
-import { resolveGhlStage } from './ghlStageResolver'
-import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
+import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
 
 export async function processAhlFilesForDealTracker(
   agencyCarrierId: string,
@@ -175,11 +175,14 @@ export async function processAhlFilesForDealTracker(
       if (Number.isNaN(ccValue as number)) ccValue = null
     }
 
-    const effectiveDate = mergeEffectiveDate(
+    const effectiveDate = mergeEffectiveDateWithPendingRoll(
+      originalStatus,
       existing?.effective_date,
       effectiveDateFromDdf,
       existing ? null : policy.issuedate,
     )
+    const dealCreationDateForGhl =
+      existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null)
 
     const derivedStatus = statusFromDealValue(dealValue)
     const chargeBackForEntry = existing?.charge_back ?? null
@@ -201,6 +204,7 @@ export async function processAhlFilesForDealTracker(
       allMappings: ghlStageMappingMap,
       effectiveDate,
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
+      dealCreationDate: dealCreationDateForGhl,
       dealValue,
       commissionType: commission?.commissiontype || null,
       existingGhlStage: existing?.ghl_stage ?? null,
@@ -214,7 +218,7 @@ export async function processAhlFilesForDealTracker(
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
       policy_status: policyStatusResolved,
-      deal_creation_date: existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null),
+      deal_creation_date: dealCreationDateForGhl,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
@@ -415,16 +419,23 @@ export async function processAhlCommissionsForDealTracker(
       )
       const normalizedName = normalizeNameForSearch(policy?.insuredname || existing.name || '')
       const draftFromDdf = dailyDealFlowMap.get(normalizedName)?.draft_date ?? null
-      const mergedEffective = mergeEffectiveDate(
+      const mergedEffective = mergeEffectiveDateWithPendingRoll(
+        carrierStatusForGhl,
         existing.effective_date,
         draftFromDdf,
         commission.effectivedate,
       )
+      const dealCreationDateForGhl =
+        existing.deal_creation_date ??
+        policy?.apprecddate ??
+        policy?.issuedate ??
+        null
       const mappedGhlStage = resolveGhlStage({
         carrierStatus: carrierStatusForGhl,
         allMappings: ghlStageMappingMap,
         effectiveDate: mergedEffective,
         effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, mergedEffective),
+        dealCreationDate: dealCreationDateForGhl,
         dealValue,
         chargeBack: effectiveChargeBack,
         commissionType: commission.commissiontype || existing.commission_type || null,
@@ -484,13 +495,20 @@ export async function processAhlCommissionsForDealTracker(
         const ddfInfo = dailyDealFlowMap.get(normalizedName)
         const callCenter = ddfInfo?.call_center ?? null
         const phoneNumber = ddfInfo?.phone_number ?? null
-        const proposedEff = mergeEffectiveDate(null, ddfInfo?.draft_date ?? null, commission.effectivedate)
+        const dealCreationDateNew = policy.apprecddate || policy.issuedate || null
+        const proposedEff = mergeEffectiveDateWithPendingRoll(
+          originalStatus,
+          null,
+          ddfInfo?.draft_date ?? null,
+          commission.effectivedate,
+        )
 
         const mappedGhlStage = resolveGhlStage({
           carrierStatus: originalStatus,
           allMappings: ghlStageMappingMap,
           effectiveDate: proposedEff,
           effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(null, proposedEff),
+          dealCreationDate: dealCreationDateNew,
           dealValue,
           commissionType: commission.commissiontype || null,
           existingGhlStage: null,
@@ -504,7 +522,7 @@ export async function processAhlCommissionsForDealTracker(
           ghl_name: null,
           ghl_stage: mappedGhlStage,
           policy_status: policyStatusResolved,
-          deal_creation_date: policy.apprecddate || policy.issuedate || null,
+          deal_creation_date: dealCreationDateNew,
           policy_number: policyNumber,
           carrier: carrierName,
           carrier_id: carrier.id,

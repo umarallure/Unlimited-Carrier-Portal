@@ -482,6 +482,7 @@ export async function processSentinelCommissionsForDealTracker(
       carrier_id: carrierId,
       deal_value: dealValue,
       cc_value: ccValue,
+      charge_back: effectiveChargeBack,
       notes: existing?.notes ?? null,
       status: statusForEntry,
       last_updated: new Date().toISOString(),
