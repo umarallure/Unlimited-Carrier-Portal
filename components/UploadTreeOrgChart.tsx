@@ -587,7 +587,7 @@ export function UploadTreeOrgChart() {
         fileType={lastUploadContext?.fileType}
         onNext={
           lastUploadContext?.fileType === 'Commission' &&
-          ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL'].includes(
+          ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL', 'SENTINEL'].includes(
             (lastUploadContext?.carrierCode || '').toUpperCase()
           )
             ? () => {

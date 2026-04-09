@@ -169,6 +169,7 @@ export async function processDealTrackerAfterUpload(
       } else if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing Sentinel commission file for deal tracker...')
         previewEntries = await processSentinelCommissionsForDealTracker(agencyCarrierId, fileId)
+        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
       }
     } else if (isAhl) {
       if (fileType === 'Policy') {

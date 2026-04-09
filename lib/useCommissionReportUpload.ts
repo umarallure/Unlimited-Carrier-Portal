@@ -267,9 +267,20 @@ function dbRowToDisplay(
   let name =
     carrierCode === 'COREBRIDGE'
       ? ''
-      : row.client ?? row.insured_name ?? row.insureds_name ?? row.INSURED_NAME ?? row['Name'] ?? ''
+      : row.client ??
+        row.client_name ??
+        row.insured_name ??
+        row.insureds_name ??
+        row.INSURED_NAME ??
+        row['Name'] ??
+        ''
   let salesAgent =
-    row.writingagentname ?? row.writingagent ?? row.paid_producer ?? row['Sales Agent'] ?? ''
+    row.writingagentname ??
+    row.writingagent ??
+    row.writing_agent_name ??
+    row.paid_producer ??
+    row['Sales Agent'] ??
+    ''
   const policyNumber = String(row.policy_number ?? '')
   const dt = dealTrackerMap?.get(policyNumber)
   if (dt) {
@@ -281,12 +292,29 @@ function dbRowToDisplay(
     if (useDtSalesAgent && dt.sales_agent?.toString().trim()) salesAgent = dt.sales_agent
   }
   const dateRaw =
-    row.commissionpaiddate ?? row.statement_date ?? row.activity_date ?? row.issue_date ?? row.effectivedate ?? row.appdate ?? row['Date'] ?? ''
-  const rate = row.rate_pct ?? row.com_rate ?? row.adv_rate ?? row.comm_pct ?? row['Commission Rate'] ?? ''
+    row.commissionpaiddate ??
+    row.statement_date ??
+    row.commission_period_end ??
+    row.activity_date ??
+    row.issue_date ??
+    row.effectivedate ??
+    row.appdate ??
+    row['Date'] ??
+    ''
+  const rate =
+    row.rate_pct ??
+    row.commission_rate_pct ??
+    row.com_rate ??
+    row.adv_rate ??
+    row.comm_pct ??
+    row['Commission Rate'] ??
+    ''
   const rawAdvanceVal =
-    carrierCode === 'COREBRIDGE'
-      ? (row.commission_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
-      : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
+    carrierCode === 'SENTINEL'
+      ? (row.payable_commission ?? row.applied_to_advance ?? row['Advance'])
+      : carrierCode === 'COREBRIDGE'
+        ? (row.commission_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
+        : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
   let advance = rawAdvanceVal != null && rawAdvanceVal !== '' ? String(rawAdvanceVal) : ''
   let chargeBack = ''
 
@@ -305,6 +333,8 @@ function dbRowToDisplay(
         ? 'MOH'
         : carrierCode === 'AHL'
           ? 'AHL'
+          : carrierCode === 'SENTINEL'
+            ? 'Sentinel'
           : 'Aetna'
   const effectiveCarrierLabel = carrierCode === 'COREBRIDGE' ? 'Corebridge' : carrierLabel
   return {
@@ -357,6 +387,23 @@ function displayToDbRow(
       base.commissionamount = raw.commissionamount as number
     }
     if (display.date) base.commissionpaiddate = display.date
+  } else if (carrierCode === 'SENTINEL') {
+    base.client_name = name
+    base.writing_agent_name = salesAgent
+    if (display.commission_rate != null && display.commission_rate !== '') {
+      const rateNum = parseFloat(String(display.commission_rate).replace(/,/g, ''))
+      if (!Number.isNaN(rateNum)) base.commission_rate_pct = rateNum
+    }
+    const advNum = display.advance ? parseFloat(String(display.advance).replace(/,/g, '')) : NaN
+    const cbNum = display.charge_back ? parseFloat(String(display.charge_back).replace(/,/g, '')) : NaN
+    if (!Number.isNaN(advNum) && advNum > 0) {
+      base.payable_commission = advNum
+    } else if (!Number.isNaN(cbNum) && cbNum < 0) {
+      base.payable_commission = cbNum
+    } else {
+      base.payable_commission = raw.payable_commission as number
+    }
+    if (display.date) base.statement_date = display.date
   } else if (carrierCode === 'MOH') {
     base.insureds_name = name
     // Do not overwrite MOH sales agent here; it is already maintained from the policy upload.
@@ -414,6 +461,7 @@ function commissionTableForCarrier(carrierCode: string): string | null {
   if (c === 'COREBRIDGE') return 'corebridge_commissions'
   if (c === 'AFLAC') return 'aflac_commissions'
   if (c === 'AETNA') return 'aetna_commissions'
+  if (c === 'SENTINEL') return 'sentinel_commissions'
   if (c === 'AHL') return 'ahl_commissions'
   return null
 }
@@ -516,6 +564,7 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         carrierCode !== 'MOH' &&
         carrierCode !== 'COREBRIDGE' &&
         carrierCode !== 'AFLAC' &&
+        carrierCode !== 'SENTINEL' &&
         carrierCode !== 'AHL'
       )
         return
