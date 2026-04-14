@@ -233,6 +233,7 @@ export async function processRNAFilesForDealTracker(
 
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.certificate_activation_date,
@@ -540,6 +541,7 @@ export async function processRNACommissionsForDealTracker(
     )
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       ddfDraftDate,
       policy?.certificate_activation_date,

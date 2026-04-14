@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Calendar, Loader2 } from 'lucide-react'
+import { Calendar, Loader2, Shield } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -10,14 +10,21 @@ import { PageHeader } from '@/components/PageHeader'
 import { createClient } from '@/lib/supabase/client'
 import {
   buildInvoiceDraft,
+  buildBpoInvoiceLines,
   getPreviousChargebackByCallCenter,
   markInvoiceBatchPaid,
   type InvoiceDraftResult,
+  type BpoInvoiceDetailResult,
 } from '@/lib/invoicing'
+import { cn } from '@/lib/utils'
 
 function formatMoney(value: number): string {
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
+
+const invoiceTableHead =
+  'border-b border-slate-200 bg-slate-50 px-2 py-2 text-left text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100'
+const invoiceCell = 'border-b border-slate-100 px-2 py-1.5 text-xs text-slate-800 dark:border-slate-800 dark:text-slate-200'
 
 export default function InvoicingPage() {
   const supabase = createClient()
@@ -26,14 +33,18 @@ export default function InvoicingPage() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<InvoiceDraftResult | null>(null)
-  const [overridesByPolicyKey, setOverridesByPolicyKey] = useState<Record<string, string>>({})
+  const [bpoDetail, setBpoDetail] = useState<BpoInvoiceDetailResult | null>(null)
   const [previousChargebackByCallCenter, setPreviousChargebackByCallCenter] = useState<Record<string, string>>({})
 
-  const groupBaseTotalAfterPreviousChargeback = (callCenter: string, baseTotal: number): number => {
+  const balanceDueForBpo = (callCenter: string, subtotal: number): number => {
     const raw = previousChargebackByCallCenter[callCenter] ?? '0'
-    const previousChargeback = Number.parseFloat(raw)
-    const deduction = Number.isNaN(previousChargeback) ? 0 : previousChargeback
-    return baseTotal - deduction
+    const prev = Number.parseFloat(raw)
+    const p = Number.isNaN(prev) ? 0 : prev
+    return round2(subtotal - p)
+  }
+
+  function round2(n: number): number {
+    return Math.round(n * 100) / 100
   }
 
   const generateInvoice = async () => {
@@ -48,15 +59,19 @@ export default function InvoicingPage() {
 
     setLoading(true)
     try {
-      const result = await buildInvoiceDraft(dateFrom, dateTo)
+      const [result, bpo] = await Promise.all([
+        buildInvoiceDraft(dateFrom, dateTo),
+        buildBpoInvoiceLines(dateFrom, dateTo),
+      ])
       const previous = await getPreviousChargebackByCallCenter(result.groups.map((g) => g.callCenter))
       const previousText: Record<string, string> = {}
       for (const [k, v] of Object.entries(previous)) previousText[k] = String(v || 0)
       setDraft(result)
-      setOverridesByPolicyKey({})
+      setBpoDetail(bpo)
       setPreviousChargebackByCallCenter(previousText)
-    } catch (error: any) {
-      alert(error?.message || 'Failed to generate invoice draft.')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to generate invoice draft.'
+      alert(message)
     } finally {
       setLoading(false)
     }
@@ -67,12 +82,6 @@ export default function InvoicingPage() {
     setSaving(true)
     try {
       const { data } = await supabase.auth.getUser()
-      const numericOverrides: Record<string, number> = {}
-      for (const [key, raw] of Object.entries(overridesByPolicyKey)) {
-        if (!raw || raw.trim() === '') continue
-        const parsed = Number.parseFloat(raw)
-        if (!Number.isNaN(parsed)) numericOverrides[key] = parsed
-      }
       const previousChargebacks: Record<string, number> = {}
       for (const [center, raw] of Object.entries(previousChargebackByCallCenter)) {
         const parsed = Number.parseFloat(raw)
@@ -83,30 +92,31 @@ export default function InvoicingPage() {
         startDate: draft.startDate,
         endDate: draft.endDate,
         groups: draft.groups,
-        overridesByPolicyKey: numericOverrides,
+        overridesByPolicyKey: {},
         previousChargebackByCallCenter: previousChargebacks,
         paidByEmail: data.user?.email || null,
       })
       alert(`Invoice batch marked as paid. Batch ID: ${batchId}`)
       setDraft(null)
-      setOverridesByPolicyKey({})
+      setBpoDetail(null)
       setPreviousChargebackByCallCenter({})
-    } catch (error: any) {
-      alert(error?.message || 'Failed to mark invoice as paid.')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to mark invoice as paid.'
+      alert(message)
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <div className="admin-page space-y-6">
+    <div className="admin-page space-y-6 print:space-y-4">
       <PageHeader
         title="Invoicing"
-        description="Generate editable call-center invoice drafts from payment transactions, then persist invoicing status history on Paid."
+        description="Generate BPO (call center) invoices: sales first, then chargebacks. Lead value shows 50% of the underlying commission amount (not gross). Use Mark paid when the batch is settled."
         icon={<span className="text-xl font-bold text-orange-400">$</span>}
       />
 
-      <Card>
+      <Card className="print:hidden">
         <CardHeader>
           <CardTitle>Invoice range</CardTitle>
         </CardHeader>
@@ -140,103 +150,206 @@ export default function InvoicingPage() {
         </CardContent>
       </Card>
 
-      {draft && (
-        <>
-          <Card>
-            <CardHeader>
-              <CardTitle>
-                Invoice draft ({draft.startDate} to {draft.endDate})
-              </CardTitle>
-            </CardHeader>
-          </Card>
+      {bpoDetail && bpoDetail.groups.length > 0 && (
+        <p className="text-sm text-muted-foreground print:hidden">
+          Invoice period: <span className="font-medium text-foreground">{bpoDetail.rangeLabel}</span>
+        </p>
+      )}
 
-          {draft.groups.length === 0 ? (
-            <Card>
-              <CardContent className="py-8 text-sm text-muted-foreground">No commission transactions found in this date range.</CardContent>
-            </Card>
-          ) : (
-            draft.groups.map((group) => (
-              <Card key={group.callCenter}>
-                <CardHeader className="flex flex-row items-center justify-between">
-                  <CardTitle>{group.callCenter}</CardTitle>
-                  <div className="text-sm text-muted-foreground">
-                    Policies: {group.policyCount} | Base total: ${formatMoney(groupBaseTotalAfterPreviousChargeback(group.callCenter, group.ccInvoiceTotal))}
-                  </div>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <div className="flex flex-wrap items-center justify-end gap-3 px-6 pb-3 pt-1">
-                    <span className="text-xs text-muted-foreground">Previous chargeback amount</span>
-                    <Input
-                      value={previousChargebackByCallCenter[group.callCenter] ?? '0'}
-                      onChange={(e) =>
-                        setPreviousChargebackByCallCenter((prev) => ({
-                          ...prev,
-                          [group.callCenter]: e.target.value,
-                        }))
-                      }
-                      className="h-9 w-[160px] text-right"
-                    />
-                  </div>
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Policy Name</TableHead>
-                          <TableHead>Carrier</TableHead>
-                          <TableHead>Commission Date</TableHead>
-                          <TableHead>Latest Invoicing Status</TableHead>
-                          <TableHead className="text-right">Base CC 50%</TableHead>
-                          <TableHead className="text-right">Invoice Amount (Editable)</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {group.policies.map((policy) => (
-                          <TableRow key={policy.policyKey}>
-                            <TableCell>{policy.policyName}</TableCell>
-                            <TableCell>{policy.carrier}</TableCell>
-                            <TableCell>{policy.latestCommissionDate}</TableCell>
-                            <TableCell>{policy.latestInvoicingStatus}</TableCell>
-                            <TableCell className="text-right">${formatMoney(policy.ccNet)}</TableCell>
-                            <TableCell className="text-right">
-                              <div className="flex justify-end">
-                                <Input
-                                  value={overridesByPolicyKey[policy.policyKey] ?? ''}
-                                  placeholder={formatMoney(policy.ccNet)}
-                                  onChange={(e) =>
-                                    setOverridesByPolicyKey((prev) => ({
-                                      ...prev,
-                                      [policy.policyKey]: e.target.value,
-                                    }))
-                                  }
-                                  className="h-9 w-[140px] text-right"
-                                />
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                </CardContent>
-              </Card>
-            ))
+      {bpoDetail && bpoDetail.groups.length === 0 && draft && draft.groups.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-sm text-muted-foreground">
+            No commission transactions found in this date range.
+          </CardContent>
+        </Card>
+      )}
+
+      {bpoDetail?.groups.map((group) => (
+        <div
+          key={group.callCenter}
+          className={cn(
+            'overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-950',
+            'print:break-inside-avoid print:border print:shadow-none',
           )}
-
-          {draft.groups.length > 0 && (
-            <div className="flex justify-end">
-              <Button onClick={markPaid} disabled={saving} className="bg-green-600 text-white hover:bg-green-700">
-                {saving ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  'Paid'
-                )}
-              </Button>
+        >
+          {/* Invoice header — matches sample: title + date range */}
+          <div className="border-b border-slate-200 bg-white px-6 py-6 text-center dark:border-slate-800 dark:bg-slate-950">
+            <div className="mb-3 flex justify-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-900">
+                <Shield className="h-8 w-8 text-slate-500 dark:text-slate-400" />
+              </div>
             </div>
-          )}
-        </>
+            <h2 className="text-xl font-semibold tracking-tight text-slate-900 dark:text-white">{group.callCenter}</h2>
+            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{bpoDetail.rangeLabel}</p>
+          </div>
+
+          <div className="p-4 sm:p-6">
+            {/* Sales section */}
+            <div className="mb-6">
+              <div className="rounded-t-md bg-teal-600 px-3 py-2 text-center text-sm font-semibold text-white dark:bg-teal-700">
+                Sales
+              </div>
+              <div className="overflow-x-auto rounded-b-md border border-t-0 border-slate-200 dark:border-slate-700">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Sales</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
+                      <TableHead className={invoiceTableHead}>Carrier</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'min-w-[120px]')}>Product</TableHead>
+                      <TableHead className={invoiceTableHead}>Agent Account</TableHead>
+                      <TableHead className={invoiceTableHead}>Draft Date</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Monthly Premium</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
+                      <TableHead className={invoiceTableHead}>Com Type</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {group.salesLines.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={10} className={cn(invoiceCell, 'text-muted-foreground')}>
+                          No sales in this period.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      group.salesLines.map((line) => (
+                        <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
+                          <TableCell className={invoiceCell}>{line.insuredName}</TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right font-mono')}>${formatMoney(line.leadValue)}</TableCell>
+                          <TableCell className={invoiceCell}>{line.carrier}</TableCell>
+                          <TableCell className={invoiceCell}>{line.product}</TableCell>
+                          <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
+                          <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right')}>
+                            {line.monthlyPremium != null ? `$${formatMoney(line.monthlyPremium)}` : '—'}
+                          </TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right')}>
+                            {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
+                          </TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right')}>{line.comPct}</TableCell>
+                          <TableCell className={invoiceCell}>{line.comType}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+
+            {/* Chargebacks section */}
+            <div className="mb-6">
+              <div className="rounded-t-md bg-orange-400 px-3 py-2 text-center text-sm font-semibold text-slate-900 dark:bg-orange-600 dark:text-white">
+                Chargebacks
+              </div>
+              <div className="overflow-x-auto rounded-b-md border border-t-0 border-slate-200 dark:border-slate-700">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Chargebacks</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
+                      <TableHead className={invoiceTableHead}>Carrier</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'min-w-[120px]')}>Product</TableHead>
+                      <TableHead className={invoiceTableHead}>Agent Account</TableHead>
+                      <TableHead className={invoiceTableHead}>Draft Date</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Monthly Premium</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
+                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
+                      <TableHead className={invoiceTableHead}>Com Type</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {group.chargebackLines.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={10} className={cn(invoiceCell, 'text-muted-foreground')}>
+                          No chargebacks in this period.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      group.chargebackLines.map((line) => (
+                        <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
+                          <TableCell className={invoiceCell}>{line.insuredName}</TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right font-mono text-rose-700 dark:text-rose-400')}>
+                            ${formatMoney(line.leadValue)}
+                          </TableCell>
+                          <TableCell className={invoiceCell}>{line.carrier}</TableCell>
+                          <TableCell className={invoiceCell}>{line.product}</TableCell>
+                          <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
+                          <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right')}>
+                            {line.monthlyPremium != null ? `$${formatMoney(line.monthlyPremium)}` : '—'}
+                          </TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right')}>
+                            {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
+                          </TableCell>
+                          <TableCell className={cn(invoiceCell, 'text-right')}>{line.comPct}</TableCell>
+                          <TableCell className={invoiceCell}>{line.comType}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+
+            {/* Summary — sample-style boxes */}
+            <div className="flex flex-col items-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800">
+              <div className="flex w-full max-w-md flex-col gap-2 text-sm">
+                <div className="flex items-center justify-between gap-4 rounded-md bg-emerald-50 px-3 py-2 dark:bg-emerald-950/40">
+                  <span className="text-slate-700 dark:text-emerald-100/90">
+                    New Business From {bpoDetail.rangeLabel}
+                  </span>
+                  <span className="font-semibold tabular-nums text-emerald-800 dark:text-emerald-300">
+                    ${formatMoney(group.newBusinessTotal)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-md bg-rose-50 px-3 py-2 dark:bg-rose-950/40">
+                  <span className="text-slate-700 dark:text-rose-100/90">
+                    Charge-Backs From {bpoDetail.rangeLabel}
+                  </span>
+                  <span className="font-semibold tabular-nums text-rose-800 dark:text-rose-300">
+                    ${formatMoney(group.chargebacksTotal)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-900/80">
+                  <span className="text-slate-600 dark:text-slate-400">Negative balance from last week&apos;s invoice</span>
+                  <Input
+                    value={previousChargebackByCallCenter[group.callCenter] ?? '0'}
+                    onChange={(e) =>
+                      setPreviousChargebackByCallCenter((prev) => ({
+                        ...prev,
+                        [group.callCenter]: e.target.value,
+                      }))
+                    }
+                    className="h-9 w-[140px] text-right font-mono text-sm"
+                    placeholder="0.00"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-md bg-slate-900 px-3 py-2.5 text-white dark:bg-black">
+                  <span className="font-medium">Balance due</span>
+                  <span className="text-lg font-bold tabular-nums">
+                    ${formatMoney(balanceDueForBpo(group.callCenter, group.subtotal))}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {draft && draft.groups.length > 0 && (
+        <div className="flex justify-end print:hidden">
+          <Button onClick={markPaid} disabled={saving} className="bg-green-600 text-white hover:bg-green-700">
+            {saving ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              'Mark paid'
+            )}
+          </Button>
+        </div>
       )}
     </div>
   )

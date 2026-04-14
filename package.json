@@ -18,7 +18,8 @@
     "carrier:login:local": "node scripts/carrier/login-once-local.js",
     "carrier:scrape:local": "node scripts/carrier/scrape-policies-local.js",
     "carrier:aetna:excel": "node scripts/carrier/download-aetna-excel.js",
-    "carrier:aetna:excel:attach": "node scripts/carrier/download-aetna-excel-attach.js"
+    "carrier:aetna:excel:attach": "node scripts/carrier/download-aetna-excel-attach.js",
+    "invoicing:seed:legacy": "node scripts/seed-invoicing-status-history-from-master-csv.js"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

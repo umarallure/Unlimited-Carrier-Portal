@@ -1,6 +1,23 @@
 import { supabase } from './supabaseClient'
 
-export type InvoicingStatus = 'new_sale' | 'chargeback' | 'repay' | 'rechargeback'
+export type InvoicingStatus =
+  | 'new_sale'
+  | 'New Charge Back'
+  | 'repay'
+  | 'rechargeback'
+  | 'paid_delete'
+  | 'cb_delete'
+  | 'cb_never_paid'
+  | 'cb_repay'
+
+function isChargebackLikeStatus(current: InvoicingStatus | null): boolean {
+  if (current == null) return false
+  return current === 'New Charge Back' || current === 'rechargeback' || current === ('chargeback' as InvoicingStatus)
+}
+
+function isBillableStatus(status: InvoicingStatus): boolean {
+  return status !== 'paid_delete' && status !== 'cb_delete' && status !== 'cb_never_paid'
+}
 
 type CommissionEventRow = {
   id: string
@@ -17,6 +34,14 @@ type DealTrackerCallCenterRow = {
   agency_carrier_id: string
   policy_number: string
   call_center: string | null
+  ghl_stage?: string | null
+  deal_value?: number | null
+  name?: string | null
+  policy_type?: string | null
+  sales_agent?: string | null
+  commission_type?: string | null
+  effective_date?: string | null
+  deal_creation_date?: string | null
   updated_at?: string | null
   created_at?: string | null
 }
@@ -76,13 +101,24 @@ function roundMoney(value: number): number {
 }
 
 function deriveNextStatus(current: InvoicingStatus | null, grossAmount: number): InvoicingStatus {
-  if (grossAmount < 0) {
-    return current === 'repay' ? 'rechargeback' : 'chargeback'
+  if (grossAmount === 0) return current ?? 'new_sale'
+
+  // Sale event
+  if (grossAmount > 0) {
+    // Already paid previously: do not pay again.
+    if (current === 'new_sale' || current === 'repay' || current === 'cb_repay') return 'paid_delete'
+    // Recovering from prior chargeback.
+    if (isChargebackLikeStatus(current)) return 'repay'
+    return 'new_sale'
   }
-  if (current === 'chargeback' || current === 'rechargeback') {
-    return 'repay'
-  }
-  return 'new_sale'
+
+  // Chargeback event
+  if (current === 'repay') return 'rechargeback'
+  // Already chargebacked previously: do not charge back again.
+  if (isChargebackLikeStatus(current)) return 'cb_delete'
+  // We can only charge back if this lead was paid before.
+  if (current === 'new_sale' || current === 'paid_delete' || current === 'cb_repay') return 'New Charge Back'
+  return 'cb_never_paid'
 }
 
 function parseSortableTimestamp(row: DealTrackerCallCenterRow): number {
@@ -91,8 +127,55 @@ function parseSortableTimestamp(row: DealTrackerCallCenterRow): number {
   return Number.isNaN(parsed) ? 0 : parsed
 }
 
+function normalizePolicyNumber(policyNumber: string | null | undefined): string {
+  const raw = String(policyNumber ?? '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toUpperCase()
+  if (!raw) return ''
+  if (!/^\d+$/.test(raw)) return raw
+  return raw.replace(/^0+/, '') || '0'
+}
+
+function policyLookupCandidates(policyNumber: string | null | undefined): string[] {
+  const raw = String(policyNumber ?? '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toUpperCase()
+  if (!raw) return []
+  if (!/^\d+$/.test(raw)) return [raw]
+  const stripped = raw.replace(/^0+/, '') || '0'
+  const out = new Set<string>([raw, stripped])
+  for (let len = Math.max(raw.length, stripped.length); len <= 12; len++) {
+    if (stripped.length > len) continue
+    out.add(stripped.padStart(len, '0'))
+  }
+  return Array.from(out)
+}
+
 function buildPolicyKey(agencyCarrierId: string, policyNumber: string): string {
-  return `${agencyCarrierId}::${policyNumber}`
+  return `${agencyCarrierId}::${normalizePolicyNumber(policyNumber)}`
+}
+
+const CHARGEBACK_PIPELINE_STAGES = new Set(
+  [
+    'FDPF Pending Reason',
+    'FDPF Insufficient Funds',
+    'FDPF Incorrect Banking Info',
+    'FDPF Unauthorized Draft',
+    'Pending Failed Payment Fix',
+    'Pending Lapse',
+    'Chargeback Failed Payment',
+    'Chargeback Cancellation',
+    'Pending Chargeback Fix',
+    'Chargeback Fixed',
+    'Chargeback DQ',
+  ].map((s) => s.toLowerCase()),
+)
+
+function isChargebackPipelineStage(stage: string | null | undefined): boolean {
+  if (!stage) return false
+  return CHARGEBACK_PIPELINE_STAGES.has(stage.trim().toLowerCase())
 }
 
 export async function buildInvoiceDraft(startDate: string, endDate: string): Promise<InvoiceDraftResult> {
@@ -118,12 +201,43 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
     }
   }
 
-  const policyNumbers = Array.from(new Set(transactions.map((row) => row.policy_number).filter(Boolean)))
+  const policyNumbers = Array.from(
+    new Set(
+      transactions
+        .flatMap((row) => policyLookupCandidates(row.policy_number))
+        .filter((v) => v.length > 0),
+    ),
+  )
   const agencyCarrierIds = Array.from(new Set(transactions.map((row) => row.agency_carrier_id).filter(Boolean)))
+
+  const { data: historyRows, error: historyError } = await supabase
+    .from('invoicing_status_history')
+    .select('agency_carrier_id, policy_number, invoicing_status, effective_date, created_at')
+    .in('policy_number', policyNumbers)
+    .in('agency_carrier_id', agencyCarrierIds)
+    .lt('effective_date', startDate)
+    .order('effective_date', { ascending: false })
+    .order('created_at', { ascending: false })
+
+  if (historyError) {
+    throw new Error(historyError.message)
+  }
+
+  const latestStatusByPolicy = new Map<string, InvoicingStatus>()
+  for (const row of (historyRows || []) as Array<{
+    agency_carrier_id: string
+    policy_number: string
+    invoicing_status: InvoicingStatus
+  }>) {
+    const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
+    if (!latestStatusByPolicy.has(key)) {
+      latestStatusByPolicy.set(key, row.invoicing_status)
+    }
+  }
 
   const { data: dtRows, error: dtError } = await supabase
     .from('deal_tracker')
-    .select('agency_carrier_id, policy_number, call_center, updated_at, created_at')
+    .select('agency_carrier_id, policy_number, call_center, ghl_stage, deal_value, updated_at, created_at')
     .in('policy_number', policyNumbers)
     .in('agency_carrier_id', agencyCarrierIds)
 
@@ -132,6 +246,7 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
   }
 
   const callCenterByPolicy = new Map<string, { callCenter: string; ts: number }>()
+  const dealByPolicy = new Map<string, DealTrackerCallCenterRow>()
   for (const row of (dtRows || []) as DealTrackerCallCenterRow[]) {
     const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
     const current = callCenterByPolicy.get(key)
@@ -139,10 +254,12 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
     const nextCallCenter = row.call_center?.trim() || 'Unassigned'
     if (!current) {
       callCenterByPolicy.set(key, { callCenter: nextCallCenter, ts: nextTimestamp })
+      dealByPolicy.set(key, row)
       continue
     }
     if (nextTimestamp >= current.ts && row.call_center?.trim()) {
       callCenterByPolicy.set(key, { callCenter: row.call_center.trim(), ts: nextTimestamp })
+      dealByPolicy.set(key, row)
     }
   }
 
@@ -155,7 +272,9 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
     const grossAmount = roundMoney(advanceAmount + chargeBackAmount)
 
     if (!existing) {
-      const firstStatus = deriveNextStatus(null, grossAmount)
+      const priorStatus = latestStatusByPolicy.get(policyKey) ?? null
+      const firstStatus = deriveNextStatus(priorStatus, grossAmount)
+      const appliedGross = isBillableStatus(firstStatus) ? grossAmount : 0
       policyMap.set(policyKey, {
         policyKey,
         agencyCarrierId: tx.agency_carrier_id,
@@ -165,8 +284,8 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
         callCenter: callCenterByPolicy.get(policyKey)?.callCenter || 'Unassigned',
         latestCommissionDate: tx.date,
         latestInvoicingStatus: firstStatus,
-        grossNet: grossAmount,
-        ccNet: roundMoney(grossAmount / 2),
+        grossNet: appliedGross,
+        ccNet: roundMoney(appliedGross / 2),
         events: [
           {
             eventId: tx.id,
@@ -174,7 +293,7 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
             carrier: tx.carrier,
             advanceAmount,
             chargeBackAmount,
-            grossAmount,
+            grossAmount: appliedGross,
             invoicingStatus: firstStatus,
           },
         ],
@@ -183,11 +302,12 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
     }
 
     const nextStatus = deriveNextStatus(existing.latestInvoicingStatus, grossAmount)
+    const appliedGross = isBillableStatus(nextStatus) ? grossAmount : 0
     existing.latestInvoicingStatus = nextStatus
     if ((!existing.policyName || existing.policyName === '-') && tx.name?.trim()) {
       existing.policyName = tx.name.trim()
     }
-    existing.grossNet = roundMoney(existing.grossNet + grossAmount)
+    existing.grossNet = roundMoney(existing.grossNet + appliedGross)
     existing.ccNet = roundMoney(existing.grossNet / 2)
     if (new Date(tx.date).getTime() >= new Date(existing.latestCommissionDate).getTime()) {
       existing.latestCommissionDate = tx.date
@@ -198,6 +318,32 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
       carrier: tx.carrier,
       advanceAmount,
       chargeBackAmount,
+      grossAmount: appliedGross,
+      invoicingStatus: nextStatus,
+    })
+  }
+
+  // Stage-driven chargeback: when a deal is in chargeback pipeline, charge back 50% of deal_value.
+  // We apply this once per policy in the draft (only if no negative event already exists in period).
+  for (const policy of policyMap.values()) {
+    const deal = dealByPolicy.get(policy.policyKey)
+    if (!deal || !isChargebackPipelineStage(deal.ghl_stage)) continue
+    const hasChargebackEvent = policy.events.some((e) => e.grossAmount < 0)
+    if (hasChargebackEvent) continue
+    const dealValue = toNumber(deal.deal_value)
+    if (dealValue <= 0) continue
+    const grossAmount = roundMoney(-Math.abs(dealValue))
+    const nextStatus = deriveNextStatus(policy.latestInvoicingStatus, grossAmount)
+    policy.latestInvoicingStatus = nextStatus
+    if (!isBillableStatus(nextStatus)) continue
+    policy.grossNet = roundMoney(policy.grossNet + grossAmount)
+    policy.ccNet = roundMoney(policy.grossNet / 2)
+    policy.events.push({
+      eventId: `stage-cb-${policy.policyKey}`,
+      date: endDate,
+      carrier: policy.carrier,
+      advanceAmount: 0,
+      chargeBackAmount: grossAmount,
       grossAmount,
       invoicingStatus: nextStatus,
     })
@@ -236,6 +382,439 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
     grossGrandTotal,
     ccGrandTotal,
   }
+}
+
+/** Invoice shows 50% of gross commission advance / chargeback as “Lead value” (not full amounts). */
+export const BPO_INVOICE_LEAD_VALUE_SHARE = 0.5
+
+/** One visual row on the BPO invoice (sales or chargeback section). */
+export type BpoInvoiceLine = {
+  id: string
+  insuredName: string
+  /** Display amount: 50% of advance or chargeback (same basis as CC invoice). */
+  leadValue: number
+  carrier: string
+  product: string
+  agentAccount: string
+  draftDate: string
+  monthlyPremium: number | null
+  coverageAmount: number | null
+  comPct: string | null
+  comType: string
+  policyNumber: string
+}
+
+/** Per call-center (BPO) invoice: sales block on top, chargebacks below. */
+export type BpoInvoiceGroupDetail = {
+  callCenter: string
+  salesLines: BpoInvoiceLine[]
+  chargebackLines: BpoInvoiceLine[]
+  /** Sum of displayed Lead values (50% of advances) */
+  newBusinessTotal: number
+  /** Sum of displayed Lead values for chargebacks (50% of chargeback amounts; typically negative) */
+  chargebacksTotal: number
+  /** newBusinessTotal + chargebacksTotal (before last-week adjustment) */
+  subtotal: number
+}
+
+export type BpoInvoiceDetailResult = {
+  startDate: string
+  endDate: string
+  rangeLabel: string
+  groups: BpoInvoiceGroupDetail[]
+}
+
+export type LegacyInvoiceStatusSeedRow = {
+  policyNumber: string
+  carrier: string
+  businessType: string | null
+  weekDate: string | null
+}
+
+export function mapLegacyBusinessTypeToInvoicingStatus(value: string | null | undefined): InvoicingStatus | null {
+  const v = (value || '').trim().toLowerCase()
+  if (!v) return null
+  if (v === 'new sales' || v === 'new sale') return 'new_sale'
+  if (v === 'new charge back' || v === 'new chargeback') return 'New Charge Back'
+  if (v === 'chargeback' || v === 'charge back') return 'New Charge Back'
+  if (v === 're-charge back' || v === 're-chargeback') return 'rechargeback'
+  if (v === 'repay') return 'repay'
+  if (v === 'paid delete') return 'paid_delete'
+  if (v === 'cb delete') return 'cb_delete'
+  if (v === 'cb never paid') return 'cb_never_paid'
+  if (v === 'cb repay') return 'cb_repay'
+  return null
+}
+
+function parseUsDateToYmd(value: string | null | undefined): string | null {
+  const s = (value || '').trim()
+  if (!s) return null
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (iso) return s
+  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (!us) return null
+  const mm = String(parseInt(us[1], 10)).padStart(2, '0')
+  const dd = String(parseInt(us[2], 10)).padStart(2, '0')
+  return `${us[3]}-${mm}-${dd}`
+}
+
+/**
+ * One-time migration helper:
+ * Seeds `invoicing_status_history` from old spreadsheet-style rows using `Business Type`.
+ */
+export async function seedInvoicingStatusHistoryFromLegacyRows(
+  rows: LegacyInvoiceStatusSeedRow[],
+): Promise<{ inserted: number }> {
+  if (!rows.length) return { inserted: 0 }
+
+  const normalized = rows
+    .map((r) => ({
+      policy_number: (r.policyNumber || '').trim(),
+      carrier: (r.carrier || '').trim(),
+      invoicing_status: mapLegacyBusinessTypeToInvoicingStatus(r.businessType),
+      effective_date: parseUsDateToYmd(r.weekDate),
+    }))
+    .filter((r) => r.policy_number && r.carrier && r.invoicing_status && r.effective_date) as Array<{
+    policy_number: string
+    carrier: string
+    invoicing_status: InvoicingStatus
+    effective_date: string
+  }>
+
+  if (!normalized.length) return { inserted: 0 }
+
+  const policyNumbers = Array.from(new Set(normalized.map((r) => r.policy_number)))
+  const carriers = Array.from(new Set(normalized.map((r) => r.carrier)))
+
+  const { data: dtRows, error: dtError } = await supabase
+    .from('deal_tracker')
+    .select('agency_carrier_id, policy_number, carrier')
+    .in('policy_number', policyNumbers)
+    .in('carrier', carriers)
+
+  if (dtError) throw new Error(dtError.message)
+
+  const agencyByCarrierPolicy = new Map<string, string>()
+  for (const row of (dtRows || []) as Array<{ agency_carrier_id: string; policy_number: string; carrier: string }>) {
+    agencyByCarrierPolicy.set(`${row.carrier}::${row.policy_number}`, row.agency_carrier_id)
+  }
+
+  const dedup = new Map<string, { agency_carrier_id: string; policy_number: string; carrier: string; invoicing_status: InvoicingStatus; effective_date: string }>()
+  for (const row of normalized) {
+    const agencyCarrierId = agencyByCarrierPolicy.get(`${row.carrier}::${row.policy_number}`)
+    if (!agencyCarrierId) continue
+    const k = `${agencyCarrierId}::${row.policy_number}::${row.effective_date}`
+    dedup.set(k, {
+      agency_carrier_id: agencyCarrierId,
+      policy_number: row.policy_number,
+      carrier: row.carrier,
+      invoicing_status: row.invoicing_status,
+      effective_date: row.effective_date,
+    })
+  }
+
+  const payload = Array.from(dedup.values())
+  if (!payload.length) return { inserted: 0 }
+
+  const { error: insertError } = await supabase.from('invoicing_status_history').insert(payload)
+  if (insertError) throw new Error(insertError.message)
+  return { inserted: payload.length }
+}
+
+function ordinalDay(day: number): string {
+  const j = day % 10
+  const k = day % 100
+  if (k >= 11 && k <= 13) return `${day}th`
+  if (j === 1) return `${day}st`
+  if (j === 2) return `${day}nd`
+  if (j === 3) return `${day}rd`
+  return `${day}th`
+}
+
+/** e.g. "March 23rd, 2026 – April 5th, 2026" */
+export function formatInvoiceRangeLabel(startDate: string, endDate: string): string {
+  const parseYmd = (s: string) => {
+    const [y, m, d] = s.split('-').map((x) => parseInt(x, 10))
+    if (!y || !m || !d) return null
+    return new Date(y, m - 1, d)
+  }
+  const a = parseYmd(startDate)
+  const b = parseYmd(endDate)
+  if (!a || !b) return `${startDate} – ${endDate}`
+  const fmt = (d: Date) => {
+    const month = d.toLocaleString('en-US', { month: 'long' })
+    return `${month} ${ordinalDay(d.getDate())}, ${d.getFullYear()}`
+  }
+  return `${fmt(a)} – ${fmt(b)}`
+}
+
+function formatDraftDate(value: string | null | undefined): string {
+  if (!value) return '—'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return String(value)
+  return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+}
+
+type DealTrackerInvoiceRow = {
+  agency_carrier_id: string
+  policy_number: string
+  call_center: string | null
+  name: string | null
+  policy_type: string | null
+  sales_agent: string | null
+  commission_type: string | null
+  effective_date: string | null
+  deal_creation_date: string | null
+  deal_value: number | null
+  ghl_stage?: string | null
+  updated_at?: string | null
+  created_at?: string | null
+}
+
+type CommissionTxRow = {
+  id: string
+  agency_carrier_id: string
+  carrier: string
+  policy_number: string
+  name: string | null
+  date: string
+  sales_agent: string | null
+  commission_rate: number | null
+  advance_amount: number | null
+  charge_back_amount: number | null
+}
+
+/**
+ * Line-level BPO invoices: group by deal_tracker.call_center (BPO).
+ * Sales rows = advance_amount > 0; Chargebacks = non-zero charge_back_amount.
+ * Lead value on the invoice is 50% of the underlying advance/chargeback (not the full commission amount).
+ */
+export async function buildBpoInvoiceLines(startDate: string, endDate: string): Promise<BpoInvoiceDetailResult> {
+  const { data: txRows, error: txError } = await supabase
+    .from('commission_tracker')
+    .select(
+      'id, agency_carrier_id, carrier, policy_number, name, date, sales_agent, commission_rate, advance_amount, charge_back_amount',
+    )
+    .gte('date', startDate)
+    .lte('date', endDate)
+    .order('date', { ascending: true })
+
+  if (txError) {
+    throw new Error(txError.message)
+  }
+
+  const transactions = (txRows || []) as CommissionTxRow[]
+  const rangeLabel = formatInvoiceRangeLabel(startDate, endDate)
+
+  if (!transactions.length) {
+    return { startDate, endDate, rangeLabel, groups: [] }
+  }
+
+  const policyNumbers = Array.from(
+    new Set(
+      transactions
+        .flatMap((t) => policyLookupCandidates(t.policy_number))
+        .filter((v) => v.length > 0),
+    ),
+  )
+  const agencyCarrierIds = Array.from(new Set(transactions.map((t) => t.agency_carrier_id).filter(Boolean)))
+
+  const { data: historyRows, error: historyError } = await supabase
+    .from('invoicing_status_history')
+    .select('agency_carrier_id, policy_number, invoicing_status, effective_date, created_at')
+    .in('policy_number', policyNumbers)
+    .in('agency_carrier_id', agencyCarrierIds)
+    .lt('effective_date', startDate)
+    .order('effective_date', { ascending: false })
+    .order('created_at', { ascending: false })
+
+  if (historyError) {
+    throw new Error(historyError.message)
+  }
+
+  const latestStatusByPolicy = new Map<string, InvoicingStatus>()
+  for (const row of (historyRows || []) as Array<{
+    agency_carrier_id: string
+    policy_number: string
+    invoicing_status: InvoicingStatus
+  }>) {
+    const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
+    if (!latestStatusByPolicy.has(key)) {
+      latestStatusByPolicy.set(key, row.invoicing_status)
+    }
+  }
+
+  const { data: dtRows, error: dtError } = await supabase
+    .from('deal_tracker')
+    .select(
+      'agency_carrier_id, policy_number, call_center, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
+    )
+    .in('policy_number', policyNumbers)
+    .in('agency_carrier_id', agencyCarrierIds)
+
+  if (dtError) {
+    throw new Error(dtError.message)
+  }
+
+  const dealByPolicyKey = new Map<string, DealTrackerInvoiceRow>()
+  for (const row of (dtRows || []) as DealTrackerInvoiceRow[]) {
+    const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
+    const existing = dealByPolicyKey.get(key)
+    const ts = new Date(row.updated_at || row.created_at || 0).getTime()
+    const exTs = existing ? new Date(existing.updated_at || existing.created_at || 0).getTime() : -1
+    if (!existing || ts >= exTs) {
+      dealByPolicyKey.set(key, row)
+    }
+  }
+
+  const linesByCenter = new Map<string, { sales: BpoInvoiceLine[]; charge: BpoInvoiceLine[] }>()
+  const chargebackLineAddedByPolicy = new Set<string>()
+  const currentStatusByPolicy = new Map<string, InvoicingStatus | null>()
+
+  const pushLine = (center: string, line: BpoInvoiceLine, kind: 'sales' | 'charge') => {
+    const c = center.trim() || 'Unassigned'
+    if (!linesByCenter.has(c)) {
+      linesByCenter.set(c, { sales: [], charge: [] })
+    }
+    const bucket = linesByCenter.get(c)!
+    if (kind === 'sales') bucket.sales.push(line)
+    else bucket.charge.push(line)
+  }
+
+  for (const tx of transactions) {
+    const key = buildPolicyKey(tx.agency_carrier_id, tx.policy_number)
+    const currentStatus = currentStatusByPolicy.has(key)
+      ? currentStatusByPolicy.get(key) ?? null
+      : (latestStatusByPolicy.get(key) ?? null)
+    const deal = dealByPolicyKey.get(key)
+    const callCenter = deal?.call_center?.trim() || 'Unassigned'
+    const insuredName = (tx.name || deal?.name || '—').trim() || '—'
+    const product = (deal?.policy_type || '—').trim() || '—'
+    const agentAccount = (deal?.sales_agent || tx.sales_agent || '—').trim() || '—'
+    const draftRaw = deal?.deal_creation_date || deal?.effective_date || tx.date
+    const draftDate = formatDraftDate(draftRaw)
+    const monthlyPremium = deal?.deal_value != null ? roundMoney(toNumber(deal.deal_value as number)) : null
+    const comPctDisplay = tx.commission_rate != null ? `${Number(tx.commission_rate)}%` : '—'
+    const comType = (deal?.commission_type || 'Advance').trim() || 'Advance'
+
+    const base = {
+      insuredName,
+      carrier: tx.carrier || '—',
+      product,
+      agentAccount,
+      draftDate,
+      monthlyPremium,
+      coverageAmount: null,
+      comPct: comPctDisplay,
+      comType,
+      policyNumber: tx.policy_number,
+    }
+
+    const advance = toNumber(tx.advance_amount)
+    if (advance > 0) {
+      const salesStatus = deriveNextStatus(currentStatus, roundMoney(advance))
+      currentStatusByPolicy.set(key, salesStatus)
+      if (!isBillableStatus(salesStatus)) {
+        // Keep status progression, but skip non-billable lines like paid_delete.
+      } else {
+      pushLine(
+        callCenter,
+        {
+          id: `${tx.id}-adv`,
+          ...base,
+          leadValue: roundMoney(advance * BPO_INVOICE_LEAD_VALUE_SHARE),
+        },
+        'sales',
+      )
+      }
+    }
+
+    const cbRaw = toNumber(tx.charge_back_amount)
+    if (cbRaw !== 0) {
+      const cbNorm = cbRaw > 0 ? -Math.abs(cbRaw) : cbRaw
+      const statusBeforeCb = currentStatusByPolicy.has(key)
+        ? currentStatusByPolicy.get(key) ?? null
+        : (latestStatusByPolicy.get(key) ?? null)
+      const cbStatus = deriveNextStatus(statusBeforeCb, roundMoney(cbNorm))
+      currentStatusByPolicy.set(key, cbStatus)
+      if (isBillableStatus(cbStatus)) {
+        chargebackLineAddedByPolicy.add(key)
+        pushLine(
+          callCenter,
+          {
+            id: `${tx.id}-cb`,
+            ...base,
+            leadValue: roundMoney(cbNorm * BPO_INVOICE_LEAD_VALUE_SHARE),
+          },
+          'charge',
+        )
+      }
+    }
+  }
+
+  // If no commission chargeback line exists but policy is in chargeback pipeline,
+  // add a synthetic chargeback line from deal_tracker.deal_value.
+  for (const [key, deal] of dealByPolicyKey.entries()) {
+    if (!isChargebackPipelineStage(deal.ghl_stage)) continue
+    if (chargebackLineAddedByPolicy.has(key)) continue
+    const dealValue = toNumber(deal.deal_value)
+    if (dealValue <= 0) continue
+    const callCenter = deal.call_center?.trim() || 'Unassigned'
+    const insuredName = (deal.name || '—').trim() || '—'
+    const product = (deal.policy_type || '—').trim() || '—'
+    const agentAccount = (deal.sales_agent || '—').trim() || '—'
+    const draftRaw = deal.deal_creation_date || deal.effective_date || endDate
+    const draftDate = formatDraftDate(draftRaw)
+    const monthlyPremium = roundMoney(dealValue)
+    const comType = (deal.commission_type || 'Advance').trim() || 'Advance'
+    const cbNorm = -Math.abs(dealValue)
+    const statusBeforeCb = currentStatusByPolicy.has(key)
+      ? currentStatusByPolicy.get(key) ?? null
+      : (latestStatusByPolicy.get(key) ?? null)
+    const cbStatus = deriveNextStatus(statusBeforeCb, roundMoney(cbNorm))
+    currentStatusByPolicy.set(key, cbStatus)
+    if (!isBillableStatus(cbStatus)) continue
+    pushLine(
+      callCenter,
+      {
+        id: `stage-cb-${key}`,
+        insuredName,
+        carrier: '—',
+        product,
+        agentAccount,
+        draftDate,
+        monthlyPremium,
+        coverageAmount: null,
+        comPct: '—',
+        comType,
+        policyNumber: deal.policy_number,
+        leadValue: roundMoney(cbNorm * BPO_INVOICE_LEAD_VALUE_SHARE),
+      },
+      'charge',
+    )
+  }
+
+  const groups: BpoInvoiceGroupDetail[] = Array.from(linesByCenter.entries())
+    .map(([callCenter, { sales, charge }]) => {
+      const sortFn = (a: BpoInvoiceLine, b: BpoInvoiceLine) =>
+        a.insuredName.localeCompare(b.insuredName) || a.policyNumber.localeCompare(b.policyNumber)
+      const salesLines = [...sales].sort(sortFn)
+      const chargebackLines = [...charge].sort(sortFn)
+      const newBusinessTotal = roundMoney(salesLines.reduce((s, l) => s + l.leadValue, 0))
+      const chargebacksTotal = roundMoney(chargebackLines.reduce((s, l) => s + l.leadValue, 0))
+      const subtotal = roundMoney(newBusinessTotal + chargebacksTotal)
+      return {
+        callCenter,
+        salesLines,
+        chargebackLines,
+        newBusinessTotal,
+        chargebacksTotal,
+        subtotal,
+      }
+    })
+    .sort((a, b) => a.callCenter.localeCompare(b.callCenter))
+
+  return { startDate, endDate, rangeLabel, groups }
 }
 
 export async function markInvoiceBatchPaid(input: {

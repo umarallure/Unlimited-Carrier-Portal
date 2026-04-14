@@ -185,6 +185,16 @@ function parseDate(dateStr: string | null): Date | null {
   if (dateStr == null) return null
   const s = String(dateStr).trim()
   if (!s) return null
+  // Normalize common export/input format before generic parsing.
+  // Example: "04/05/2026" should be interpreted as 2026-04-05.
+  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\b|[\sT].*)?$/)
+  if (us) {
+    const m = String(parseInt(us[1], 10)).padStart(2, '0')
+    const d = String(parseInt(us[2], 10)).padStart(2, '0')
+    const ymd = `${us[3]}-${m}-${d}`
+    const dUs = new Date(`${ymd}T12:00:00`)
+    return isNaN(dUs.getTime()) ? null : dUs
+  }
   const d = new Date(s.includes('T') ? s : `${s}T12:00:00`)
   return isNaN(d.getTime()) ? null : d
 }
@@ -257,6 +267,28 @@ function looksLikePendingDraftCarrierStatus(carrierStatus: string | null): boole
   if (s.includes('pending approval')) return true
   if (s.includes('application pending') || s.includes('pending application')) return true
   if (s.includes('pending') && s.includes('underwriting')) return true
+  // AMAM and similar feeds often provide generic "pending" text.
+  if (s.includes('pending')) return true
+  return false
+}
+
+/**
+ * Mapped `policy_status` is "pending" for approval / in-process — draft-date roll applies.
+ * Pending lapse / lapsed / lapsing is not that bucket (different business rules).
+ */
+function looksLikePendingPolicyStatus(policyStatus: string | null): boolean {
+  if (!policyStatus) return false
+  const s = policyStatus.toLowerCase()
+  if (s.includes('lapse') || s.includes('lapsing') || s.includes('lapsed')) return false
+  if (s.includes('issued')) return false
+  if (s.includes('declin')) return false
+  if (s.includes('withdraw')) return false
+  if (s.includes('pending payment') || s.includes('commission pending')) return false
+  if (s.includes('pending approval')) return true
+  if (s.includes('application pending') || s.includes('pending application')) return true
+  if (s.includes('pending') && s.includes('underwriting')) return true
+  // Generic "Pending" / "Pending …" without lapse (e.g. Monday stage label).
+  if (s.includes('pending')) return true
   return false
 }
 
@@ -267,8 +299,13 @@ function looksLikePendingDraftCarrierStatus(carrierStatus: string | null): boole
 export function applyPendingDraftRollToEffectiveDate(
   effectiveYmd: string | null | undefined,
   carrierStatus: string | null | undefined,
+  policyStatus?: string | null | undefined,
 ): string | null {
-  if (!looksLikePendingDraftCarrierStatus(carrierStatus ?? null)) return null
+  const shouldRoll =
+    policyStatus != null
+      ? looksLikePendingPolicyStatus(policyStatus)
+      : looksLikePendingDraftCarrierStatus(carrierStatus ?? null)
+  if (!shouldRoll) return null
   const ymd = extractYmdFromDbValue(effectiveYmd ?? '') || (effectiveYmd != null ? String(effectiveYmd).trim().slice(0, 10) : '')
   if (!ymd) return null
   const parsed = parseDate(ymd)
@@ -282,12 +319,25 @@ export function applyPendingDraftRollToEffectiveDate(
 /** Merge effective date (DDF + fallbacks), then roll month-by-month if pending + draft still before today. */
 export function mergeEffectiveDateWithPendingRoll(
   carrierStatus: string | null | undefined,
+  policyStatus: string | null | undefined,
   existingEffective: unknown,
   draftDateFromDdf: unknown,
   ...fallbacks: unknown[]
 ): string | null {
+  // For pending policies, DDF draft date is the business anchor for monthly roll.
+  // If present, use it directly (rolled if in the past), even when a row already
+  // has an effective_date from a prior source.
+  if (looksLikePendingPolicyStatus(policyStatus ?? null)) {
+    const rawDdf = draftDateFromDdf != null ? String(draftDateFromDdf).trim() : ''
+    const ddfYmd = extractYmdFromDbValue(draftDateFromDdf) || (rawDdf !== '' ? rawDdf : null)
+    if (ddfYmd) {
+      const rolledFromDdf = applyPendingDraftRollToEffectiveDate(ddfYmd, carrierStatus ?? null, policyStatus ?? null)
+      return rolledFromDdf ?? ddfYmd
+    }
+  }
+
   const base = mergeEffectiveDate(existingEffective, draftDateFromDdf, ...fallbacks)
-  return applyPendingDraftRollToEffectiveDate(base, carrierStatus ?? null) ?? base
+  return applyPendingDraftRollToEffectiveDate(base, carrierStatus ?? null, policyStatus ?? null) ?? base
 }
 
 export interface GhlStageResolutionContext {
@@ -487,7 +537,12 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
       if (!hasPositiveDealSignal && stageRequiresPositiveDealValue(only)) {
         return sanitizeManualStage('Issued - Pending First Draft')
       }
+      // Keep evaluating so pending-aging can still move to Application Withdrawn.
+      if (onlyLower === 'pending approval') {
+        // no-op; fall through to pending-aging checks below
+      } else {
       return sanitizeManualStage(only)
+      }
     }
   }
 

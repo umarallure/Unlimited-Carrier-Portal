@@ -258,6 +258,7 @@ export async function processMohFilesForDealTracker(
     // Effective date: keep deal_tracker value; else DDF draft_date; else policy/commission fallbacks (deal date stays on deal_creation_date).
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy?.policy_effective_dte,
@@ -582,6 +583,7 @@ export async function processMohCommissionsForDealTracker(
 
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy?.policy_effective_dte,
@@ -630,7 +632,7 @@ export async function processMohCommissionsForDealTracker(
       notes: (comm.comments != null && String(comm.comments).trim() !== '') ? comm.comments : (existing?.notes ?? null),
       status: derivedStatus ?? statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
-      sales_agent: comm.paid_producer ?? policy?.wrt_agt_nme ?? null,
+      sales_agent: existing?.sales_agent ?? null,
       writing_number: comm.prod_num ?? policy?.wrt_agt_prod_num ?? null,
       commission_type: comm.activity_type ?? null,
       effective_date: effectiveDate,
@@ -638,7 +640,7 @@ export async function processMohCommissionsForDealTracker(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: originalStatus,
+      carrier_status: existing?.carrier_status ?? null,
       policy_type: policy?.product_desc ?? policy?.product_type_nme ?? policy?.plan_code ?? null,
       daily_deal_flow_fetched: dailyDealFlowFetched,
       daily_deal_flow_fetched_at: dailyDealFlowFetchedAt,

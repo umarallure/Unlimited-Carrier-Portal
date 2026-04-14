@@ -218,6 +218,40 @@ export function resolvePolicyStatusFromCarrierMapping(
   return carrierStatusRaw ?? null
 }
 
+/** Pending approval / in-process — not pending lapse / lapsed / lapsing. */
+function looksLikePendingApprovalNotLapse(
+  policyStatus: string | null | undefined,
+  carrierStatusRaw: string | null | undefined
+): boolean {
+  for (const raw of [policyStatus, carrierStatusRaw]) {
+    if (raw == null || String(raw).trim() === '') continue
+    const s = String(raw).toLowerCase()
+    if (!s.includes('pending')) continue
+    if (s.includes('lapse') || s.includes('lapsing') || s.includes('lapsed')) continue
+    if (s.includes('pending payment') || s.includes('commission pending')) continue
+    return true
+  }
+  return false
+}
+
+function pendingAgingForcesWithdrawn(
+  mappedGhlStage: string | null | undefined,
+  dealCreationDate: string | null | undefined,
+  policyStatus: string | null | undefined,
+  carrierStatusRaw: string | null | undefined
+): boolean {
+  if (mappedGhlStage !== 'Application Withdrawn') return false
+  if (!looksLikePendingApprovalNotLapse(policyStatus, carrierStatusRaw)) return false
+  if (!dealCreationDate || String(dealCreationDate).trim() === '') return false
+  const p = parseDateParts(String(dealCreationDate))
+  if (!p) return false
+  const createdDay = new Date(p.y, p.m, p.d).getTime()
+  const now = new Date()
+  const todayDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const days = Math.floor((todayDay - createdDay) / (1000 * 60 * 60 * 24))
+  return days > 30
+}
+
 /**
  * Normalize string for comparison: trim and collapse internal whitespace so
  * "Issued  Paid" and "Issued Paid" match.
@@ -1452,6 +1486,7 @@ export async function processAetnaCommissionsForDealTracker(
         null
       const mergedEffective = mergeEffectiveDateWithPendingRoll(
         carrierForRoll,
+        existing.policy_status ?? null,
         existing.effective_date,
         draftFromDdf,
         commission.effectivedate,
@@ -1478,12 +1513,13 @@ export async function processAetnaCommissionsForDealTracker(
       const entry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
+        carrier_status: existing.carrier_status ?? null,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: effectiveChargeBack,
         policy_status: existing.policy_status,
         status: derivedStatus,
-        sales_agent: commission.writingagentname || existing.sales_agent,
+        sales_agent: existing.sales_agent ?? null,
         writing_number: commission.writingagentnumber || existing.writing_number,
         commission_type: commission.commissiontype || existing.commission_type,
         effective_date: mergedEffective,
@@ -1495,11 +1531,12 @@ export async function processAetnaCommissionsForDealTracker(
       const newSnapshot = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
+        carrier_status: existing.carrier_status ?? null,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: effectiveChargeBack,
         status: derivedStatus,
-        sales_agent: commission.writingagentname || existing.sales_agent,
+        sales_agent: existing.sales_agent ?? null,
         writing_number: commission.writingagentnumber || existing.writing_number,
         commission_type: commission.commissiontype || existing.commission_type,
         effective_date: mergedEffective,
@@ -1527,6 +1564,7 @@ export async function processAetnaCommissionsForDealTracker(
 
         const proposedEff = mergeEffectiveDateWithPendingRoll(
           originalStatus || null,
+          mappedStatus,
           null,
           effectiveDateFromDdf,
           commission.effectivedate,
@@ -1798,6 +1836,7 @@ export async function processAetnaFilesForDealTracker(
     const carrierStatusForPolicy = policy.statusdisplaytext || policy.statuscategory || null
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       carrierStatusForPolicy,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
     )
@@ -1831,6 +1870,14 @@ export async function processAetnaFilesForDealTracker(
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
+    const dealCreationDateForGhl =
+      existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null)
+    const forceWithdrawnStatus = pendingAgingForcesWithdrawn(
+      mappedGhlStage,
+      dealCreationDateForGhl,
+      policyStatusResolved,
+      carrierStatusForPolicy,
+    )
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
@@ -1838,9 +1885,9 @@ export async function processAetnaFilesForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: policyStatusResolved,
+      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
       // Preserve existing deal_creation_date when present
-      deal_creation_date: existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null),
+      deal_creation_date: dealCreationDateForGhl,
       policy_number: policy.policy_number,
       carrier: carrierName,
       carrier_id: carrier.id,
@@ -1858,7 +1905,9 @@ export async function processAetnaFilesForDealTracker(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: policy.statusdisplaytext || policy.statuscategory || null,
+      carrier_status: forceWithdrawnStatus
+        ? 'Application Withdrawn'
+        : policy.statusdisplaytext || policy.statuscategory || null,
       policy_type: policy.product || null,
       daily_deal_flow_fetched: !!(callCenter || phoneNumber),
       daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : (existing?.daily_deal_flow_fetched_at ?? null),
@@ -2040,6 +2089,7 @@ export async function processAmamFilesForDealTracker(
       (policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null)
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
     )
@@ -2073,6 +2123,12 @@ export async function processAmamFilesForDealTracker(
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
+    const forceWithdrawnStatus = pendingAgingForcesWithdrawn(
+      mappedGhlStage,
+      dealCreationDate,
+      policyStatusResolved,
+      originalStatus,
+    )
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
@@ -2080,7 +2136,7 @@ export async function processAmamFilesForDealTracker(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: policyStatusResolved,
+      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
@@ -2099,7 +2155,7 @@ export async function processAmamFilesForDealTracker(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: originalStatus,
+      carrier_status: forceWithdrawnStatus ? 'Application Withdrawn' : originalStatus,
       policy_type: policy.plan || null,
       daily_deal_flow_fetched: !!(callCenter || phoneNumber),
       daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : (existing?.daily_deal_flow_fetched_at ?? null),
@@ -2217,6 +2273,7 @@ export async function processAmamFilesForDealTrackerFromRows(
       (policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null)
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
     )
@@ -2259,6 +2316,12 @@ export async function processAmamFilesForDealTrackerFromRows(
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
+    const forceWithdrawnStatus = pendingAgingForcesWithdrawn(
+      mappedGhlStage,
+      dealCreationDate,
+      policyStatusResolved,
+      originalStatus,
+    )
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
@@ -2266,7 +2329,7 @@ export async function processAmamFilesForDealTrackerFromRows(
       tasks: null,
       ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: policyStatusResolved,
+      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
@@ -2285,7 +2348,7 @@ export async function processAmamFilesForDealTrackerFromRows(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: originalStatus,
+      carrier_status: forceWithdrawnStatus ? 'Application Withdrawn' : originalStatus,
       policy_type: policy.plan || null,
       daily_deal_flow_fetched: !!(callCenter || phoneNumber),
       daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : (existing?.daily_deal_flow_fetched_at ?? null),
@@ -2516,6 +2579,7 @@ export async function processAmamCommissionsForDealTracker(
       const carrierStatusForGhl = policyForWriting?.status_raw ?? existing.carrier_status ?? null
       const effectiveDate = mergeEffectiveDateWithPendingRoll(
         carrierStatusForGhl,
+        existing.policy_status ?? null,
         existing.effective_date,
         effectiveDateFromDdf,
         commission.issdate,
@@ -2549,6 +2613,16 @@ export async function processAmamCommissionsForDealTracker(
         existingGhlStage: existing.ghl_stage ?? null,
         carrierCode,
       })
+      const forceWithdrawnStatus = pendingAgingForcesWithdrawn(
+        mappedGhlStage,
+        existing.deal_creation_date ??
+          policyForWriting?.recvdate_raw ??
+          policyForWriting?.policydate_raw ??
+          policyForWriting?.app_date_raw ??
+          null,
+        policyStatusResolved,
+        carrierStatusForGhl,
+      )
 
       const stmtRaw =
         commission.statement_date != null && String(commission.statement_date).trim() !== ''
@@ -2558,8 +2632,8 @@ export async function processAmamCommissionsForDealTracker(
       const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
-        carrier_status: carrierStatusForGhl,
-        policy_status: policyStatusResolved,
+        carrier_status: existing.carrier_status ?? null,
+        policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: chargeBack,
@@ -2599,6 +2673,7 @@ export async function processAmamCommissionsForDealTracker(
       policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      policyStatusForNew,
       null,
       ddfInfo?.draft_date ?? null,
       commission.issdate,
@@ -2616,6 +2691,12 @@ export async function processAmamCommissionsForDealTracker(
       existingGhlStage: null,
       carrierCode,
     })
+    const forceWithdrawnStatus = pendingAgingForcesWithdrawn(
+      mappedGhlStage,
+      dealCreationDate,
+      policyStatusForNew,
+      originalStatus,
+    )
 
     if (newEntryLogCount < 3) {
       console.log('[Deal Tracker] AMAM commission new-entry sample', newEntryLogCount + 1, '| insuredName:', insuredName, '| normalized:', normalizedName, '| ddfFound:', !!(callCenter || phoneNumber), '| call_center:', callCenter ?? '(empty)', '| phone:', phoneNumber ?? '(empty)')
@@ -2633,7 +2714,7 @@ export async function processAmamCommissionsForDealTracker(
       tasks: null,
       ghl_name: null,
       ghl_stage: mappedGhlStage,
-      policy_status: policyStatusForNew,
+      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusForNew,
       deal_creation_date: dealCreationDate,
       commission_date: stmtNew,
       policy_number: policyNumber,
@@ -2652,7 +2733,7 @@ export async function processAmamCommissionsForDealTracker(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: originalStatus,
+      carrier_status: forceWithdrawnStatus ? 'Application Withdrawn' : originalStatus,
       policy_type: policy.plan || null,
       daily_deal_flow_fetched: !!(callCenter || phoneNumber),
       daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : null,
@@ -2825,6 +2906,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       const carrierStatusForGhl = policyForWriting?.status_raw ?? existing.carrier_status ?? null
       const effectiveDate = mergeEffectiveDateWithPendingRoll(
         carrierStatusForGhl,
+        existing.policy_status ?? null,
         existing.effective_date,
         effectiveDateFromDdf,
         commission.issdate,
@@ -2855,6 +2937,16 @@ export async function processAmamCommissionsForDealTrackerFromRows(
         existingGhlStage: existing.ghl_stage ?? null,
         carrierCode,
       })
+      const forceWithdrawnStatus = pendingAgingForcesWithdrawn(
+        mappedGhlStage,
+        existing.deal_creation_date ??
+          policyForWriting?.recvdate_raw ??
+          policyForWriting?.policydate_raw ??
+          policyForWriting?.app_date_raw ??
+          null,
+        policyStatusResolved,
+        carrierStatusForGhl,
+      )
       const stmtRaw =
         commission.statement_date != null && String(commission.statement_date).trim() !== ''
           ? String(commission.statement_date).trim()
@@ -2862,8 +2954,8 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
-        carrier_status: carrierStatusForGhl,
-        policy_status: policyStatusResolved,
+        carrier_status: existing.carrier_status ?? null,
+        policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: chargeBack,
@@ -2903,6 +2995,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       policy.recvdate_raw || policy.policydate_raw || policy.app_date_raw || null
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      policyStatusForNew,
       null,
       ddfInfo?.draft_date ?? null,
       commission.issdate,
@@ -2919,6 +3012,12 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       existingGhlStage: null,
       carrierCode,
     })
+    const forceWithdrawnStatus = pendingAgingForcesWithdrawn(
+      mappedGhlNew,
+      dealCreationDate,
+      policyStatusForNew,
+      originalStatus,
+    )
     const stmtNew =
       commission.statement_date != null && String(commission.statement_date).trim() !== ''
         ? String(commission.statement_date).trim()
@@ -2929,7 +3028,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       tasks: null,
       ghl_name: null,
       ghl_stage: mappedGhlNew,
-      policy_status: policyStatusForNew,
+      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusForNew,
       deal_creation_date: dealCreationDate,
       commission_date: stmtNew,
       policy_number: policyNumber,
@@ -2948,7 +3047,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: originalStatus,
+      carrier_status: forceWithdrawnStatus ? 'Application Withdrawn' : originalStatus,
       policy_type: policy.plan || null,
       daily_deal_flow_fetched: !!(callCenter || phoneNumber),
       daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : null,

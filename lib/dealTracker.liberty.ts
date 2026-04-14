@@ -152,6 +152,7 @@ export async function processLibertyFilesForDealTracker(
 
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.issued,

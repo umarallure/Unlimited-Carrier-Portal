@@ -200,6 +200,7 @@ export async function processAflacFilesForDealTracker(
     // Effective date: keep stored value; if empty use DDF draft_date then policy issue date (same as Aetna/AMAM).
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       ddfInfo?.draft_date ?? null,
       policy.issuedate as string | undefined,
@@ -457,6 +458,7 @@ export async function processAflacCommissionsForDealTracker(
       )
       const effectiveDate = mergeEffectiveDateWithPendingRoll(
         carrierStatusForGhl,
+        existing.policy_status ?? null,
         existing.effective_date,
         null,
       )
@@ -529,6 +531,7 @@ export async function processAflacCommissionsForDealTracker(
         const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
         const effectiveForGhl = mergeEffectiveDateWithPendingRoll(
           originalStatus,
+          policyStatusResolved,
           null,
           effectiveDateFromDdf,
         )

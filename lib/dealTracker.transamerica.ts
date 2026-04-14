@@ -147,6 +147,7 @@ export async function processTransamericaFilesForDealTracker(
 
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.issue_date,

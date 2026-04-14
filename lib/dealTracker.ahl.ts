@@ -177,6 +177,7 @@ export async function processAhlFilesForDealTracker(
 
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
       existing ? null : policy.issuedate,
@@ -421,6 +422,7 @@ export async function processAhlCommissionsForDealTracker(
       const draftFromDdf = dailyDealFlowMap.get(normalizedName)?.draft_date ?? null
       const mergedEffective = mergeEffectiveDateWithPendingRoll(
         carrierStatusForGhl,
+        existing.policy_status ?? null,
         existing.effective_date,
         draftFromDdf,
         commission.effectivedate,
@@ -498,6 +500,7 @@ export async function processAhlCommissionsForDealTracker(
         const dealCreationDateNew = policy.apprecddate || policy.issuedate || null
         const proposedEff = mergeEffectiveDateWithPendingRoll(
           originalStatus,
+          policyStatusResolved,
           null,
           ddfInfo?.draft_date ?? null,
           commission.effectivedate,

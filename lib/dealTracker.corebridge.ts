@@ -155,6 +155,7 @@ export async function processCorebridgeFilesForDealTracker(
 
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
+      existing?.policy_status ?? null,
       existing?.effective_date,
       effectiveDateFromDdf,
       policy.effective_date,
