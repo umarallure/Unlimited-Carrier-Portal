@@ -846,7 +846,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
     const insuredName = (tx.name || deal?.name || '—').trim() || '—'
     const product = (deal?.policy_type || '—').trim() || '—'
     const agentAccount = (deal?.sales_agent || tx.sales_agent || '—').trim() || '—'
-    const draftRaw = deal?.deal_creation_date || deal?.effective_date || tx.date
+    const draftRaw = deal?.effective_date || deal?.deal_creation_date || tx.date
     const draftDate = formatDraftDate(draftRaw)
     const monthlyPremium = deal?.deal_value != null ? roundMoney(toNumber(deal.deal_value as number)) : null
     const comPctDisplay = tx.commission_rate != null ? `${Number(tx.commission_rate)}%` : '—'
