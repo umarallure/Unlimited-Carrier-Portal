@@ -34,6 +34,7 @@ type DealTrackerCallCenterRow = {
   agency_carrier_id: string
   policy_number: string
   call_center: string | null
+  carrier?: string | null
   ghl_stage?: string | null
   deal_value?: number | null
   name?: string | null
@@ -436,7 +437,7 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
   // ── Stage-only chargebacks: policies in chargeback pipeline with NO commission events in this period ──
   {
     const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerCallCenterRow>(
-      'agency_carrier_id, policy_number, call_center, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
+      'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
     )
 
     const unseen = cbStageDeals.filter((d) => {
@@ -474,11 +475,12 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
         if (proRatedLead === 0) continue
         const proRatedGross = roundMoney(proRatedLead * 2) // gross = lead * 2 (inverse of 50% share)
         const callCenter = deal.call_center?.trim() || 'Unassigned'
+        const dealCarrier = deal.carrier?.trim() || '—'
         policyMap.set(key, {
           policyKey: key,
           agencyCarrierId: deal.agency_carrier_id,
           policyNumber: deal.policy_number,
-          carrier: '—',
+          carrier: dealCarrier,
           policyName: deal.name?.trim() || '-',
           callCenter,
           latestCommissionDate: endDate,
@@ -489,7 +491,7 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
             {
               eventId: `stage-cb-${key}`,
               date: endDate,
-              carrier: '—',
+              carrier: dealCarrier,
               advanceAmount: 0,
               chargeBackAmount: proRatedGross,
               grossAmount: proRatedGross,
@@ -711,6 +713,7 @@ type DealTrackerInvoiceRow = {
   agency_carrier_id: string
   policy_number: string
   call_center: string | null
+  carrier: string | null
   name: string | null
   policy_type: string | null
   sales_agent: string | null
@@ -799,7 +802,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
   const { data: dtRows, error: dtError } = await supabase
     .from('deal_tracker')
     .select(
-      'agency_carrier_id, policy_number, call_center, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
+      'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
     )
     .in('policy_number', policyNumbers)
     .in('agency_carrier_id', agencyCarrierIds)
@@ -851,7 +854,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
 
     const base = {
       insuredName,
-      carrier: tx.carrier || '—',
+      carrier: tx.carrier || deal?.carrier || '—',
       product,
       agentAccount,
       draftDate,
@@ -931,7 +934,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
       {
         id: `stage-cb-${key}`,
         insuredName,
-        carrier: '—',
+        carrier: deal.carrier?.trim() || '—',
         product,
         agentAccount,
         draftDate,
@@ -949,7 +952,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
   // ── Stage-only chargebacks: policies in chargeback pipeline with NO commission events in this period ──
   {
     const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerInvoiceRow>(
-      'agency_carrier_id, policy_number, call_center, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
+      'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
     )
 
     const unseen = cbStageDeals.filter((d) => {
@@ -998,7 +1001,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
           {
             id: `stage-cb-${key}`,
             insuredName,
-            carrier: '—',
+            carrier: deal.carrier?.trim() || '—',
             product,
             agentAccount,
             draftDate,
