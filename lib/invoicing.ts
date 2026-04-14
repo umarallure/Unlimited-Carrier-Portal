@@ -704,9 +704,14 @@ export function formatInvoiceRangeLabel(startDate: string, endDate: string): str
 
 function formatDraftDate(value: string | null | undefined): string {
   if (!value) return '—'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return String(value)
-  return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+  // Parse YYYY-MM-DD directly to avoid timezone shift from new Date()
+  const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (iso) {
+    const m = parseInt(iso[2], 10)
+    const d = parseInt(iso[3], 10)
+    return `${m}/${d}/${iso[1]}`
+  }
+  return String(value)
 }
 
 type DealTrackerInvoiceRow = {

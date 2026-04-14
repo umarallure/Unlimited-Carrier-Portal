@@ -196,10 +196,8 @@ export default function InvoicingPage() {
                       <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Sales</TableHead>
                       <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
                       <TableHead className={invoiceTableHead}>Carrier</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'min-w-[120px]')}>Product</TableHead>
                       <TableHead className={invoiceTableHead}>Agent Account</TableHead>
                       <TableHead className={invoiceTableHead}>Draft Date</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Monthly Premium</TableHead>
                       <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
                       <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
                       <TableHead className={invoiceTableHead}>Com Type</TableHead>
@@ -208,7 +206,7 @@ export default function InvoicingPage() {
                   <TableBody>
                     {group.salesLines.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={10} className={cn(invoiceCell, 'text-muted-foreground')}>
+                        <TableCell colSpan={8} className={cn(invoiceCell, 'text-muted-foreground')}>
                           No sales in this period.
                         </TableCell>
                       </TableRow>
@@ -218,12 +216,8 @@ export default function InvoicingPage() {
                           <TableCell className={invoiceCell}>{line.insuredName}</TableCell>
                           <TableCell className={cn(invoiceCell, 'text-right font-mono')}>${formatMoney(line.leadValue)}</TableCell>
                           <TableCell className={invoiceCell}>{line.carrier}</TableCell>
-                          <TableCell className={invoiceCell}>{line.product}</TableCell>
                           <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
                           <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right')}>
-                            {line.monthlyPremium != null ? `$${formatMoney(line.monthlyPremium)}` : '—'}
-                          </TableCell>
                           <TableCell className={cn(invoiceCell, 'text-right')}>
                             {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
                           </TableCell>
@@ -249,10 +243,8 @@ export default function InvoicingPage() {
                       <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Chargebacks</TableHead>
                       <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
                       <TableHead className={invoiceTableHead}>Carrier</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'min-w-[120px]')}>Product</TableHead>
                       <TableHead className={invoiceTableHead}>Agent Account</TableHead>
                       <TableHead className={invoiceTableHead}>Draft Date</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Monthly Premium</TableHead>
                       <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
                       <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
                       <TableHead className={invoiceTableHead}>Com Type</TableHead>
@@ -261,7 +253,7 @@ export default function InvoicingPage() {
                   <TableBody>
                     {group.chargebackLines.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={10} className={cn(invoiceCell, 'text-muted-foreground')}>
+                        <TableCell colSpan={8} className={cn(invoiceCell, 'text-muted-foreground')}>
                           No chargebacks in this period.
                         </TableCell>
                       </TableRow>
@@ -273,12 +265,8 @@ export default function InvoicingPage() {
                             ${formatMoney(line.leadValue)}
                           </TableCell>
                           <TableCell className={invoiceCell}>{line.carrier}</TableCell>
-                          <TableCell className={invoiceCell}>{line.product}</TableCell>
                           <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
                           <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right')}>
-                            {line.monthlyPremium != null ? `$${formatMoney(line.monthlyPremium)}` : '—'}
-                          </TableCell>
                           <TableCell className={cn(invoiceCell, 'text-right')}>
                             {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
                           </TableCell>
