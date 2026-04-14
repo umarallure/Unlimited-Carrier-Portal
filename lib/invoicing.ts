@@ -188,6 +188,37 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out
 }
 
+/** Standard policy term in months used for pro-rating stage-only chargebacks. */
+const POLICY_TERM_MONTHS = 9
+
+/**
+ * Calculate months elapsed between a policy effective date and a reference date.
+ * Returns 0 when the effective date is missing or in the future.
+ */
+function monthsActive(effectiveDate: string | null | undefined, referenceDate: string): number {
+  if (!effectiveDate) return 0
+  const eff = new Date(effectiveDate)
+  const ref = new Date(referenceDate)
+  if (Number.isNaN(eff.getTime()) || Number.isNaN(ref.getTime())) return 0
+  const months = (ref.getFullYear() - eff.getFullYear()) * 12 + (ref.getMonth() - eff.getMonth())
+  return Math.max(0, months)
+}
+
+/**
+ * Pro-rate a chargeback amount for stage-only chargebacks.
+ * full cc value = dealValue / 2, split into POLICY_TERM_MONTHS parts,
+ * chargeback only the remaining (unpaid) months.
+ * Returns the pro-rated *lead value* (cc share, i.e. 50% side) as a negative number.
+ */
+function proRatedChargebackLeadValue(dealValue: number, effectiveDate: string | null | undefined, referenceDate: string): number {
+  const active = monthsActive(effectiveDate, referenceDate)
+  const remaining = Math.max(0, POLICY_TERM_MONTHS - active)
+  if (remaining === 0) return 0
+  const ccValue = dealValue / 2
+  const monthlyCC = ccValue / POLICY_TERM_MONTHS
+  return roundMoney(-(monthlyCC * remaining))
+}
+
 /** Paginated fetch for deal_tracker rows in chargeback pipeline stages (can exceed Supabase default 1000-row limit). */
 async function fetchAllChargebackStageDeals<T extends Record<string, unknown>>(selectCols: string): Promise<T[]> {
   const PAGE_SIZE = 1000
@@ -405,7 +436,7 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
   // ── Stage-only chargebacks: policies in chargeback pipeline with NO commission events in this period ──
   {
     const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerCallCenterRow>(
-      'agency_carrier_id, policy_number, call_center, name, policy_type, deal_value, ghl_stage, updated_at, created_at',
+      'agency_carrier_id, policy_number, call_center, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
     )
 
     const unseen = cbStageDeals.filter((d) => {
@@ -427,15 +458,21 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
         if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
       }
 
+      const today = new Date().toISOString().slice(0, 10)
       for (const deal of unseen) {
         const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
         if (policyMap.has(key)) continue
         const dealValue = toNumber(deal.deal_value)
         if (dealValue <= 0) continue
         const priorStatus = unseenStatus.get(key) ?? null
-        const grossAmount = roundMoney(-Math.abs(dealValue))
-        const nextStatus = deriveNextStatus(priorStatus, grossAmount)
+        // Use full gross for status derivation (state machine needs the raw event direction)
+        const fullGross = roundMoney(-Math.abs(dealValue))
+        const nextStatus = deriveNextStatus(priorStatus, fullGross)
         if (!isBillableStatus(nextStatus)) continue
+        // Pro-rate: only charge back remaining months of the 9-month term
+        const proRatedLead = proRatedChargebackLeadValue(dealValue, deal.effective_date, today)
+        if (proRatedLead === 0) continue
+        const proRatedGross = roundMoney(proRatedLead * 2) // gross = lead * 2 (inverse of 50% share)
         const callCenter = deal.call_center?.trim() || 'Unassigned'
         policyMap.set(key, {
           policyKey: key,
@@ -446,16 +483,16 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
           callCenter,
           latestCommissionDate: endDate,
           latestInvoicingStatus: nextStatus,
-          grossNet: grossAmount,
-          ccNet: roundMoney(grossAmount / 2),
+          grossNet: proRatedGross,
+          ccNet: proRatedLead,
           events: [
             {
               eventId: `stage-cb-${key}`,
               date: endDate,
               carrier: '—',
               advanceAmount: 0,
-              chargeBackAmount: grossAmount,
-              grossAmount,
+              chargeBackAmount: proRatedGross,
+              grossAmount: proRatedGross,
               invoicingStatus: nextStatus,
             },
           ],
@@ -934,6 +971,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
         if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
       }
 
+      const today = new Date().toISOString().slice(0, 10)
       for (const deal of unseen) {
         const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
         if (dealByPolicyKey.has(key)) continue
@@ -943,11 +981,15 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
         const cbNorm = -Math.abs(dealValue)
         const cbStatus = deriveNextStatus(priorStatus, roundMoney(cbNorm))
         if (!isBillableStatus(cbStatus)) continue
+        // Pro-rate: only charge back remaining months of the 9-month term
+        const proRatedLead = proRatedChargebackLeadValue(dealValue, deal.effective_date, today)
+        if (proRatedLead === 0) continue
         const callCenter = deal.call_center?.trim() || 'Unassigned'
         const insuredName = (deal.name || '—').trim() || '—'
         const product = (deal.policy_type || '—').trim() || '—'
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
-        const draftRaw = deal.deal_creation_date || deal.effective_date || endDate
+        // Show the policy effective date in the Draft Date column
+        const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
         const draftDate = formatDraftDate(draftRaw)
         const monthlyPremium = roundMoney(dealValue)
         const comType = (deal.commission_type || 'Advance').trim() || 'Advance'
@@ -965,7 +1007,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
             comPct: '—',
             comType,
             policyNumber: deal.policy_number,
-            leadValue: roundMoney(cbNorm * BPO_INVOICE_LEAD_VALUE_SHARE),
+            leadValue: proRatedLead,
           },
           'charge',
         )
