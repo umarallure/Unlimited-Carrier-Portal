@@ -157,26 +157,78 @@ function buildPolicyKey(agencyCarrierId: string, policyNumber: string): string {
   return `${agencyCarrierId}::${normalizePolicyNumber(policyNumber)}`
 }
 
+const CHARGEBACK_STAGE_LABELS = [
+  'FDPF Pending Reason',
+  'Pending Lapse Pending Reason',
+  'FDPF Insufficient Funds',
+  'FDPF Incorrect Banking Info',
+  'FDPF Unauthorized Draft',
+  'Pending Failed Payment Fix',
+  'Pending Lapse',
+  'Chargeback Failed Payment',
+  'Chargeback Cancellation',
+  'Pending Chargeback Fix',
+  'Chargeback Fixed',
+  'Chargeback DQ',
+]
+
 const CHARGEBACK_PIPELINE_STAGES = new Set(
-  [
-    'FDPF Pending Reason',
-    'Pending Lapse Pending Reason',
-    'FDPF Insufficient Funds',
-    'FDPF Incorrect Banking Info',
-    'FDPF Unauthorized Draft',
-    'Pending Failed Payment Fix',
-    'Pending Lapse',
-    'Chargeback Failed Payment',
-    'Chargeback Cancellation',
-    'Pending Chargeback Fix',
-    'Chargeback Fixed',
-    'Chargeback DQ',
-  ].map((s) => s.toLowerCase()),
+  CHARGEBACK_STAGE_LABELS.map((s) => s.toLowerCase()),
 )
 
 function isChargebackPipelineStage(stage: string | null | undefined): boolean {
   if (!stage) return false
   return CHARGEBACK_PIPELINE_STAGES.has(stage.trim().toLowerCase())
+}
+
+/** Split an array into chunks of `size` to keep Supabase URL lengths manageable. */
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
+/** Paginated fetch for deal_tracker rows in chargeback pipeline stages (can exceed Supabase default 1000-row limit). */
+async function fetchAllChargebackStageDeals<T extends Record<string, unknown>>(selectCols: string): Promise<T[]> {
+  const PAGE_SIZE = 1000
+  const allRows: T[] = []
+  let offset = 0
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await supabase
+      .from('deal_tracker')
+      .select(selectCols)
+      .in('ghl_stage', CHARGEBACK_STAGE_LABELS)
+      .range(offset, offset + PAGE_SIZE - 1)
+    if (error) throw new Error(error.message)
+    const rows = (data || []) as unknown as T[]
+    allRows.push(...rows)
+    if (rows.length < PAGE_SIZE) break
+    offset += PAGE_SIZE
+  }
+  return allRows
+}
+
+/** Batched query for invoicing_status_history across many policy numbers. */
+async function batchFetchStatusHistory(
+  policyNumbers: string[],
+  agencyCarrierIds: string[],
+): Promise<Array<{ agency_carrier_id: string; policy_number: string; invoicing_status: InvoicingStatus }>> {
+  const BATCH_SIZE = 200
+  const batches = chunk(policyNumbers, BATCH_SIZE)
+  const allRows: Array<{ agency_carrier_id: string; policy_number: string; invoicing_status: InvoicingStatus }> = []
+  for (const batch of batches) {
+    const { data, error } = await supabase
+      .from('invoicing_status_history')
+      .select('agency_carrier_id, policy_number, invoicing_status, effective_date, created_at')
+      .in('policy_number', batch)
+      .in('agency_carrier_id', agencyCarrierIds)
+      .order('effective_date', { ascending: false })
+      .order('created_at', { ascending: false })
+    if (error) throw new Error(error.message)
+    if (data) allRows.push(...(data as typeof allRows))
+  }
+  return allRows
 }
 
 export async function buildInvoiceDraft(startDate: string, endDate: string): Promise<InvoiceDraftResult> {
@@ -348,6 +400,68 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
       grossAmount,
       invoicingStatus: nextStatus,
     })
+  }
+
+  // ── Stage-only chargebacks: policies in chargeback pipeline with NO commission events in this period ──
+  {
+    const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerCallCenterRow>(
+      'agency_carrier_id, policy_number, call_center, name, policy_type, deal_value, ghl_stage, updated_at, created_at',
+    )
+
+    const unseen = cbStageDeals.filter((d) => {
+      const key = buildPolicyKey(d.agency_carrier_id, d.policy_number)
+      return !policyMap.has(key)
+    })
+
+    if (unseen.length > 0) {
+      const unseenPolicyNumbers = Array.from(
+        new Set(unseen.flatMap((d) => policyLookupCandidates(d.policy_number)).filter(Boolean)),
+      )
+      const unseenAgencyIds = Array.from(new Set(unseen.map((d) => d.agency_carrier_id).filter(Boolean)))
+
+      const hRows = await batchFetchStatusHistory(unseenPolicyNumbers, unseenAgencyIds)
+
+      const unseenStatus = new Map<string, InvoicingStatus>()
+      for (const row of hRows) {
+        const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
+        if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
+      }
+
+      for (const deal of unseen) {
+        const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
+        if (policyMap.has(key)) continue
+        const dealValue = toNumber(deal.deal_value)
+        if (dealValue <= 0) continue
+        const priorStatus = unseenStatus.get(key) ?? null
+        const grossAmount = roundMoney(-Math.abs(dealValue))
+        const nextStatus = deriveNextStatus(priorStatus, grossAmount)
+        if (!isBillableStatus(nextStatus)) continue
+        const callCenter = deal.call_center?.trim() || 'Unassigned'
+        policyMap.set(key, {
+          policyKey: key,
+          agencyCarrierId: deal.agency_carrier_id,
+          policyNumber: deal.policy_number,
+          carrier: '—',
+          policyName: deal.name?.trim() || '-',
+          callCenter,
+          latestCommissionDate: endDate,
+          latestInvoicingStatus: nextStatus,
+          grossNet: grossAmount,
+          ccNet: roundMoney(grossAmount / 2),
+          events: [
+            {
+              eventId: `stage-cb-${key}`,
+              date: endDate,
+              carrier: '—',
+              advanceAmount: 0,
+              chargeBackAmount: grossAmount,
+              grossAmount,
+              invoicingStatus: nextStatus,
+            },
+          ],
+        })
+      }
+    }
   }
 
   const grouped = new Map<string, InvoicePolicyDraft[]>()
@@ -793,6 +907,70 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
       },
       'charge',
     )
+  }
+
+  // ── Stage-only chargebacks: policies in chargeback pipeline with NO commission events in this period ──
+  {
+    const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerInvoiceRow>(
+      'agency_carrier_id, policy_number, call_center, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
+    )
+
+    const unseen = cbStageDeals.filter((d) => {
+      const key = buildPolicyKey(d.agency_carrier_id, d.policy_number)
+      return !dealByPolicyKey.has(key)
+    })
+
+    if (unseen.length > 0) {
+      const unseenPolicyNumbers = Array.from(
+        new Set(unseen.flatMap((d) => policyLookupCandidates(d.policy_number)).filter(Boolean)),
+      )
+      const unseenAgencyIds = Array.from(new Set(unseen.map((d) => d.agency_carrier_id).filter(Boolean)))
+
+      const hRows = await batchFetchStatusHistory(unseenPolicyNumbers, unseenAgencyIds)
+
+      const unseenStatus = new Map<string, InvoicingStatus>()
+      for (const row of hRows) {
+        const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
+        if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
+      }
+
+      for (const deal of unseen) {
+        const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
+        if (dealByPolicyKey.has(key)) continue
+        const dealValue = toNumber(deal.deal_value)
+        if (dealValue <= 0) continue
+        const priorStatus = unseenStatus.get(key) ?? null
+        const cbNorm = -Math.abs(dealValue)
+        const cbStatus = deriveNextStatus(priorStatus, roundMoney(cbNorm))
+        if (!isBillableStatus(cbStatus)) continue
+        const callCenter = deal.call_center?.trim() || 'Unassigned'
+        const insuredName = (deal.name || '—').trim() || '—'
+        const product = (deal.policy_type || '—').trim() || '—'
+        const agentAccount = (deal.sales_agent || '—').trim() || '—'
+        const draftRaw = deal.deal_creation_date || deal.effective_date || endDate
+        const draftDate = formatDraftDate(draftRaw)
+        const monthlyPremium = roundMoney(dealValue)
+        const comType = (deal.commission_type || 'Advance').trim() || 'Advance'
+        pushLine(
+          callCenter,
+          {
+            id: `stage-cb-${key}`,
+            insuredName,
+            carrier: '—',
+            product,
+            agentAccount,
+            draftDate,
+            monthlyPremium,
+            coverageAmount: null,
+            comPct: '—',
+            comType,
+            policyNumber: deal.policy_number,
+            leadValue: roundMoney(cbNorm * BPO_INVOICE_LEAD_VALUE_SHARE),
+          },
+          'charge',
+        )
+      }
+    }
   }
 
   const groups: BpoInvoiceGroupDetail[] = Array.from(linesByCenter.entries())
