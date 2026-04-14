@@ -160,6 +160,7 @@ function buildPolicyKey(agencyCarrierId: string, policyNumber: string): string {
 const CHARGEBACK_PIPELINE_STAGES = new Set(
   [
     'FDPF Pending Reason',
+    'Pending Lapse Pending Reason',
     'FDPF Insufficient Funds',
     'FDPF Incorrect Banking Info',
     'FDPF Unauthorized Draft',
