@@ -150,10 +150,28 @@ export default function InvoicingPage() {
         </CardContent>
       </Card>
 
-      {bpoDetail && bpoDetail.groups.length > 0 && (
-        <p className="text-sm text-muted-foreground print:hidden">
-          Invoice period: <span className="font-medium text-foreground">{bpoDetail.rangeLabel}</span>
-        </p>
+      {draft && draft.groups.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4 print:hidden dark:border-slate-800">
+          <div className="text-sm text-muted-foreground">
+            {bpoDetail && bpoDetail.groups.length > 0 ? (
+              <>
+                Invoice period: <span className="font-medium text-foreground">{bpoDetail.rangeLabel}</span>
+              </>
+            ) : (
+              <span>Review invoices below, then mark the batch as paid when settled.</span>
+            )}
+          </div>
+          <Button onClick={markPaid} disabled={saving} className="shrink-0 bg-green-600 text-white hover:bg-green-700">
+            {saving ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              'Mark paid'
+            )}
+          </Button>
+        </div>
       )}
 
       {bpoDetail && bpoDetail.groups.length === 0 && draft && draft.groups.length === 0 && (
@@ -325,20 +343,6 @@ export default function InvoicingPage() {
         </div>
       ))}
 
-      {draft && draft.groups.length > 0 && (
-        <div className="flex justify-end print:hidden">
-          <Button onClick={markPaid} disabled={saving} className="bg-green-600 text-white hover:bg-green-700">
-            {saving ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              'Mark paid'
-            )}
-          </Button>
-        </div>
-      )}
     </div>
   )
 }
