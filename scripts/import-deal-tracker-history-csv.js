@@ -47,6 +47,7 @@ const SALES_AGENT_AGENCY = {
   'brandom flinchum': 'Safe Harbor Insurance',
   'Aidan Coleman': 'Safe Harbor Insurance',
   'aidan coleman': 'Safe Harbor Insurance',
+  'aubrey nichols': 'Safe Harbor Insurance',
   // Unlimited Insurance
   'benjamin wunder': 'Unlimited Insurance',
   'caleb johnson': 'Unlimited Insurance',
