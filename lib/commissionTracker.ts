@@ -41,6 +41,83 @@ function normalizePolicyNumber(value: any): string {
   return String(value ?? '').trim()
 }
 
+function dateRawForSourceRow(sourceTable: string, row: any): unknown {
+  // Canonical date field per carrier table (set from Commission dialog header date):
+  // - amam_commissions       -> statement_date
+  // - aetna_commissions      -> commissionpaiddate
+  // - ahl_commissions        -> commissionpaiddate
+  // - moh_commissions        -> activity_date
+  // - corebridge_commissions -> statement_date
+  //
+  // We keep broad fallbacks only when canonical fields are actually missing.
+  if (sourceTable === 'moh_commissions') {
+    return (
+      row['activity_date'] ??
+      row['paid_to_date'] ??
+      row['issue_date'] ??
+      row['statement_date'] ??
+      row['commissionpaiddate'] ??
+      row['Date'] ??
+      row['date'] ??
+      row['PAID_TO_DATE'] ??
+      row['appdate'] ??
+      row['effectivedate'] ??
+      null
+    )
+  }
+
+  if (sourceTable === 'amam_commissions') {
+    return (
+      row['statement_date'] ??
+      row['commission_period_end'] ??
+      row['commissionpaiddate'] ??
+      row['activity_date'] ??
+      row['Date'] ??
+      row['date'] ??
+      row['PAID_TO_DATE'] ??
+      row['paid_to_date'] ??
+      row['issue_date'] ??
+      row['appdate'] ??
+      row['effectivedate'] ??
+      null
+    )
+  }
+
+  if (sourceTable === 'aetna_commissions' || sourceTable === 'ahl_commissions') {
+    return (
+      row['commissionpaiddate'] ??
+      row['statement_date'] ??
+      row['activity_date'] ??
+      row['Date'] ??
+      row['date'] ??
+      row['PAID_TO_DATE'] ??
+      row['paid_to_date'] ??
+      row['issue_date'] ??
+      row['appdate'] ??
+      row['effectivedate'] ??
+      null
+    )
+  }
+
+  if (sourceTable === 'corebridge_commissions') {
+    return (
+      row['statement_date'] ??
+      row['Date'] ??
+      row['date'] ??
+      null
+    )
+  }
+
+  return (
+    row['statement_date'] ??
+    row['commissionpaiddate'] ??
+    row['activity_date'] ??
+    row['Date'] ??
+    row['date'] ??
+    null
+  )
+}
+
 /**
  * Build CommissionTrackerRow entries from a carrier-specific commissions table.
  * This mirrors the logic in app/commission-report/page.tsx so the report and
@@ -81,34 +158,10 @@ function buildCommissionRowsFromSource(
       row['paid_producer'] ??
       null
 
-    const dateRaw =
-      sourceTable === 'moh_commissions'
-        ? (
-            row['activity_date'] ??
-            row['paid_to_date'] ??
-            row['issue_date'] ??
-            row['Date'] ??
-            row['date'] ??
-            row['PAID_TO_DATE'] ??
-            row['commissionpaiddate'] ??
-            row['statement_date'] ??
-            row['appdate'] ??
-            row['effectivedate'] ??
-            null
-          )
-        : (
-            row['Date'] ??
-            row['date'] ??
-            row['PAID_TO_DATE'] ??
-            row['paid_to_date'] ??
-            row['commissionpaiddate'] ??
-            row['statement_date'] ??
-            row['activity_date'] ??
-            row['issue_date'] ??
-            row['appdate'] ??
-            row['effectivedate'] ??
-            null
-          )
+    // Always prefer the carrier table's canonical saved date field first.
+    // This ensures the statement date selected in Commission Report dialog is
+    // what gets normalized into commission_tracker.
+    const dateRaw = dateRawForSourceRow(sourceTable, row)
     const normalizedDate = normalizeDate(dateRaw)
     if (!normalizedDate) continue
 
