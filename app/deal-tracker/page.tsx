@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import Papa from 'papaparse'
 import { supabase } from '@/lib/supabaseClient'
 import { getDealTrackerEntries, getChangedFieldsFromHistory } from '@/lib/dealTracker'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -86,6 +87,7 @@ export default function DealTrackerPage() {
 
   const dateFromInputRef = useRef<HTMLInputElement>(null)
   const dateToInputRef = useRef<HTMLInputElement>(null)
+  const importInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     fetchEntries()
@@ -353,6 +355,8 @@ export default function DealTrackerPage() {
       'Deal Creation Date',
       'Effective Date',
       'Change Type', // new | updated | changed | unchanged
+      'Row ID',
+      'Agency Carrier ID',
     ]
     const rows = filteredEntries.map((e: any) => {
       const hasHistory = hasUpdates(e)
@@ -383,6 +387,8 @@ export default function DealTrackerPage() {
         e.deal_creation_date ?? '',
         e.effective_date ?? '',
         changeType,
+        e.id ?? '',
+        e.agency_carrier_id ?? '',
       ]
     })
     const csv = [headers, ...rows]
@@ -405,6 +411,89 @@ export default function DealTrackerPage() {
     link.click()
     document.body.removeChild(link)
     URL.revokeObjectURL(url)
+  }
+
+  const handleImportClick = () => {
+    importInputRef.current?.click()
+  }
+
+  const importFromCsv = async (file: File | null) => {
+    if (!file) return
+    setSavingInlineEdits(true)
+    try {
+      const text = await file.text()
+      const parsed = Papa.parse<Record<string, string>>(text, {
+        header: true,
+        skipEmptyLines: true,
+      })
+      const rows = (parsed.data || []).filter((r) => r && (r['Row ID'] || r['Policy Number']))
+      if (!rows.length) {
+        alert('No valid rows found in CSV.')
+        return
+      }
+
+      for (const row of rows) {
+        const id = (row['Row ID'] || '').trim()
+        const payload: Record<string, unknown> = {}
+
+        const str = (v: string | undefined) => {
+          const t = (v ?? '').trim()
+          return t === '' ? null : t
+        }
+        const num = (v: string | undefined) => {
+          const t = (v ?? '').trim()
+          if (!t) return null
+          const n = Number.parseFloat(t)
+          return Number.isNaN(n) ? null : n
+        }
+
+        payload.name = str(row['Name'])
+        payload.policy_number = (row['Policy Number'] ?? '').trim()
+        payload.carrier = str(row['Carrier'])
+        payload.policy_status = str(row['Policy Status'])
+        payload.ghl_stage = str(row['GHL Stage'])
+        payload.carrier_status = str(row['Carrier Status (raw)'])
+        payload.status = str(row['Status'])
+        payload.notes = str(row['Notes'])
+        payload.deal_value = num(row['Deal Value'])
+        payload.cc_value = num(row['CC Value'])
+        payload.charge_back = num(row['Charge Back'])
+        payload.sales_agent = str(row['Sales Agent'])
+        payload.writing_number = str(row['Writing #'])
+        payload.call_center = str(row['Call Center'])
+        payload.phone_number = str(row['Phone Number'])
+        payload.deal_creation_date = str(row['Deal Creation Date'])
+        payload.effective_date = str(row['Effective Date'])
+        payload.last_updated = new Date().toISOString()
+        payload.updated_at = payload.last_updated
+
+        if (id) {
+          const { error } = await supabase.from('deal_tracker').update(payload).eq('id', id)
+          if (error) throw new Error(error.message)
+        } else {
+          // Fallback: update by agency + policy number when Row ID missing
+          const agencyCarrierId = (row['Agency Carrier ID'] ?? '').trim()
+          if (!agencyCarrierId || !payload.policy_number) continue
+          const { error } = await supabase
+            .from('deal_tracker')
+            .update(payload)
+            .eq('agency_carrier_id', agencyCarrierId)
+            .eq('policy_number', payload.policy_number as string)
+          if (error) throw new Error(error.message)
+        }
+      }
+
+      await fetchEntries()
+      alert('Deal Tracker updated from CSV import.')
+    } catch (err: any) {
+      console.error('CSV import failed', err)
+      alert(err?.message || 'Failed to import Deal Tracker CSV.')
+    } finally {
+      setSavingInlineEdits(false)
+      if (importInputRef.current) {
+        importInputRef.current.value = ''
+      }
+    }
   }
 
   const clearFilters = () => {
@@ -948,6 +1037,21 @@ export default function DealTrackerPage() {
                 className={adminOutlineBtn}
               >
                 Export CSV
+              </Button>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                className="hidden"
+                onChange={(e) => importFromCsv(e.target.files?.[0] ?? null)}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleImportClick}
+                className={adminOutlineBtn}
+              >
+                Import CSV
               </Button>
               <Button
                 variant="outline"

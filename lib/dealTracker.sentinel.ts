@@ -120,7 +120,10 @@ export async function processSentinelFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   const previewEntries: DealTrackerPreviewEntry[] = []
 
@@ -362,7 +365,7 @@ export async function processSentinelCommissionsForDealTracker(
   const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
   let dailyDealFlowMap = new Map<
     string,
-    { call_center: string | null; phone_number: string | null; draft_date: string | null }
+    { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
   >()
   if (missingPolicyNumbers.length > 0) {
     const policyNamesForDDF = Array.from(policiesMap.values())
@@ -440,9 +443,12 @@ export async function processSentinelCommissionsForDealTracker(
     let callCenter: string | null = existing?.call_center ?? null
     let phoneNumber: string | null = existing?.phone_number ?? null
     let effectiveDateFromDdf: string | null = null
+    let ddfInfo:
+      | { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+      | null = null
     if (!existing && policy && (callCenter == null && phoneNumber == null)) {
       const normalizedName = normalizeNameForSearch(policy.client_name || '')
-      const ddfInfo = dailyDealFlowMap.get(normalizedName) || null
+      ddfInfo = dailyDealFlowMap.get(normalizedName) || null
       callCenter = ddfInfo?.call_center ?? null
       phoneNumber = ddfInfo?.phone_number ?? null
       effectiveDateFromDdf = ddfInfo?.draft_date ?? null
