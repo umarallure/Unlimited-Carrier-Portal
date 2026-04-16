@@ -183,7 +183,10 @@ export async function processRNAFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   const previewEntries: DealTrackerPreviewEntry[] = []
 
@@ -443,7 +446,10 @@ export async function processRNACommissionsForDealTracker(
     return needsContact || needsDealDate || needsEffectiveDate
   })
 
-  let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+let dailyDealFlowMap = new Map<
+  string,
+  { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+>()
   if (allPolicyNumbersNeedingDDF.length > 0) {
     const policyNamesForDDF = allPolicyNumbersNeedingDDF
       .map(pn => {
@@ -514,11 +520,15 @@ export async function processRNACommissionsForDealTracker(
     let dailyDealFlowFetched = existing?.daily_deal_flow_fetched ?? false
     let dailyDealFlowFetchedAt = existing?.daily_deal_flow_fetched_at ?? null
 
+    let ddfInfo:
+      | { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+      | null = null
+
     if (!callCenter && !phoneNumber) {
       const nameForDdf = policy ? buildRnaInsuredName(policy) : (comm.insured_name ?? '').trim()
       if (nameForDdf) {
         const normalizedName = normalizeNameForSearch(nameForDdf)
-        const ddfInfo = dailyDealFlowMap.get(normalizedName)
+        ddfInfo = dailyDealFlowMap.get(normalizedName) ?? null
         if (ddfInfo) {
           callCenter = ddfInfo.call_center ?? null
           phoneNumber = ddfInfo.phone_number ?? null

@@ -194,7 +194,10 @@ export async function processMohFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueInsuredNamesMoh.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNamesMoh, ddfCarrier)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   console.log('[Deal Tracker] MOH: DDF map size after fetch:', dailyDealFlowMap.size, 'of', uniqueInsuredNamesMoh.length, 'names')
 
@@ -498,7 +501,10 @@ export async function processMohCommissionsForDealTracker(
     return policyNeedsDdfLookup(existing)
   })
 
-  let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+  let dailyDealFlowMap = new Map<
+    string,
+    { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+  >()
   if (allPolicyNumbersNeedingDDF.length > 0) {
     const policyNamesForDDF = allPolicyNumbersNeedingDDF
       .map(pn => {
@@ -577,10 +583,14 @@ export async function processMohCommissionsForDealTracker(
     let dailyDealFlowFetchedAt = existing?.daily_deal_flow_fetched_at ?? null
     let effectiveDateFromDdf: string | null = null
 
+    let ddfInfo:
+      | { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+      | null = null
+
     if (policy) {
       const nameForDdf = buildMohInsuredName(policy)
       const normalizedName = normalizeNameForSearch(nameForDdf)
-      const ddfInfo = dailyDealFlowMap.get(normalizedName)
+      ddfInfo = dailyDealFlowMap.get(normalizedName) ?? null
       if (ddfInfo && callCenter == null && phoneNumber == null) {
         callCenter = ddfInfo.call_center ?? null
         phoneNumber = ddfInfo.phone_number ?? null

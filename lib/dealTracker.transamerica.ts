@@ -121,7 +121,10 @@ export async function processTransamericaFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   const previewEntries: DealTrackerPreviewEntry[] = []
 

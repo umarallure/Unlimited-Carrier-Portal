@@ -110,7 +110,10 @@ export async function processAhlFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   const previewEntries: DealTrackerPreviewEntry[] = []
 
@@ -363,7 +366,10 @@ export async function processAhlCommissionsForDealTracker(
 
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
   const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
-  let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+  let dailyDealFlowMap = new Map<
+    string,
+    { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+  >()
   const policyNamesForDDF = Array.from(
     new Set(
       allCommissionPolicyNumbers

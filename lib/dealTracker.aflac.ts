@@ -133,7 +133,10 @@ export async function processAflacFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, carrierName)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   const previewEntries: DealTrackerPreviewEntry[] = []
 
@@ -407,7 +410,10 @@ export async function processAflacCommissionsForDealTracker(
   // re-map when carrier status changed (same behavior as Aetna).
   const statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
   const ghlStageMappingMap = await bulkFetchGhlStageMappings(carrierId, carrierCode)
-  let dailyDealFlowMap = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+  let dailyDealFlowMap = new Map<
+    string,
+    { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+  >()
   if (missingPolicyNumbers.length > 0) {
     const policyNamesForDDF = Array.from(policiesMap.values())
       .map((p: any) => p.insuredname)

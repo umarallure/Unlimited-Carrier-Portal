@@ -121,7 +121,10 @@ export async function processLibertyFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   const ddfMatched = Array.from(dailyDealFlowMap.entries()).filter(([, v]) => v.call_center || v.phone_number).length
   if (uniqueNames.length > 0) {

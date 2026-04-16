@@ -122,7 +122,10 @@ export async function processCorebridgeFilesForDealTracker(
   const dailyDealFlowMap =
     uniqueNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
-      : new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }>()
+      : new Map<
+          string,
+          { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+        >()
 
   const ddfMatched = Array.from(dailyDealFlowMap.entries()).filter(([, v]) => v.call_center || v.phone_number).length
   if (uniqueNames.length > 0) {
@@ -189,7 +192,7 @@ export async function processCorebridgeFilesForDealTracker(
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? ddfInfo?.lead_name ?? null,
+      ghl_name: existing?.ghl_name ?? null,
       ghl_stage: mappedGhlStage,
       policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
@@ -338,6 +341,26 @@ export async function processCorebridgeCommissionsForDealTracker(
 
   console.log('[Deal Tracker Corebridge] Policies passing filter:', Array.from(latestRowByPolicy.keys()).join(', '))
 
+  const policyNumbersNeedingDdf = Array.from(latestRowByPolicy.keys()).filter(policyNum =>
+    policyNeedsDdfLookup(existingMap.get(policyNum))
+  )
+  let dailyDealFlowMap = new Map<
+    string,
+    { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
+  >()
+  if (policyNumbersNeedingDdf.length > 0) {
+    const policyNamesForDdf = Array.from(
+      new Set(
+        policyNumbersNeedingDdf
+          .map(policyNum => ((latestRowByPolicy.get(policyNum)?.insured_name ?? '').toString().trim()))
+          .filter((name: string) => name.length > 0)
+      )
+    )
+    if (policyNamesForDdf.length > 0) {
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDdf, carrierName)
+    }
+  }
+
   const previewEntries: DealTrackerPreviewEntry[] = []
 
   for (const [policyNum, latest] of latestRowByPolicy.entries()) {
@@ -345,6 +368,8 @@ export async function processCorebridgeCommissionsForDealTracker(
     const insuredName = (latest.insured_name ?? '').toString().trim() || null
     const salesAgent = (latest.agent_code ?? '').toString().trim() || null
     const statementDate = (latest.statement_date ?? '').toString().trim() || null
+    const normalizedName = insuredName ? normalizeNameForSearch(insuredName) : null
+    const ddfInfo = normalizedName ? dailyDealFlowMap.get(normalizedName) ?? null : null
 
     const pos = posMap.get(policyNum) ?? 0
     const neg = negMap.get(policyNum) ?? 0
