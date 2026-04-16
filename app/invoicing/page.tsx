@@ -207,45 +207,47 @@ export default function InvoicingPage() {
               <div className="rounded-t-md bg-teal-600 px-3 py-2 text-center text-sm font-semibold text-white dark:bg-teal-700">
                 Sales
               </div>
-              <div className="overflow-x-auto rounded-b-md border border-t-0 border-slate-200 dark:border-slate-700">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Sales</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
-                      <TableHead className={invoiceTableHead}>Carrier</TableHead>
-                      <TableHead className={invoiceTableHead}>Agent Account</TableHead>
-                      <TableHead className={invoiceTableHead}>Draft Date</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
-                      <TableHead className={invoiceTableHead}>Com Type</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {group.salesLines.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={8} className={cn(invoiceCell, 'text-muted-foreground')}>
-                          No sales in this period.
-                        </TableCell>
+              <div className="min-w-0 overflow-x-auto rounded-b-md border border-t-0 border-slate-200 dark:border-slate-700">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="hover:bg-transparent">
+                        <TableHead className={cn(invoiceTableHead, 'print:hidden')}>Policy #</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Sales</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
+                        <TableHead className={invoiceTableHead}>Carrier</TableHead>
+                        <TableHead className={invoiceTableHead}>Agent Account</TableHead>
+                        <TableHead className={invoiceTableHead}>Draft Date</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
+                        <TableHead className={invoiceTableHead}>Com Type</TableHead>
                       </TableRow>
-                    ) : (
-                      group.salesLines.map((line) => (
-                        <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
-                          <TableCell className={invoiceCell}>{line.insuredName}</TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right font-mono')}>${formatMoney(line.leadValue)}</TableCell>
-                          <TableCell className={invoiceCell}>{line.carrier}</TableCell>
-                          <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
-                          <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right')}>
-                            {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
+                    </TableHeader>
+                    <TableBody>
+                      {group.salesLines.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={9} className={cn(invoiceCell, 'text-muted-foreground')}>
+                            No sales in this period.
                           </TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right')}>{line.comPct}</TableCell>
-                          <TableCell className={invoiceCell}>{line.comType}</TableCell>
                         </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
+                      ) : (
+                        group.salesLines.map((line) => (
+                          <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
+                            <TableCell className={cn(invoiceCell, 'font-mono print:hidden')}>{line.policyNumber}</TableCell>
+                            <TableCell className={invoiceCell}>{line.insuredName}</TableCell>
+                            <TableCell className={cn(invoiceCell, 'text-right font-mono')}>${formatMoney(line.leadValue)}</TableCell>
+                            <TableCell className={invoiceCell}>{line.carrier}</TableCell>
+                            <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
+                            <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
+                            <TableCell className={cn(invoiceCell, 'text-right')}>
+                              {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
+                            </TableCell>
+                            <TableCell className={cn(invoiceCell, 'text-right')}>{line.comPct}</TableCell>
+                            <TableCell className={invoiceCell}>{line.comType}</TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
               </div>
             </div>
 
@@ -254,47 +256,49 @@ export default function InvoicingPage() {
               <div className="rounded-t-md bg-orange-400 px-3 py-2 text-center text-sm font-semibold text-slate-900 dark:bg-orange-600 dark:text-white">
                 Chargebacks
               </div>
-              <div className="overflow-x-auto rounded-b-md border border-t-0 border-slate-200 dark:border-slate-700">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Chargebacks</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
-                      <TableHead className={invoiceTableHead}>Carrier</TableHead>
-                      <TableHead className={invoiceTableHead}>Agent Account</TableHead>
-                      <TableHead className={invoiceTableHead}>Draft Date</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
-                      <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
-                      <TableHead className={invoiceTableHead}>Com Type</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {group.chargebackLines.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={8} className={cn(invoiceCell, 'text-muted-foreground')}>
-                          No chargebacks in this period.
-                        </TableCell>
+              <div className="min-w-0 overflow-x-auto rounded-b-md border border-t-0 border-slate-200 dark:border-slate-700">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="hover:bg-transparent">
+                        <TableHead className={cn(invoiceTableHead, 'print:hidden')}>Policy #</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'min-w-[100px]')}>Chargebacks</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'text-right')}>Lead value (50%)</TableHead>
+                        <TableHead className={invoiceTableHead}>Carrier</TableHead>
+                        <TableHead className={invoiceTableHead}>Agent Account</TableHead>
+                        <TableHead className={invoiceTableHead}>Draft Date</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'text-right')}>Coverage Amount</TableHead>
+                        <TableHead className={cn(invoiceTableHead, 'text-right')}>Com %</TableHead>
+                        <TableHead className={invoiceTableHead}>Com Type</TableHead>
                       </TableRow>
-                    ) : (
-                      group.chargebackLines.map((line) => (
-                        <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
-                          <TableCell className={invoiceCell}>{line.insuredName}</TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right font-mono text-rose-700 dark:text-rose-400')}>
-                            ${formatMoney(line.leadValue)}
+                    </TableHeader>
+                    <TableBody>
+                      {group.chargebackLines.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={9} className={cn(invoiceCell, 'text-muted-foreground')}>
+                            No chargebacks in this period.
                           </TableCell>
-                          <TableCell className={invoiceCell}>{line.carrier}</TableCell>
-                          <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
-                          <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right')}>
-                            {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
-                          </TableCell>
-                          <TableCell className={cn(invoiceCell, 'text-right')}>{line.comPct}</TableCell>
-                          <TableCell className={invoiceCell}>{line.comType}</TableCell>
                         </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
+                      ) : (
+                        group.chargebackLines.map((line) => (
+                          <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
+                            <TableCell className={cn(invoiceCell, 'font-mono print:hidden')}>{line.policyNumber}</TableCell>
+                            <TableCell className={invoiceCell}>{line.insuredName}</TableCell>
+                            <TableCell className={cn(invoiceCell, 'text-right font-mono text-rose-700 dark:text-rose-400')}>
+                              ${formatMoney(line.leadValue)}
+                            </TableCell>
+                            <TableCell className={invoiceCell}>{line.carrier}</TableCell>
+                            <TableCell className={invoiceCell}>{line.agentAccount}</TableCell>
+                            <TableCell className={invoiceCell}>{line.draftDate}</TableCell>
+                            <TableCell className={cn(invoiceCell, 'text-right')}>
+                              {line.coverageAmount != null ? `$${formatMoney(line.coverageAmount)}` : '—'}
+                            </TableCell>
+                            <TableCell className={cn(invoiceCell, 'text-right')}>{line.comPct}</TableCell>
+                            <TableCell className={invoiceCell}>{line.comType}</TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
               </div>
             </div>
 

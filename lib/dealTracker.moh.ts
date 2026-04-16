@@ -37,6 +37,24 @@ function normalizeStatusKey(v: unknown): string {
   return s.replace(/\s+/g, ' ')
 }
 
+function normalizePolicyStatusForMappedGhlStageLocal(
+  mappedGhlStage: string | null | undefined,
+  policyStatus: string | null | undefined,
+): string | null {
+  if (!mappedGhlStage) return policyStatus ?? null
+  const stage = mappedGhlStage.trim().toLowerCase()
+  if (stage === 'pending lapse' || stage.startsWith('pending lapse ')) return 'Pending Lapse'
+  if (
+    stage === 'fdpf pending reason' ||
+    stage === 'fdpf insufficient funds' ||
+    stage === 'fdpf incorrect banking info' ||
+    stage === 'issued - pending first draft'
+  ) {
+    return 'Issued Not Paid'
+  }
+  return policyStatus ?? null
+}
+
 /**
  * Process MOH carrier policy files and create deal tracker entries.
  * Uses moh_policies + moh_commissions + DDF, similar to AMAM/AETNA flows.
@@ -300,7 +318,7 @@ export async function processMohFilesForDealTracker(
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfoMoh?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
       policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDateForGhl,
@@ -506,7 +524,7 @@ export async function processMohCommissionsForDealTracker(
     const policy = policiesMap.get(policyNumber)
 
     const insuredName = policy ? buildMohInsuredName(policy) : (comm.insureds_name ?? null)
-    const originalStatus = policy?.policy_status_nme || existing?.policy_status || null
+    const originalStatus = policy?.policy_status_nme || existing?.carrier_status || existing?.policy_status || null
     const totalAmount = commissionAmountsMap.get(policyNumber)
     let dealValue: number | null = totalAmount != null ? totalAmount : null
     let chargeBack: number | null = existing?.charge_back ?? null
@@ -610,18 +628,24 @@ export async function processMohCommissionsForDealTracker(
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealCreationDate: dealCreationDateForGhl,
       dealValue,
+      chargeBack,
       commissionType: comm.activity_type ?? null,
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
 
+    const normalizedPolicyStatus = normalizePolicyStatusForMappedGhlStageLocal(
+      mappedGhlStage,
+      policyStatusResolved,
+    )
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfo?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: policyStatusResolved,
+      policy_status: normalizedPolicyStatus,
       deal_creation_date: dealCreationDateForGhl,
       policy_number: policyNumber,
       carrier: carrierName,
@@ -640,7 +664,7 @@ export async function processMohCommissionsForDealTracker(
       phone_number: phoneNumber,
       cc_pmt_ws: null,
       cc_cb_ws: null,
-      carrier_status: existing?.carrier_status ?? null,
+      carrier_status: originalStatus,
       policy_type: policy?.product_desc ?? policy?.product_type_nme ?? policy?.plan_code ?? null,
       daily_deal_flow_fetched: dailyDealFlowFetched,
       daily_deal_flow_fetched_at: dailyDealFlowFetchedAt,

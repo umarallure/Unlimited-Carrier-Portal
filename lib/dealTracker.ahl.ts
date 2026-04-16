@@ -216,7 +216,7 @@ export async function processAhlFilesForDealTracker(
       agency_carrier_id: agencyCarrierId,
       name: policy.insuredname || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfo?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
       policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDateForGhl,

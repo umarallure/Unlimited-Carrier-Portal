@@ -121,6 +121,7 @@ export async function processDealTrackerAfterUpload(
       if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing MOH commission file for deal tracker...')
         previewEntries = await processMohCommissionsForDealTracker(agencyCarrierId, fileId)
+        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
       } else {
         console.log('[Deal Tracker] Processing MOH policy file for deal tracker...')
         previewEntries = await processMohFilesForDealTracker(agencyCarrierId, fileId)
@@ -206,6 +207,47 @@ export interface SaveDealTrackerAfterConfirmationOptions {
   onProgress?: (message: string) => void
 }
 
+async function syncEditedEntriesToCommissionTracker(
+  entries: DealTrackerPreviewEntry[],
+  onProgress?: (message: string) => void,
+): Promise<void> {
+  const now = new Date().toISOString()
+  const editable = entries.filter(
+    (e) => e.source_commission_table && e.source_commission_id,
+  )
+  if (!editable.length) return
+  onProgress?.('Syncing edited commission values to commission tracker...')
+  for (const entry of editable) {
+    const sourceTable = String(entry.source_commission_table)
+    const sourceRowId = String(entry.source_commission_id)
+    const dealValue = typeof entry.deal_value === 'number' ? entry.deal_value : Number(entry.deal_value ?? 0)
+    const chargeBack =
+      typeof entry.charge_back === 'number'
+        ? entry.charge_back
+        : (entry.charge_back == null ? null : Number(entry.charge_back))
+    const payload: Record<string, unknown> = {
+      policy_number: entry.policy_number,
+      carrier: entry.carrier,
+      name: entry.name ?? null,
+      sales_agent: entry.sales_agent ?? null,
+      advance_amount: !Number.isNaN(dealValue) && dealValue > 0 ? dealValue : null,
+      charge_back_amount: chargeBack,
+      updated_at: now,
+    }
+    if (entry.commission_date && String(entry.commission_date).trim() !== '') {
+      payload.date = String(entry.commission_date).trim()
+    }
+    const { error } = await supabase
+      .from('commission_tracker')
+      .update(payload)
+      .eq('source_table', sourceTable)
+      .eq('source_row_id', sourceRowId)
+    if (error) {
+      throw new Error(`Failed to sync commission_tracker for ${entry.policy_number}: ${error.message}`)
+    }
+  }
+}
+
 /**
  * Save deal tracker entries after user confirmation.
  * If options.pendingRows is provided, writes policy/commission rows to DB first, then saves deal_tracker with resolved source ids.
@@ -253,12 +295,16 @@ export async function saveDealTrackerAfterConfirmation(
         const id = policyNumberToId.get(entry.policy_number)
         if (!id) return entry
         const out = { ...entry }
-        if (targetTable === 'amam_policies' || targetTable === 'aetna_policies') (out as any).source_policy_id = id
-        if (targetTable === 'amam_commissions' || targetTable === 'aetna_commissions') (out as any).source_commission_id = id
+        if (targetTable.endsWith('_policies')) (out as any).source_policy_id = id
+        if (targetTable.endsWith('_commissions')) {
+          ;(out as any).source_commission_id = id
+          ;(out as any).source_commission_table = targetTable
+        }
         return out
       })
     }
     const result = await saveDealTrackerEntries(entriesToSave, { onProgress })
+    await syncEditedEntriesToCommissionTracker(entriesToSave, onProgress)
     return {
       success: true,
       ...result,

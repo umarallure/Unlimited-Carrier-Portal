@@ -15,6 +15,28 @@ function isChargebackLikeStatus(current: InvoicingStatus | null): boolean {
   return current === 'New Charge Back' || current === 'rechargeback' || current === ('chargeback' as InvoicingStatus)
 }
 
+const CUSTOMER_PIPELINE_STAGE_LABELS = [
+  'Issued - Pending First Draft',
+  'Premium Paid - Commission Pending',
+  'ACTIVE PLACED - Paid as Earned',
+  'ACTIVE PLACED - Paid as Advanced',
+  'ACTIVE - 3 Months +',
+  'ACTIVE - 6 months +',
+  'ACTIVE - 9 months',
+  'ACTIVE - Past Charge-Back Period',
+]
+
+const CUSTOMER_PIPELINE_STAGES = new Set(
+  CUSTOMER_PIPELINE_STAGE_LABELS.map((s) => s.toLowerCase()),
+)
+
+function isCustomerPipelineStage(stage: string | null | undefined): boolean {
+  if (!stage) return false
+  const s = stage.trim().toLowerCase()
+  if (!s) return false
+  return CUSTOMER_PIPELINE_STAGES.has(s)
+}
+
 function isBillableStatus(status: InvoicingStatus): boolean {
   return status !== 'paid_delete' && status !== 'cb_delete' && status !== 'cb_never_paid'
 }
@@ -118,7 +140,8 @@ function deriveNextStatus(current: InvoicingStatus | null, grossAmount: number):
   // Already chargebacked previously: do not charge back again.
   if (isChargebackLikeStatus(current)) return 'cb_delete'
   // We can only charge back if this lead was paid before.
-  if (current === 'new_sale' || current === 'paid_delete' || current === 'cb_repay') return 'New Charge Back'
+  if (current === 'cb_repay') return 'cb_delete'
+  if (current === 'new_sale' || current === 'paid_delete') return 'New Charge Back'
   return 'cb_never_paid'
 }
 
@@ -161,6 +184,7 @@ function buildPolicyKey(agencyCarrierId: string, policyNumber: string): string {
 const CHARGEBACK_STAGE_LABELS = [
   'FDPF Pending Reason',
   'Pending Lapse Pending Reason',
+  'Pending Lapse Incorrect Banking Info',
   'FDPF Insufficient Funds',
   'FDPF Incorrect Banking Info',
   'FDPF Unauthorized Draft',
@@ -201,7 +225,13 @@ function monthsActive(effectiveDate: string | null | undefined, referenceDate: s
   const eff = new Date(effectiveDate)
   const ref = new Date(referenceDate)
   if (Number.isNaN(eff.getTime()) || Number.isNaN(ref.getTime())) return 0
-  const months = (ref.getFullYear() - eff.getFullYear()) * 12 + (ref.getMonth() - eff.getMonth())
+  if (ref.getTime() < eff.getTime()) return 0
+  let months = (ref.getFullYear() - eff.getFullYear()) * 12 + (ref.getMonth() - eff.getMonth())
+  // Count only completed months. Example: Apr 3 -> Apr 26 is 0 months;
+  // Apr 3 -> May 4 is 1 month because the monthly anniversary has passed.
+  if (ref.getDate() < eff.getDate()) {
+    months -= 1
+  }
   return Math.max(0, months)
 }
 
@@ -220,6 +250,54 @@ function proRatedChargebackLeadValue(dealValue: number, effectiveDate: string | 
   return roundMoney(-(monthlyCC * remaining))
 }
 
+async function batchFetchPoliciesWithAnyChargebackCommission(
+  policyNumbers: string[],
+  agencyCarrierIds: string[],
+): Promise<Set<string>> {
+  const matches = new Set<string>()
+  if (!policyNumbers.length || !agencyCarrierIds.length) return matches
+  const BATCH_SIZE = 200
+  const batches = chunk(policyNumbers, BATCH_SIZE)
+  for (const batch of batches) {
+    const { data, error } = await supabase
+      .from('commission_tracker')
+      .select('agency_carrier_id, policy_number, charge_back_amount')
+      .in('policy_number', batch)
+      .in('agency_carrier_id', agencyCarrierIds)
+      .not('charge_back_amount', 'is', null)
+      .neq('charge_back_amount', 0)
+    if (error) throw new Error(error.message)
+    for (const row of (data || []) as Array<{ agency_carrier_id: string; policy_number: string }>) {
+      matches.add(buildPolicyKey(row.agency_carrier_id, row.policy_number))
+    }
+  }
+  return matches
+}
+
+async function batchFetchPoliciesWithAnyPositiveCommission(
+  policyNumbers: string[],
+  agencyCarrierIds: string[],
+): Promise<Set<string>> {
+  const matches = new Set<string>()
+  if (!policyNumbers.length || !agencyCarrierIds.length) return matches
+  const BATCH_SIZE = 200
+  const batches = chunk(policyNumbers, BATCH_SIZE)
+  for (const batch of batches) {
+    const { data, error } = await supabase
+      .from('commission_tracker')
+      .select('agency_carrier_id, policy_number, advance_amount')
+      .in('policy_number', batch)
+      .in('agency_carrier_id', agencyCarrierIds)
+      .not('advance_amount', 'is', null)
+      .gt('advance_amount', 0)
+    if (error) throw new Error(error.message)
+    for (const row of (data || []) as Array<{ agency_carrier_id: string; policy_number: string }>) {
+      matches.add(buildPolicyKey(row.agency_carrier_id, row.policy_number))
+    }
+  }
+  return matches
+}
+
 /** Paginated fetch for deal_tracker rows in chargeback pipeline stages (can exceed Supabase default 1000-row limit). */
 async function fetchAllChargebackStageDeals<T extends Record<string, unknown>>(selectCols: string): Promise<T[]> {
   const PAGE_SIZE = 1000
@@ -231,6 +309,27 @@ async function fetchAllChargebackStageDeals<T extends Record<string, unknown>>(s
       .from('deal_tracker')
       .select(selectCols)
       .in('ghl_stage', CHARGEBACK_STAGE_LABELS)
+      .range(offset, offset + PAGE_SIZE - 1)
+    if (error) throw new Error(error.message)
+    const rows = (data || []) as unknown as T[]
+    allRows.push(...rows)
+    if (rows.length < PAGE_SIZE) break
+    offset += PAGE_SIZE
+  }
+  return allRows
+}
+
+/** Paginated fetch for deal_tracker rows in customer pipeline stages. */
+async function fetchAllCustomerPipelineDeals<T extends Record<string, unknown>>(selectCols: string): Promise<T[]> {
+  const PAGE_SIZE = 1000
+  const allRows: T[] = []
+  let offset = 0
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await supabase
+      .from('deal_tracker')
+      .select(selectCols)
+      .in('ghl_stage', CUSTOMER_PIPELINE_STAGE_LABELS)
       .range(offset, offset + PAGE_SIZE - 1)
     if (error) throw new Error(error.message)
     const rows = (data || []) as unknown as T[]
@@ -352,13 +451,18 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
   for (const tx of transactions) {
     const policyKey = buildPolicyKey(tx.agency_carrier_id, tx.policy_number)
     const existing = policyMap.get(policyKey)
+    const deal = dealByPolicy.get(policyKey)
+    const inCustomerPipeline = isCustomerPipelineStage(deal?.ghl_stage)
     const advanceAmount = toNumber(tx.advance_amount)
     const chargeBackAmount = normalizeChargeBack(toNumber(tx.charge_back_amount))
     const grossAmount = roundMoney(advanceAmount + chargeBackAmount)
 
     if (!existing) {
       const priorStatus = latestStatusByPolicy.get(policyKey) ?? null
-      const firstStatus = deriveNextStatus(priorStatus, grossAmount)
+      const firstStatus =
+        inCustomerPipeline && grossAmount > 0 && (priorStatus == null || isChargebackLikeStatus(priorStatus))
+          ? 'repay'
+          : deriveNextStatus(priorStatus, grossAmount)
       const appliedGross = isBillableStatus(firstStatus) ? grossAmount : 0
       policyMap.set(policyKey, {
         policyKey,
@@ -386,7 +490,10 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
       continue
     }
 
-    const nextStatus = deriveNextStatus(existing.latestInvoicingStatus, grossAmount)
+    const nextStatus =
+      inCustomerPipeline && grossAmount > 0 && (existing.latestInvoicingStatus == null || isChargebackLikeStatus(existing.latestInvoicingStatus))
+        ? 'repay'
+        : deriveNextStatus(existing.latestInvoicingStatus, grossAmount)
     const appliedGross = isBillableStatus(nextStatus) ? grossAmount : 0
     existing.latestInvoicingStatus = nextStatus
     if ((!existing.policyName || existing.policyName === '-') && tx.name?.trim()) {
@@ -408,8 +515,21 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
     })
   }
 
-  // Stage-driven chargeback: when a deal is in chargeback pipeline, charge back 50% of deal_value.
-  // We apply this once per policy in the draft (only if no negative event already exists in period).
+  const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerCallCenterRow>(
+    'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
+  )
+  const cbStagePolicyNumbers = Array.from(
+    new Set(cbStageDeals.flatMap((d) => policyLookupCandidates(d.policy_number)).filter(Boolean)),
+  )
+  const cbStageAgencyIds = Array.from(new Set(cbStageDeals.map((d) => d.agency_carrier_id).filter(Boolean)))
+  const policiesWithAnyChargebackCommission = await batchFetchPoliciesWithAnyChargebackCommission(
+    cbStagePolicyNumbers,
+    cbStageAgencyIds,
+  )
+  const referenceDate = endDate
+
+  // Stage-driven chargeback: when a deal is in chargeback pipeline, add synthetic chargeback
+  // if no chargeback event exists in the period.
   for (const policy of policyMap.values()) {
     const deal = dealByPolicy.get(policy.policyKey)
     if (!deal || !isChargebackPipelineStage(deal.ghl_stage)) continue
@@ -417,29 +537,32 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
     if (hasChargebackEvent) continue
     const dealValue = toNumber(deal.deal_value)
     if (dealValue <= 0) continue
-    const grossAmount = roundMoney(-Math.abs(dealValue))
-    const nextStatus = deriveNextStatus(policy.latestInvoicingStatus, grossAmount)
+    const fullGross = roundMoney(-Math.abs(dealValue))
+    const statusBeforeCb = policy.latestInvoicingStatus
+    const nextStatus = deriveNextStatus(statusBeforeCb, fullGross)
     policy.latestInvoicingStatus = nextStatus
     if (!isBillableStatus(nextStatus)) continue
-    policy.grossNet = roundMoney(policy.grossNet + grossAmount)
+    const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(policy.policyKey)
+    const useFullChargeback = hasAnyCbCommission && statusBeforeCb === 'new_sale'
+    const stageGross = useFullChargeback
+      ? fullGross
+      : roundMoney(proRatedChargebackLeadValue(dealValue, deal.effective_date, referenceDate) * 2)
+    if (stageGross === 0) continue
+    policy.grossNet = roundMoney(policy.grossNet + stageGross)
     policy.ccNet = roundMoney(policy.grossNet / 2)
     policy.events.push({
       eventId: `stage-cb-${policy.policyKey}`,
       date: endDate,
       carrier: policy.carrier,
       advanceAmount: 0,
-      chargeBackAmount: grossAmount,
-      grossAmount,
+      chargeBackAmount: stageGross,
+      grossAmount: stageGross,
       invoicingStatus: nextStatus,
     })
   }
 
   // ── Stage-only chargebacks: policies in chargeback pipeline with NO commission events in this period ──
   {
-    const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerCallCenterRow>(
-      'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
-    )
-
     const unseen = cbStageDeals.filter((d) => {
       const key = buildPolicyKey(d.agency_carrier_id, d.policy_number)
       return !policyMap.has(key)
@@ -459,21 +582,21 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
         if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
       }
 
-      const today = new Date().toISOString().slice(0, 10)
       for (const deal of unseen) {
         const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
         if (policyMap.has(key)) continue
         const dealValue = toNumber(deal.deal_value)
         if (dealValue <= 0) continue
         const priorStatus = unseenStatus.get(key) ?? null
-        // Use full gross for status derivation (state machine needs the raw event direction)
         const fullGross = roundMoney(-Math.abs(dealValue))
         const nextStatus = deriveNextStatus(priorStatus, fullGross)
         if (!isBillableStatus(nextStatus)) continue
-        // Pro-rate: only charge back remaining months of the 9-month term
-        const proRatedLead = proRatedChargebackLeadValue(dealValue, deal.effective_date, today)
-        if (proRatedLead === 0) continue
-        const proRatedGross = roundMoney(proRatedLead * 2) // gross = lead * 2 (inverse of 50% share)
+        const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(key)
+        const useFullChargeback = hasAnyCbCommission && priorStatus === 'new_sale'
+        const stageGross = useFullChargeback
+          ? fullGross
+          : roundMoney(proRatedChargebackLeadValue(dealValue, deal.effective_date, referenceDate) * 2)
+        if (stageGross === 0) continue
         const callCenter = deal.call_center?.trim() || 'Unassigned'
         const dealCarrier = deal.carrier?.trim() || '—'
         policyMap.set(key, {
@@ -485,17 +608,79 @@ export async function buildInvoiceDraft(startDate: string, endDate: string): Pro
           callCenter,
           latestCommissionDate: endDate,
           latestInvoicingStatus: nextStatus,
-          grossNet: proRatedGross,
-          ccNet: proRatedLead,
+          grossNet: stageGross,
+          ccNet: roundMoney(stageGross / 2),
           events: [
             {
               eventId: `stage-cb-${key}`,
               date: endDate,
               carrier: dealCarrier,
               advanceAmount: 0,
-              chargeBackAmount: proRatedGross,
-              grossAmount: proRatedGross,
+              chargeBackAmount: stageGross,
+              grossAmount: stageGross,
               invoicingStatus: nextStatus,
+            },
+          ],
+        })
+      }
+    }
+  }
+
+  // ── Stage-only repays: customer pipeline policies can be repaid without in-range commission events ──
+  {
+    const customerDeals = await fetchAllCustomerPipelineDeals<DealTrackerCallCenterRow>(
+      'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
+    )
+    const unseen = customerDeals.filter((d) => {
+      const key = buildPolicyKey(d.agency_carrier_id, d.policy_number)
+      return !policyMap.has(key)
+    })
+    if (unseen.length > 0) {
+      const unseenPolicyNumbers = Array.from(
+        new Set(unseen.flatMap((d) => policyLookupCandidates(d.policy_number)).filter(Boolean)),
+      )
+      const unseenAgencyIds = Array.from(new Set(unseen.map((d) => d.agency_carrier_id).filter(Boolean)))
+      const hRows = await batchFetchStatusHistory(unseenPolicyNumbers, unseenAgencyIds)
+      const policiesWithAnyPositiveCommission = await batchFetchPoliciesWithAnyPositiveCommission(
+        unseenPolicyNumbers,
+        unseenAgencyIds,
+      )
+      const unseenStatus = new Map<string, InvoicingStatus>()
+      for (const row of hRows) {
+        const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
+        if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
+      }
+      for (const deal of unseen) {
+        const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
+        if (policyMap.has(key)) continue
+        if (!policiesWithAnyPositiveCommission.has(key)) continue
+        const priorStatus = unseenStatus.get(key) ?? null
+        if (!(priorStatus == null || isChargebackLikeStatus(priorStatus))) continue
+        const dealValue = toNumber(deal.deal_value)
+        if (dealValue <= 0) continue
+        const callCenter = deal.call_center?.trim() || 'Unassigned'
+        const dealCarrier = deal.carrier?.trim() || '—'
+        const repayGross = roundMoney(Math.abs(dealValue))
+        policyMap.set(key, {
+          policyKey: key,
+          agencyCarrierId: deal.agency_carrier_id,
+          policyNumber: deal.policy_number,
+          carrier: dealCarrier,
+          policyName: deal.name?.trim() || '-',
+          callCenter,
+          latestCommissionDate: endDate,
+          latestInvoicingStatus: 'repay',
+          grossNet: repayGross,
+          ccNet: roundMoney(repayGross / 2),
+          events: [
+            {
+              eventId: `stage-repay-${key}`,
+              date: endDate,
+              carrier: dealCarrier,
+              advanceAmount: repayGross,
+              chargeBackAmount: 0,
+              grossAmount: repayGross,
+              invoicingStatus: 'repay',
             },
           ],
         })
@@ -847,6 +1032,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
       ? currentStatusByPolicy.get(key) ?? null
       : (latestStatusByPolicy.get(key) ?? null)
     const deal = dealByPolicyKey.get(key)
+    const inCustomerPipeline = isCustomerPipelineStage(deal?.ghl_stage)
     const callCenter = deal?.call_center?.trim() || 'Unassigned'
     const insuredName = (tx.name || deal?.name || '—').trim() || '—'
     const product = (deal?.policy_type || '—').trim() || '—'
@@ -872,7 +1058,10 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
 
     const advance = toNumber(tx.advance_amount)
     if (advance > 0) {
-      const salesStatus = deriveNextStatus(currentStatus, roundMoney(advance))
+      const salesStatus =
+        inCustomerPipeline && (currentStatus == null || isChargebackLikeStatus(currentStatus))
+          ? 'repay'
+          : deriveNextStatus(currentStatus, roundMoney(advance))
       currentStatusByPolicy.set(key, salesStatus)
       if (!isBillableStatus(salesStatus)) {
         // Keep status progression, but skip non-billable lines like paid_delete.
@@ -912,8 +1101,21 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
     }
   }
 
+  const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerInvoiceRow>(
+    'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
+  )
+  const cbStagePolicyNumbers = Array.from(
+    new Set(cbStageDeals.flatMap((d) => policyLookupCandidates(d.policy_number)).filter(Boolean)),
+  )
+  const cbStageAgencyIds = Array.from(new Set(cbStageDeals.map((d) => d.agency_carrier_id).filter(Boolean)))
+  const policiesWithAnyChargebackCommission = await batchFetchPoliciesWithAnyChargebackCommission(
+    cbStagePolicyNumbers,
+    cbStageAgencyIds,
+  )
+  const referenceDate = endDate
+
   // If no commission chargeback line exists but policy is in chargeback pipeline,
-  // add a synthetic chargeback line from deal_tracker.deal_value.
+  // add a synthetic chargeback from deal_tracker.deal_value (full or 9-month pro-rated by rule).
   for (const [key, deal] of dealByPolicyKey.entries()) {
     if (!isChargebackPipelineStage(deal.ghl_stage)) continue
     if (chargebackLineAddedByPolicy.has(key)) continue
@@ -923,17 +1125,23 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
     const insuredName = (deal.name || '—').trim() || '—'
     const product = (deal.policy_type || '—').trim() || '—'
     const agentAccount = (deal.sales_agent || '—').trim() || '—'
-    const draftRaw = deal.deal_creation_date || deal.effective_date || endDate
+    const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
     const draftDate = formatDraftDate(draftRaw)
     const monthlyPremium = roundMoney(dealValue)
     const comType = (deal.commission_type || 'Advance').trim() || 'Advance'
-    const cbNorm = -Math.abs(dealValue)
+    const fullGross = roundMoney(-Math.abs(dealValue))
     const statusBeforeCb = currentStatusByPolicy.has(key)
       ? currentStatusByPolicy.get(key) ?? null
       : (latestStatusByPolicy.get(key) ?? null)
-    const cbStatus = deriveNextStatus(statusBeforeCb, roundMoney(cbNorm))
+    const cbStatus = deriveNextStatus(statusBeforeCb, fullGross)
     currentStatusByPolicy.set(key, cbStatus)
     if (!isBillableStatus(cbStatus)) continue
+    const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(key)
+    const useFullChargeback = hasAnyCbCommission && statusBeforeCb === 'new_sale'
+    const leadValue = useFullChargeback
+      ? roundMoney(fullGross * BPO_INVOICE_LEAD_VALUE_SHARE)
+      : proRatedChargebackLeadValue(dealValue, deal.effective_date, referenceDate)
+    if (leadValue === 0) continue
     pushLine(
       callCenter,
       {
@@ -948,7 +1156,7 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
         comPct: '—',
         comType,
         policyNumber: deal.policy_number,
-        leadValue: roundMoney(cbNorm * BPO_INVOICE_LEAD_VALUE_SHARE),
+        leadValue,
       },
       'charge',
     )
@@ -956,10 +1164,6 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
 
   // ── Stage-only chargebacks: policies in chargeback pipeline with NO commission events in this period ──
   {
-    const cbStageDeals = await fetchAllChargebackStageDeals<DealTrackerInvoiceRow>(
-      'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
-    )
-
     const unseen = cbStageDeals.filter((d) => {
       const key = buildPolicyKey(d.agency_carrier_id, d.policy_number)
       return !dealByPolicyKey.has(key)
@@ -979,24 +1183,25 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
         if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
       }
 
-      const today = new Date().toISOString().slice(0, 10)
       for (const deal of unseen) {
         const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
         if (dealByPolicyKey.has(key)) continue
         const dealValue = toNumber(deal.deal_value)
         if (dealValue <= 0) continue
         const priorStatus = unseenStatus.get(key) ?? null
-        const cbNorm = -Math.abs(dealValue)
-        const cbStatus = deriveNextStatus(priorStatus, roundMoney(cbNorm))
+        const fullGross = roundMoney(-Math.abs(dealValue))
+        const cbStatus = deriveNextStatus(priorStatus, fullGross)
         if (!isBillableStatus(cbStatus)) continue
-        // Pro-rate: only charge back remaining months of the 9-month term
-        const proRatedLead = proRatedChargebackLeadValue(dealValue, deal.effective_date, today)
-        if (proRatedLead === 0) continue
+        const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(key)
+        const useFullChargeback = hasAnyCbCommission && priorStatus === 'new_sale'
+        const leadValue = useFullChargeback
+          ? roundMoney(fullGross * BPO_INVOICE_LEAD_VALUE_SHARE)
+          : proRatedChargebackLeadValue(dealValue, deal.effective_date, referenceDate)
+        if (leadValue === 0) continue
         const callCenter = deal.call_center?.trim() || 'Unassigned'
         const insuredName = (deal.name || '—').trim() || '—'
         const product = (deal.policy_type || '—').trim() || '—'
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
-        // Show the policy effective date in the Draft Date column
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
         const draftDate = formatDraftDate(draftRaw)
         const monthlyPremium = roundMoney(dealValue)
@@ -1015,9 +1220,71 @@ export async function buildBpoInvoiceLines(startDate: string, endDate: string): 
             comPct: '—',
             comType,
             policyNumber: deal.policy_number,
-            leadValue: proRatedLead,
+            leadValue,
           },
           'charge',
+        )
+      }
+    }
+  }
+
+  // ── Stage-only repays: customer pipeline policies can be repaid without in-range commission events ──
+  {
+    const customerDeals = await fetchAllCustomerPipelineDeals<DealTrackerInvoiceRow>(
+      'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
+    )
+    const unseen = customerDeals.filter((d) => {
+      const key = buildPolicyKey(d.agency_carrier_id, d.policy_number)
+      return !dealByPolicyKey.has(key)
+    })
+    if (unseen.length > 0) {
+      const unseenPolicyNumbers = Array.from(
+        new Set(unseen.flatMap((d) => policyLookupCandidates(d.policy_number)).filter(Boolean)),
+      )
+      const unseenAgencyIds = Array.from(new Set(unseen.map((d) => d.agency_carrier_id).filter(Boolean)))
+      const hRows = await batchFetchStatusHistory(unseenPolicyNumbers, unseenAgencyIds)
+      const policiesWithAnyPositiveCommission = await batchFetchPoliciesWithAnyPositiveCommission(
+        unseenPolicyNumbers,
+        unseenAgencyIds,
+      )
+      const unseenStatus = new Map<string, InvoicingStatus>()
+      for (const row of hRows) {
+        const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
+        if (!unseenStatus.has(key)) unseenStatus.set(key, row.invoicing_status)
+      }
+      for (const deal of unseen) {
+        const key = buildPolicyKey(deal.agency_carrier_id, deal.policy_number)
+        if (dealByPolicyKey.has(key)) continue
+        if (!policiesWithAnyPositiveCommission.has(key)) continue
+        const priorStatus = unseenStatus.get(key) ?? null
+        if (!(priorStatus == null || isChargebackLikeStatus(priorStatus))) continue
+        const dealValue = toNumber(deal.deal_value)
+        if (dealValue <= 0) continue
+        const callCenter = deal.call_center?.trim() || 'Unassigned'
+        const insuredName = (deal.name || '—').trim() || '—'
+        const product = (deal.policy_type || '—').trim() || '—'
+        const agentAccount = (deal.sales_agent || '—').trim() || '—'
+        const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
+        const draftDate = formatDraftDate(draftRaw)
+        const monthlyPremium = roundMoney(dealValue)
+        const comType = (deal.commission_type || 'Advance').trim() || 'Advance'
+        pushLine(
+          callCenter,
+          {
+            id: `stage-repay-${key}`,
+            insuredName,
+            carrier: deal.carrier?.trim() || '—',
+            product,
+            agentAccount,
+            draftDate,
+            monthlyPremium,
+            coverageAmount: null,
+            comPct: '—',
+            comType,
+            policyNumber: deal.policy_number,
+            leadValue: roundMoney(Math.abs(dealValue) * BPO_INVOICE_LEAD_VALUE_SHARE),
+          },
+          'sales',
         )
       }
     }

@@ -8,6 +8,7 @@
 import { useState, useCallback, useRef } from 'react'
 import { supabase } from './supabaseClient'
 import { toYmdForDateInput } from './calendarDate'
+import { syncCommissionTrackerForAgencyCarrier } from './commissionTracker'
 
 type DealTrackerRow = {
   policy_number: string
@@ -640,6 +641,7 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
           .from(table)
           .upsert(chunk, upsertOptions)
         if (error) throw error
+        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
         closedAfterSaveRef.current = true
         deleteCommissionRowsOnAbandonRef.current = false
         setShowCommissionReport(false)

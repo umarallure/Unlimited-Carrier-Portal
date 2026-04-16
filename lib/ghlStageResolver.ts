@@ -495,6 +495,7 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   const chargeBackNum =
     chargeBack != null && !Number.isNaN(Number(chargeBack)) ? Number(chargeBack) : null
   const statusLower = carrierStatus.toLowerCase()
+  const statusCompact = statusLower.replace(/[^a-z0-9]/g, '')
   const looksLikeInitiatedCancellation =
     statusLower.includes('terminat') ||
     statusLower.includes('cancel') ||
@@ -577,6 +578,9 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   }
 
   const stageSet = new Set(possibleStages)
+  const isActPastDueStatus =
+    statusCompact.includes('actpastdue') ||
+    (statusLower.includes('act') && statusLower.includes('past') && statusLower.includes('due'))
   // FDPF only from the calendar day *after* effective (effective day itself stays Issued / pre-FDPF).
   const fdpfPendingReasonAllowed = isEffectiveDateFullyPassed(effDate, today)
   const selectPreFdpfStage = (): string => {
@@ -603,6 +607,21 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   if (dealValue != null && dealValue < 0) {
     if (stageSet.has('Chargeback Failed Payment')) return sanitizeManualStage('Chargeback Failed Payment')
     if (stageSet.has('Chargeback Cancellation')) return sanitizeManualStage('Chargeback Cancellation')
+  }
+
+  // "Act Past Due" handling:
+  // within 31 calendar days from draft/effective date -> Pending Lapse Pending Reason
+  // after 31 calendar days -> Issued-not-paid bucket (FDPF Pending Reason)
+  if (isActPastDueStatus && stageSet.has('Pending Lapse') && stageSet.has('FDPF Pending Reason') && effDate) {
+    const cutoff = startOfLocalDay(effDate)
+    cutoff.setDate(cutoff.getDate() + 31)
+    const todayDay = startOfLocalDay(today)
+    if (todayDay <= cutoff) {
+      if (stageSet.has('Pending Lapse Pending Reason')) return sanitizeManualStage('Pending Lapse Pending Reason')
+      return sanitizeManualStage('Pending Lapse')
+    }
+    if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
+    return sanitizeManualStage('FDPF Pending Reason')
   }
 
   // ── Rule 1: Issued - Pending First Draft vs FDPF Pending Reason ────

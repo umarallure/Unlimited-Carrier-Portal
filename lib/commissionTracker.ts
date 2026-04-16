@@ -37,13 +37,17 @@ function toNumberOrNull(v: any): number | null {
   return isNaN(num) ? null : num
 }
 
+function normalizePolicyNumber(value: any): string {
+  return String(value ?? '').trim()
+}
+
 /**
  * Build CommissionTrackerRow entries from a carrier-specific commissions table.
  * This mirrors the logic in app/commission-report/page.tsx so the report and
  * normalized table stay consistent.
  */
 function buildCommissionRowsFromSource(
-  sourceTable: 'amam_commissions' | 'aetna_commissions' | 'ahl_commissions',
+  sourceTable: 'amam_commissions' | 'aetna_commissions' | 'ahl_commissions' | 'moh_commissions',
   rawRows: any[],
   agencyCarrierId: string,
   carrierId: string | null,
@@ -74,18 +78,37 @@ function buildCommissionRowsFromSource(
       row['AGENT'] ??
       row['writingagentname'] ??
       row['writingagent'] ??
+      row['paid_producer'] ??
       null
 
     const dateRaw =
-      row['Date'] ??
-      row['date'] ??
-      row['PAID_TO_DATE'] ??
-      row['paid_to_date'] ??
-      row['commissionpaiddate'] ??
-      row['statement_date'] ??
-      row['appdate'] ??
-      row['effectivedate'] ??
-      null
+      sourceTable === 'moh_commissions'
+        ? (
+            row['activity_date'] ??
+            row['paid_to_date'] ??
+            row['issue_date'] ??
+            row['Date'] ??
+            row['date'] ??
+            row['PAID_TO_DATE'] ??
+            row['commissionpaiddate'] ??
+            row['statement_date'] ??
+            row['appdate'] ??
+            row['effectivedate'] ??
+            null
+          )
+        : (
+            row['Date'] ??
+            row['date'] ??
+            row['PAID_TO_DATE'] ??
+            row['paid_to_date'] ??
+            row['commissionpaiddate'] ??
+            row['statement_date'] ??
+            row['activity_date'] ??
+            row['issue_date'] ??
+            row['appdate'] ??
+            row['effectivedate'] ??
+            null
+          )
     const normalizedDate = normalizeDate(dateRaw)
     if (!normalizedDate) continue
 
@@ -96,6 +119,7 @@ function buildCommissionRowsFromSource(
       row['rate'] ??
       row['com_rate'] ?? // AMAM
       row['rate_pct'] ?? // Aetna
+      row['comm_pct'] ?? // MOH
       null
 
     let advance =
@@ -103,6 +127,7 @@ function buildCommissionRowsFromSource(
       row['advance'] ??
       row['ADVANCE'] ??
       ((sourceTable === 'aetna_commissions' || sourceTable === 'ahl_commissions') ? row['commissionamount'] : null) ??
+      (sourceTable === 'moh_commissions' ? row['comm_amt'] : null) ??
       null
 
     let chargeBack: number | null = null
@@ -121,7 +146,7 @@ function buildCommissionRowsFromSource(
       agency_carrier_id: agencyCarrierId,
       carrier_id: carrierId,
       carrier: carrierName,
-      policy_number: String(policyNumber),
+      policy_number: normalizePolicyNumber(policyNumber),
       name: name != null ? String(name) : null,
       sales_agent: salesAgent != null ? String(salesAgent) : null,
       date: normalizedDate,
@@ -146,9 +171,10 @@ export async function syncCommissionTrackerForAgencyCarrier(
   const isAmam = upperCode === 'AMAM'
   const isCorebridge = upperCode === 'COREBRIDGE'
   const isAhl = upperCode === 'AHL'
+  const isMoh = upperCode === 'MOH'
 
-  if (!isAetna && !isAmam && !isCorebridge && !isAhl) {
-    // For now we only normalize AMAM + AETNA + AHL + COREBRIDGE into commission_tracker
+  if (!isAetna && !isAmam && !isCorebridge && !isAhl && !isMoh) {
+    // For now we only normalize AMAM + AETNA + AHL + MOH + COREBRIDGE into commission_tracker
     return
   }
 
@@ -277,7 +303,7 @@ export async function syncCommissionTrackerForAgencyCarrier(
     return
   }
 
-  const sourceTable = isAetna ? 'aetna_commissions' : isAhl ? 'ahl_commissions' : 'amam_commissions'
+  const sourceTable = isAetna ? 'aetna_commissions' : isAhl ? 'ahl_commissions' : isMoh ? 'moh_commissions' : 'amam_commissions'
 
   // Load all commissions for this agency_carrier (bounded)
   const { data: rawRows, error: rawError } = await supabase

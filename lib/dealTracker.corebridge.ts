@@ -189,7 +189,7 @@ export async function processCorebridgeFilesForDealTracker(
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfo?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
       policy_status: policyStatusResolved,
       deal_creation_date: dealCreationDate,
@@ -411,7 +411,7 @@ export async function processCorebridgeCommissionsForDealTracker(
       // For commissions, never overwrite existing name from policy/deal_tracker.
       name: nameForEntry ?? null,
       tasks: existing?.tasks ?? null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfo?.lead_name ?? null,
       ghl_stage: existing?.ghl_stage ?? null,
       policy_status: existing?.policy_status ?? null,
       deal_creation_date: existing?.deal_creation_date ?? statementDate,

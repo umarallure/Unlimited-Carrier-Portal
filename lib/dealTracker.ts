@@ -17,6 +17,7 @@ export function policyNeedsDdfLookup(
     call_center?: unknown
     phone_number?: unknown
     effective_date?: unknown
+    ghl_name?: unknown
   } | null | undefined
 ): boolean {
   if (!existing) return true
@@ -25,8 +26,13 @@ export function policyNeedsDdfLookup(
     (existing.phone_number != null && String(existing.phone_number).trim() !== '')
   const hasEffective =
     existing.effective_date != null && String(existing.effective_date).trim() !== ''
+  const hasGhlName =
+    existing.ghl_name != null &&
+    String(existing.ghl_name).trim() !== '' &&
+    String(existing.ghl_name).trim() !== '-'
   if (!hasContact) return true
   if (!hasEffective) return true
+  if (!hasGhlName) return true
   return false
 }
 
@@ -218,6 +224,24 @@ export function resolvePolicyStatusFromCarrierMapping(
   return carrierStatusRaw ?? null
 }
 
+function normalizePolicyStatusForMappedGhlStage(
+  mappedGhlStage: string | null | undefined,
+  policyStatus: string | null | undefined,
+): string | null {
+  if (!mappedGhlStage) return policyStatus ?? null
+  const stage = mappedGhlStage.trim().toLowerCase()
+  if (stage === 'pending lapse' || stage.startsWith('pending lapse ')) return 'Pending Lapse'
+  if (
+    stage === 'fdpf pending reason' ||
+    stage === 'fdpf insufficient funds' ||
+    stage === 'fdpf incorrect banking info' ||
+    stage === 'issued - pending first draft'
+  ) {
+    return 'Issued Not Paid'
+  }
+  return policyStatus ?? null
+}
+
 /** Pending approval / in-process — not pending lapse / lapsed / lapsing. */
 function looksLikePendingApprovalNotLapse(
   policyStatus: string | null | undefined,
@@ -308,6 +332,7 @@ type DailyDealFlowInfo = {
   call_center: string | null
   phone_number: string | null
   draft_date: string | null
+  lead_name: string | null
 }
 
 /**
@@ -689,11 +714,13 @@ async function fetchDdfViaApi(
     }
     const results = data.results || {}
     Object.entries(results).forEach(([k, v]) => {
-      const val = (v as { call_center?: string | null; phone_number?: string | null; draft_date?: string | null }) || {}
+      const val =
+        (v as { call_center?: string | null; phone_number?: string | null; draft_date?: string | null; lead_name?: string | null }) || {}
       allResults.set(k, {
         call_center: val.call_center ?? null,
         phone_number: val.phone_number ?? null,
         draft_date: val.draft_date ?? null,
+        lead_name: val.lead_name ?? null,
       })
     })
     const withData = Object.values(results).filter((v: any) => v?.call_center || v?.phone_number).length
@@ -913,6 +940,7 @@ export function matchDdfNamesToRecords(
         call_center: getCallCenter(bestMatch) ?? null,
         phone_number: getPhone(bestMatch) ?? null,
         draft_date: bestMatch.draft_date != null ? String(bestMatch.draft_date).trim() : null,
+        lead_name: bestMatch.insured_name != null ? String(bestMatch.insured_name).trim() : null,
       })
     }
   }
@@ -1083,6 +1111,7 @@ export async function doBulkFetchDailyDealFlowInfo(
           call_center: getCallCenter(bestMatch) ?? null,
           phone_number: getPhone(bestMatch) ?? null,
           draft_date: bestMatch.draft_date != null ? String(bestMatch.draft_date).trim() : null,
+          lead_name: bestMatch.insured_name != null ? String(bestMatch.insured_name).trim() : null,
         })
       }
     }
@@ -1120,9 +1149,9 @@ export async function bulkFetchDailyDealFlowInfo(
 export async function fetchDailyDealFlowInfo(
   insuredName: string | null,
   carrier: string
-): Promise<{ call_center: string | null; phone_number: string | null; draft_date: string | null }> {
+): Promise<{ call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }> {
   if (!insuredName) {
-    return { call_center: null, phone_number: null, draft_date: null }
+    return { call_center: null, phone_number: null, draft_date: null, lead_name: null }
   }
 
   try {
@@ -1147,7 +1176,7 @@ export async function fetchDailyDealFlowInfo(
     console.log('[Deal Tracker] Strategy 1: Exact match')
     let result = await externalSupabase
       .from('daily_deal_flow')
-      .select('lead_vendor, client_phone_number, draft_date')
+      .select('insured_name, lead_vendor, client_phone_number, draft_date')
       .ilike('insured_name', normalizedName)
       .ilike('carrier', carrier) // Case-insensitive carrier match
       .order('created_at', { ascending: false })
@@ -1165,7 +1194,7 @@ export async function fetchDailyDealFlowInfo(
       const firstLastPattern = `${firstName}%${lastName}`
       result = await externalSupabase
         .from('daily_deal_flow')
-        .select('lead_vendor, client_phone_number, draft_date')
+        .select('insured_name, lead_vendor, client_phone_number, draft_date')
         .ilike('insured_name', firstLastPattern)
         .ilike('carrier', carrier)
         .order('created_at', { ascending: false })
@@ -1183,7 +1212,7 @@ export async function fetchDailyDealFlowInfo(
       console.log('[Deal Tracker] Strategy 3: First name partial match')
       result = await externalSupabase
         .from('daily_deal_flow')
-        .select('lead_vendor, client_phone_number, draft_date')
+        .select('insured_name, lead_vendor, client_phone_number, draft_date')
         .ilike('insured_name', `${firstName}%`)
         .ilike('carrier', carrier)
         .order('created_at', { ascending: false })
@@ -1201,7 +1230,7 @@ export async function fetchDailyDealFlowInfo(
       console.log('[Deal Tracker] Strategy 4: Last name match')
       result = await externalSupabase
         .from('daily_deal_flow')
-        .select('lead_vendor, client_phone_number, draft_date')
+        .select('insured_name, lead_vendor, client_phone_number, draft_date')
         .ilike('insured_name', `%${lastName}`)
         .ilike('carrier', carrier)
         .order('created_at', { ascending: false })
@@ -1221,7 +1250,7 @@ export async function fetchDailyDealFlowInfo(
         if (part.length > 2) {
           result = await externalSupabase
             .from('daily_deal_flow')
-            .select('lead_vendor, client_phone_number, draft_date')
+            .select('insured_name, lead_vendor, client_phone_number, draft_date')
             .ilike('insured_name', `%${part}%`)
             .ilike('carrier', carrier)
             .order('created_at', { ascending: false })
@@ -1241,11 +1270,11 @@ export async function fetchDailyDealFlowInfo(
       console.warn(
         `[Deal Tracker] No daily_deal_flow entry found after all strategies for insured_name: ${insuredName}, carrier: ${carrier}`
       )
-      return { call_center: null, phone_number: null, draft_date: null }
+      return { call_center: null, phone_number: null, draft_date: null, lead_name: null }
     }
 
     // Type assertion for external database response
-    const ddfData = data as { lead_vendor?: string | null; client_phone_number?: string | null; draft_date?: string | null } | null
+    const ddfData = data as { insured_name?: string | null; lead_vendor?: string | null; client_phone_number?: string | null; draft_date?: string | null } | null
 
     console.log('[Deal Tracker] Found daily_deal_flow match:', {
       insuredName,
@@ -1257,10 +1286,11 @@ export async function fetchDailyDealFlowInfo(
       call_center: ddfData?.lead_vendor || null,
       phone_number: ddfData?.client_phone_number || null,
       draft_date: ddfData?.draft_date != null ? String(ddfData.draft_date).trim() : null,
+      lead_name: ddfData?.insured_name != null ? String(ddfData.insured_name).trim() : null,
     }
   } catch (error) {
     console.error('[Deal Tracker] Error fetching daily_deal_flow info:', error)
-    return { call_center: null, phone_number: null, draft_date: null }
+    return { call_center: null, phone_number: null, draft_date: null, lead_name: null }
   }
 }
 
@@ -1587,7 +1617,7 @@ export async function processAetnaCommissionsForDealTracker(
           agency_carrier_id: agencyCarrierId,
           name: policy.insuredname || null,
           tasks: null,
-          ghl_name: null,
+          ghl_name: ddfInfo?.lead_name ?? null,
           ghl_stage: mappedGhlStage,
           policy_status: mappedStatus,
           deal_creation_date: policy.apprecddate || policy.issuedate || null,
@@ -1883,9 +1913,11 @@ export async function processAetnaFilesForDealTracker(
       agency_carrier_id: agencyCarrierId,
       name: policy.insuredname || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfo?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
+      policy_status: forceWithdrawnStatus
+        ? 'Withdrawn'
+        : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusResolved),
       // Preserve existing deal_creation_date when present
       deal_creation_date: dealCreationDateForGhl,
       policy_number: policy.policy_number,
@@ -2134,9 +2166,11 @@ export async function processAmamFilesForDealTracker(
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfoAmam?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
+      policy_status: forceWithdrawnStatus
+        ? 'Withdrawn'
+        : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusResolved),
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
@@ -2327,9 +2361,11 @@ export async function processAmamFilesForDealTrackerFromRows(
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: existing?.ghl_name ?? null,
+      ghl_name: existing?.ghl_name ?? ddfInfoRows?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
+      policy_status: forceWithdrawnStatus
+        ? 'Withdrawn'
+        : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusResolved),
       deal_creation_date: dealCreationDate,
       policy_number: policy.policy_number,
       carrier: carrierName,
@@ -2633,7 +2669,9 @@ export async function processAmamCommissionsForDealTracker(
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         carrier_status: existing.carrier_status ?? null,
-        policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
+        policy_status: forceWithdrawnStatus
+          ? 'Withdrawn'
+          : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusResolved),
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: chargeBack,
@@ -2712,9 +2750,11 @@ export async function processAmamCommissionsForDealTracker(
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: null,
+      ghl_name: ddfInfo?.lead_name ?? null,
       ghl_stage: mappedGhlStage,
-      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusForNew,
+      policy_status: forceWithdrawnStatus
+        ? 'Withdrawn'
+        : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusForNew),
       deal_creation_date: dealCreationDate,
       commission_date: stmtNew,
       policy_number: policyNumber,
@@ -2955,7 +2995,9 @@ export async function processAmamCommissionsForDealTrackerFromRows(
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         carrier_status: existing.carrier_status ?? null,
-        policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusResolved,
+        policy_status: forceWithdrawnStatus
+          ? 'Withdrawn'
+          : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusResolved),
         deal_value: dealValue,
         cc_value: ccValue,
         charge_back: chargeBack,
@@ -3026,9 +3068,11 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
       tasks: null,
-      ghl_name: null,
+      ghl_name: ddfInfo?.lead_name ?? null,
       ghl_stage: mappedGhlNew,
-      policy_status: forceWithdrawnStatus ? 'Withdrawn' : policyStatusForNew,
+      policy_status: forceWithdrawnStatus
+        ? 'Withdrawn'
+        : normalizePolicyStatusForMappedGhlStage(mappedGhlNew, policyStatusForNew),
       deal_creation_date: dealCreationDate,
       commission_date: stmtNew,
       policy_number: policyNumber,

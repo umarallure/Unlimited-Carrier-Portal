@@ -61,6 +61,30 @@ function policyGroupKey(row: { agency_carrier_id: string; policy_number: string 
   return `${row.agency_carrier_id}::${row.policy_number}`
 }
 
+function normalizePolicyNumber(value: string | null | undefined): string {
+  return String(value ?? '').trim()
+}
+
+function normalizeCommissionDate(value: string | null | undefined): string {
+  const str = String(value ?? '').trim()
+  if (!str) return ''
+  const parsed = new Date(str.split('to')[0].trim().replace(/\./g, '-').replace(/\//g, '-'))
+  if (Number.isNaN(parsed.getTime())) return str
+  return parsed.toISOString().slice(0, 10)
+}
+
+function netCommissionAmount(row: Pick<CommissionRow, 'advance_amount' | 'charge_back_amount'>): number {
+  const adv = typeof row.advance_amount === 'number' ? row.advance_amount : Number(row.advance_amount ?? 0)
+  if (!Number.isNaN(adv) && adv !== 0) return Math.round(adv * 100) / 100
+  const cb = typeof row.charge_back_amount === 'number' ? row.charge_back_amount : Number(row.charge_back_amount ?? 0)
+  if (!Number.isNaN(cb) && cb !== 0) return Math.round(cb * 100) / 100
+  return 0
+}
+
+function commissionTransactionKey(row: CommissionRow): string {
+  return `${row.agency_carrier_id}::${normalizePolicyNumber(row.policy_number)}::${normalizeCommissionDate(row.date)}::${netCommissionAmount(row).toFixed(2)}`
+}
+
 export default function CommissionReportPage() {
   const inlineEditInput = 'h-9 min-w-[110px] px-2 text-sm'
   const inlineEditInputWide = 'h-9 min-w-[150px] px-2 text-sm'
@@ -119,10 +143,29 @@ export default function CommissionReportPage() {
           from = to + 1
         }
 
+        const dedupedTransactions = new Map<string, CommissionRow>()
+        for (const row of all) {
+          const net = netCommissionAmount(row)
+          if (net === 0) continue
+          const key = commissionTransactionKey(row)
+          const existing = dedupedTransactions.get(key)
+          if (!existing) {
+            dedupedTransactions.set(key, row)
+            continue
+          }
+          const rowId = String(row.id ?? '')
+          const existingId = String(existing.id ?? '')
+          if (rowId > existingId) {
+            dedupedTransactions.set(key, row)
+          }
+        }
+
+        const cleanedAll = Array.from(dedupedTransactions.values())
+
         // Keep all normalized commission_tracker rows so we can:
         // - Aggregate per policy for the main table (sum advance/chargeback),
         // - And still show every individual transaction when a row is expanded.
-        setAllRows(all)
+        setAllRows(cleanedAll)
 
         // Collapse to one display row per (agency_carrier, policy)
         // and pick the "best" header row (prefer non-empty name/agent, then latest date).
@@ -138,7 +181,7 @@ export default function CommissionReportPage() {
           if (r.commission_rate != null) score += 1
           return score
         }
-        for (const row of all) {
+        for (const row of cleanedAll) {
           const key = policyGroupKey(row)
           const existing = byKey.get(key)
           if (!existing) {

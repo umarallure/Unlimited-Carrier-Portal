@@ -1,7 +1,7 @@
 /**
  * Server-side DDF lookup – avoids CORS by having the browser call this instead of external Supabase.
  * POST body: { carrier: string, names: string[] }
- * Returns: { results: Record<string, { call_center: string | null, phone_number: string | null, draft_date: string | null }> }
+ * Returns: { results: Record<string, { call_center: string | null, phone_number: string | null, draft_date: string | null, lead_name: string | null }> }
  * Caches DDF rows per carrier for 90s so chunked client requests only hit external DB once.
  */
 
@@ -61,9 +61,9 @@ export async function POST(request: NextRequest) {
     console.log('[ddf-lookup]', carrier, '| names requested:', names.length, '| DDF rows for carrier:', records.length, '| matched:', map.size, '| sample DDF carriers:', sampleCarriers.slice(0, 5))
   }
 
-  const results: Record<string, { call_center: string | null; phone_number: string | null; draft_date: string | null }> = {}
+  const results: Record<string, { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }> = {}
   map.forEach((v, k) => {
-    results[k] = { call_center: v.call_center, phone_number: v.phone_number, draft_date: v.draft_date }
+    results[k] = { call_center: v.call_center, phone_number: v.phone_number, draft_date: v.draft_date, lead_name: v.lead_name }
   })
 
   return NextResponse.json({ results })
