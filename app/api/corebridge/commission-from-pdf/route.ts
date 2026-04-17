@@ -13,7 +13,7 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: NextRequest) {
   try {
-    const { fileId, agencyCarrierId, carrierCode, storagePath } = await req.json()
+    const { fileId, agencyCarrierId, carrierCode, storagePath, deferWrite } = await req.json()
 
     if (!fileId || !agencyCarrierId || !carrierCode || !storagePath) {
       return NextResponse.json({ error: 'Missing required parameters.' }, { status: 400 })
@@ -262,7 +262,7 @@ export async function POST(req: NextRequest) {
 
     if (!rows.length) {
       console.warn('[Corebridge PDF] No policy rows detected for file:', storagePath)
-      return NextResponse.json({ rowsInserted: 0 })
+      return NextResponse.json({ rowsInserted: 0, rows: [] })
     }
 
     // Deduplicate by (agency_carrier_id, policy_number) so ON CONFLICT never
@@ -274,6 +274,15 @@ export async function POST(req: NextRequest) {
     }
     const dedupedRows = Array.from(byKey.values())
     console.log('[Corebridge PDF] After dedup:', dedupedRows.length, 'rows to insert')
+
+    if (deferWrite === true) {
+      console.log('[Corebridge PDF] deferWrite: returning rows without DB insert')
+      return NextResponse.json({
+        rowsInserted: 0,
+        rows: dedupedRows,
+        deferred: true,
+      })
+    }
 
     const table = supabase.from('corebridge_commissions')
 

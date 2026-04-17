@@ -2,7 +2,7 @@
  * Hook for handling deal tracker processing after file uploads
  */
 
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { processDealTrackerAfterUpload, saveDealTrackerAfterConfirmation } from './dealTrackerUpload'
 import type { DealTrackerPreviewEntry } from './dealTracker'
 import type { PendingRowsPayload } from './dealTrackerUpload'
@@ -15,6 +15,15 @@ export function useDealTrackerUpload() {
   const [previewLoadingMessage, setPreviewLoadingMessage] = useState<string | null>(null)
   const [pendingRows, setPendingRows] = useState<PendingRowsPayload | null>(null)
   const [saveProgressLogs, setSaveProgressLogs] = useState<string[]>([])
+
+  const verificationEntriesRef = useRef<DealTrackerPreviewEntry[]>([])
+  const pendingRowsRef = useRef<PendingRowsPayload | null>(null)
+  useEffect(() => {
+    verificationEntriesRef.current = verificationEntries
+  }, [verificationEntries])
+  useEffect(() => {
+    pendingRowsRef.current = pendingRows
+  }, [pendingRows])
 
   const createEmptyManualEntry = (agencyCarrierId: string, carrierCode: string): DealTrackerPreviewEntry => ({
     agency_carrier_id: agencyCarrierId,
@@ -57,7 +66,7 @@ export function useDealTrackerUpload() {
   /**
    * Process deal tracker after upload if needed
    * Returns true if verification dialog should be shown.
-   * Pass pendingRows when upload deferred policy/commission write (AMAM/Aetna deal-tracker files).
+   * Pass pendingRows when commission rows are deferred until Commission Report Save (Aetna, AMAM, MOH, etc.).
    */
   const processAfterUpload = async (
     agencyCarrierId: string,
@@ -158,8 +167,8 @@ export function useDealTrackerUpload() {
    * Pass edited entries from the verification dialog so user edits are persisted.
    * When pendingRows was set (deferred write), policy/commission rows are written first, then deal_tracker.
    */
-  const confirmAndSave = async (entriesToSave?: DealTrackerPreviewEntry[]): Promise<void> => {
-    const toSave = entriesToSave ?? verificationEntries
+  const confirmAndSave = useCallback(async (entriesToSave?: DealTrackerPreviewEntry[]): Promise<void> => {
+    const toSave = entriesToSave ?? verificationEntriesRef.current
     if (toSave.length === 0) {
       return
     }
@@ -171,7 +180,7 @@ export function useDealTrackerUpload() {
     }
     try {
       const result = await saveDealTrackerAfterConfirmation(toSave, {
-        pendingRows: pendingRows ?? undefined,
+        pendingRows: pendingRowsRef.current ?? undefined,
         onProgress,
       })
 
@@ -189,7 +198,43 @@ export function useDealTrackerUpload() {
     } finally {
       setProcessing(false)
     }
-  }
+  }, [])
+
+  /**
+   * Save deal_tracker rows only (Next → Commission Report). Does not insert deferred commission rows
+   * or sync commission_tracker; full confirmAndSave runs after Commission Report Save.
+   */
+  const confirmDealTrackerOnly = useCallback(async (entriesToSave?: DealTrackerPreviewEntry[]): Promise<void> => {
+    const toSave = entriesToSave ?? verificationEntriesRef.current
+    if (toSave.length === 0) {
+      throw new Error('No deal tracker rows to save.')
+    }
+    verificationEntriesRef.current = toSave
+    setVerificationEntries(toSave)
+
+    setProcessing(true)
+    setSaveProgressLogs([])
+    const onProgress = (msg: string) => {
+      setSaveProgressLogs(prev => [...prev, msg])
+    }
+    try {
+      const result = await saveDealTrackerAfterConfirmation(toSave, {
+        dealTrackerOnly: true,
+        onProgress,
+      })
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to save deal tracker entries')
+      }
+
+      setSaveProgressLogs([])
+    } catch (error) {
+      console.error('Error saving deal tracker (preview step):', error)
+      throw error
+    } finally {
+      setProcessing(false)
+    }
+  }, [])
 
   /**
    * Cancel verification and clear entries.
@@ -219,6 +264,7 @@ export function useDealTrackerUpload() {
     saveProgressLogs,
     processAfterUpload,
     confirmAndSave,
+    confirmDealTrackerOnly,
     cancelVerification,
     setShowVerification,
   }

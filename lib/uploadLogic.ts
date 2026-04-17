@@ -4,6 +4,32 @@
  */
 import { supabase } from './supabaseClient'
 import { parseFile, parseRNAExcel, parseRNACommissionCSV, parseRNACommissionExcel } from './fileParser'
+import type { PendingRowsPayload } from './dealTrackerUpload'
+
+/**
+ * Carriers whose commission CSV/Excel rows are built client-side and should not hit the DB
+ * until Commission Report Save (same flow as deal tracker Next → commission dialog).
+ * PDF-only routes (e.g. Corebridge/Sentinel commission PDF) use API insert and are unchanged.
+ */
+const DEFER_COMMISSION_ROWS_TO_DIALOG = new Set([
+  'AETNA',
+  'AMAM',
+  'MOH',
+  'RNA',
+  'AFLAC',
+  'AHL',
+  'COREBRIDGE',
+  'SENTINEL',
+])
+
+/**
+ * Commission rows for these carriers are held in memory until the user saves the Commission Report.
+ */
+export function shouldDeferCommissionRowsToDialog(carrierCode: string, fileType: FileKind): boolean {
+  const c = (carrierCode || '').toUpperCase()
+  if (fileType !== 'Commission') return false
+  return DEFER_COMMISSION_ROWS_TO_DIALOG.has(c)
+}
 
 export type FileKind = 'Policy' | 'Commission'
 
@@ -783,7 +809,19 @@ export interface UploadParams {
   uploadDateYmd?: string
 }
 
-export async function executeUpload(params: UploadParams): Promise<{ success: true; count: number; fileId: string; carrierCode: string; fileType: FileKind } | { success: false; error: string }> {
+export type ExecuteUploadSuccess = {
+  success: true
+  count: number
+  fileId: string
+  carrierCode: string
+  fileType: FileKind
+  /** Present when commission rows are held until Commission Report dialog Save. */
+  pendingRows?: PendingRowsPayload
+}
+
+export async function executeUpload(
+  params: UploadParams
+): Promise<ExecuteUploadSuccess | { success: false; error: string }> {
   const { agencyCarrierId, agencyName, carrierName, carrierCode, file, fileType, uploadDateYmd } = params
 
   if (carrierCode === 'TRANSAMERICA' && fileType === 'Commission') {
@@ -836,12 +874,15 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
     isSentinelCommissionPdf,
   })
 
-  // Corebridge and Sentinel commission PDFs are parsed server-side by dedicated API routes
+  // Corebridge and Sentinel commission PDFs are parsed server-side by dedicated API routes.
+  // Rows are returned without inserting until Commission Report Save (same as CSV commission defer).
   if (isCorebridgeCommissionPdf || isSentinelCommissionPdf) {
     const url =
       isCorebridgeCommissionPdf
         ? '/api/corebridge/commission-from-pdf'
         : '/api/sentinel/commission-from-pdf'
+
+    const targetTable = isCorebridgeCommissionPdf ? 'corebridge_commissions' : 'sentinel_commissions'
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -851,17 +892,46 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
         agencyCarrierId,
         carrierCode,
         storagePath: filePath,
+        deferWrite: true,
       }),
     })
 
     if (!resp.ok) {
       const msg = await resp.text()
-      return { success: false, error: msg || 'Failed to parse Corebridge commission PDF.' }
+      return {
+        success: false,
+        error: msg || (isCorebridgeCommissionPdf ? 'Failed to parse Corebridge commission PDF.' : 'Failed to parse Sentinel commission PDF.'),
+      }
     }
 
-    const json = await resp.json()
-    const count = (json && typeof json.rowsInserted === 'number') ? json.rowsInserted : 0
-    return { success: true, count, fileId: fileRow.id, carrierCode, fileType }
+    const json = (await resp.json()) as {
+      rows?: Record<string, unknown>[]
+      rowsInserted?: number
+    }
+    const rows = Array.isArray(json.rows) ? json.rows : []
+    const count = rows.length
+
+    await supabase
+      .from('files')
+      .update({ records_processed: count, updated_at: new Date().toISOString() })
+      .eq('id', fileRow.id)
+
+    if (count > 0) {
+      return {
+        success: true,
+        count,
+        fileId: fileRow.id,
+        carrierCode,
+        fileType,
+        pendingRows: {
+          fileId: fileRow.id,
+          targetTable,
+          rows,
+        } satisfies PendingRowsPayload,
+      }
+    }
+
+    return { success: true, count: 0, fileId: fileRow.id, carrierCode, fileType }
   }
 
   const parseResult = isRNAPolicyExcel
@@ -917,6 +987,31 @@ export async function executeUpload(params: UploadParams): Promise<{ success: tr
   }
 
   if (!rows.length) return { success: false, error: 'File parsed but no mappable records were found.' }
+
+  // AMAM commission: keep parsed rows in memory until Commission Report dialog Save
+  // (avoids duplicate_tracker warnings and ensures statement date comes only from the dialog).
+  if (
+    shouldDeferCommissionRowsToDialog(carrierCode, fileType) &&
+    String(targetTable).endsWith('_commissions')
+  ) {
+    await supabase
+      .from('files')
+      .update({ records_processed: parseResult.records.length, updated_at: new Date().toISOString() })
+      .eq('id', fileRow.id)
+
+    return {
+      success: true,
+      count: parseResult.records.length,
+      fileId: fileRow.id,
+      carrierCode,
+      fileType,
+      pendingRows: {
+        fileId: fileRow.id,
+        targetTable,
+        rows,
+      } satisfies PendingRowsPayload,
+    }
+  }
 
   const BATCH_SIZE = 500
   const isPolicyTable =

@@ -267,7 +267,8 @@ export async function processAhlFilesForDealTracker(
 
 export async function processAhlCommissionsForDealTracker(
   agencyCarrierId: string,
-  fileId: string
+  fileId: string,
+  commissionsOverride?: ReadonlyArray<Record<string, unknown>>
 ): Promise<DealTrackerPreviewEntry[]> {
   const { data: agencyCarrier, error: acError } = await supabase
     .from('agency_carriers')
@@ -294,16 +295,21 @@ export async function processAhlCommissionsForDealTracker(
   // Daily Deal Flow stores this carrier under full name, not code.
   const ddfCarrier = 'American Home Life'
 
-  const commissions = await fetchAllPaginated(() =>
-    supabase
-      .from('ahl_commissions')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .eq('file_id', fileId)
-      .order('id', { ascending: true })
-  )
+  let commissions: any[]
+  if (commissionsOverride && commissionsOverride.length > 0) {
+    commissions = commissionsOverride as any[]
+  } else {
+    commissions = await fetchAllPaginated(() =>
+      supabase
+        .from('ahl_commissions')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .eq('file_id', fileId)
+        .order('id', { ascending: true })
+    )
 
-  if (!commissions || commissions.length === 0) return []
+    if (!commissions || commissions.length === 0) return []
+  }
 
   const policyNumbers = Array.from(new Set(commissions.map((c: any) => c.policy_number).filter(Boolean)))
 

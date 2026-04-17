@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { fetchPolicyRecords } from '@/lib/policyHelpers'
@@ -41,8 +41,12 @@ export default function CarrierDetailPage() {
     const carrierId = params.id as string
 
     const dealTracker = useDealTrackerUpload()
+    const deferredCommissionRowsRef = useRef<Record<string, unknown>[] | null>(null)
     const commissionReport = useCommissionReportUpload({
-        onAfterSave: () => dealTracker.confirmAndSave(),
+        onAfterSave: async () => {
+            deferredCommissionRowsRef.current = null
+            await dealTracker.confirmAndSave()
+        },
     })
 
     const [carrier, setCarrier] = useState<any>(null)
@@ -176,6 +180,11 @@ export default function CarrierDetailPage() {
                 text: `Successfully uploaded ${count} record(s).`,
             })
 
+            const pendingPayload =
+                'pendingRows' in result && result.pendingRows ? result.pendingRows : undefined
+            deferredCommissionRowsRef.current =
+                pendingPayload?.rows?.length ? pendingPayload.rows : null
+
             if (
                 (carrierCode === 'AETNA' ||
                     carrierCode === 'AMAM' ||
@@ -196,7 +205,13 @@ export default function CarrierDetailPage() {
                     carrierCode,
                     fileType,
                 })
-                await dealTracker.processAfterUpload(agencyCarrierId, result.fileId, carrierCode, fileType)
+                await dealTracker.processAfterUpload(
+                    agencyCarrierId,
+                    result.fileId,
+                    carrierCode,
+                    fileType,
+                    pendingPayload
+                )
             }
 
             // Clear file input
@@ -460,13 +475,21 @@ export default function CarrierDetailPage() {
                     ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL', 'SENTINEL'].includes(
                         (lastUploadContext?.carrierCode || '').toUpperCase()
                     )
-                        ? () => {
+                        ? async (entries) => {
+                              await dealTracker.confirmDealTrackerOnly(entries)
                               dealTracker.setShowVerification(false)
                               if (lastUploadContext) {
                                   commissionReport.openCommissionReport(
                                       lastUploadContext.agencyCarrierId,
                                       lastUploadContext.fileId,
-                                      lastUploadContext.carrierCode
+                                      lastUploadContext.carrierCode,
+                                      {
+                                          pendingRows:
+                                              deferredCommissionRowsRef.current &&
+                                              deferredCommissionRowsRef.current.length > 0
+                                                  ? deferredCommissionRowsRef.current
+                                                  : undefined,
+                                      }
                                   )
                               }
                           }

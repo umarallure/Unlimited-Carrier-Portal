@@ -130,8 +130,12 @@ export function UploadTreeOrgChart() {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const dealTracker = useDealTrackerUpload()
+  const deferredCommissionRowsRef = useRef<Record<string, unknown>[] | null>(null)
   const commissionReport = useCommissionReportUpload({
-    onAfterSave: () => dealTracker.confirmAndSave(),
+    onAfterSave: async () => {
+      deferredCommissionRowsRef.current = null
+      await dealTracker.confirmAndSave()
+    },
   })
   const [lastUploadContext, setLastUploadContext] = useState<LastUploadContext | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -377,6 +381,13 @@ export function UploadTreeOrgChart() {
         const count = (result as { count?: number }).count ?? 0
         setUploadMessage({ type: 'success', text: `${uploadDialog.fileType} uploaded. ${count} record(s) processed.` })
         setTimeout(() => setUploadMessage(null), 6000)
+
+        const pendingPayload =
+          'pendingRows' in result && result.pendingRows
+            ? (result.pendingRows as PendingRowsPayload)
+            : undefined
+        deferredCommissionRowsRef.current =
+          pendingPayload?.rows?.length ? pendingPayload.rows : null
         
         // Always hand off to central deal-tracker hook for Policy/Commission uploads.
         // The hook itself decides which carriers are supported.
@@ -402,7 +413,7 @@ export function UploadTreeOrgChart() {
             result.fileId,
             uploadDialog.carrierCode,
             uploadDialog.fileType,
-            'pendingRows' in result ? (result.pendingRows as PendingRowsPayload) : undefined
+            pendingPayload
           )
         }
         
@@ -590,14 +601,22 @@ export function UploadTreeOrgChart() {
           ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL', 'SENTINEL'].includes(
             (lastUploadContext?.carrierCode || '').toUpperCase()
           )
-            ? () => {
+            ? async (entries) => {
+                await dealTracker.confirmDealTrackerOnly(entries)
                 dealTracker.setShowVerification(false)
-                if (lastUploadContext)
+                if (lastUploadContext) {
                   commissionReport.openCommissionReport(
                     lastUploadContext.agencyCarrierId,
                     lastUploadContext.fileId,
-                    lastUploadContext.carrierCode
+                    lastUploadContext.carrierCode,
+                    {
+                      pendingRows:
+                        deferredCommissionRowsRef.current && deferredCommissionRowsRef.current.length > 0
+                          ? deferredCommissionRowsRef.current
+                          : undefined,
+                    }
                   )
+                }
               }
             : undefined
         }

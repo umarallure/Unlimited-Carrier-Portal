@@ -81,30 +81,6 @@ export async function processAflacFilesForDealTracker(
 
   const policyNumbers = policies.map(p => p.policy_number)
 
-  let commissions: any[] = []
-  try {
-    commissions = await fetchAllPaginated(() =>
-      supabase
-        .from('aflac_commissions')
-        .select('*')
-        .eq('agency_carrier_id', agencyCarrierId)
-        .in('policy_number', policyNumbers)
-        .order('id', { ascending: true })
-    )
-  } catch (commissionsError: any) {
-    console.warn('[Deal Tracker] Failed to fetch AFLAC commissions:', (commissionsError as Error)?.message)
-  }
-
-  const commissionMap = new Map<string, any>()
-  commissions.forEach(comm => {
-    if (
-      !commissionMap.has(comm.policy_number) ||
-      (comm.created_at && commissionMap.get(comm.policy_number)?.created_at < comm.created_at)
-    ) {
-      commissionMap.set(comm.policy_number, comm)
-    }
-  })
-
   let existingEntries: any[] = []
   try {
     existingEntries = await fetchAllPaginated(() =>
@@ -141,7 +117,6 @@ export async function processAflacFilesForDealTracker(
   const previewEntries: DealTrackerPreviewEntry[] = []
 
   for (const policy of policies) {
-    const commission = commissionMap.get(policy.policy_number)
     const existing = existingMap.get(policy.policy_number)
 
     const originalStatus = policy.statusdisplaytext || policy.statuscategory
@@ -158,34 +133,11 @@ export async function processAflacFilesForDealTracker(
       phoneNumber = ddfInfo?.phone_number ?? null
     }
 
+    // Policy uploads must never derive financials from commission tables.
+    // Keep existing deal/cc values for existing rows; new rows start null.
     let dealValue: number | null = null
     let ccValue: number | null = null
-    if (commission && commission.commissionamount != null) {
-      const raw =
-        typeof commission.commissionamount === 'string'
-          ? parseFloat(commission.commissionamount)
-          : commission.commissionamount
-      const parsed = Number.isNaN(raw as number) ? null : (raw as number)
-      if (parsed != null && parsed > 0) {
-        dealValue = parsed
-        ccValue = parsed / 2
-      } else if (existing) {
-        dealValue =
-          existing.deal_value != null
-            ? typeof existing.deal_value === 'string'
-              ? parseFloat(existing.deal_value)
-              : existing.deal_value
-            : null
-        ccValue =
-          existing.cc_value != null
-            ? typeof existing.cc_value === 'string'
-              ? parseFloat(existing.cc_value)
-              : existing.cc_value
-            : dealValue != null ? dealValue / 2 : null
-        if (Number.isNaN(dealValue as number)) dealValue = null
-        if (Number.isNaN(ccValue as number)) ccValue = null
-      }
-    } else if (existing && existing.deal_value != null) {
+    if (existing && existing.deal_value != null) {
       dealValue =
         typeof existing.deal_value === 'string'
           ? parseFloat(existing.deal_value)
@@ -236,7 +188,7 @@ export async function processAflacFilesForDealTracker(
       effectiveDateForThreeMonthRule: effectiveDateForThreeMonthRuleFromPreview(existing, effectiveDate),
       dealCreationDate: dealCreationDateForGhl,
       dealValue,
-      commissionType: commission?.commissiontype || null,
+      commissionType: existing?.commission_type || null,
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
@@ -259,9 +211,9 @@ export async function processAflacFilesForDealTracker(
       notes: existing?.notes ?? null,
       status: statusForEntry,
       last_updated: new Date().toISOString(),
-      sales_agent: policy.agentcompletename || commission?.writingagentname || null,
-      writing_number: policy.agentnumber || commission?.writingagentnumber || null,
-      commission_type: commission?.commissiontype || null,
+      sales_agent: policy.agentcompletename || existing?.sales_agent || null,
+      writing_number: policy.agentnumber || existing?.writing_number || null,
+      commission_type: existing?.commission_type ?? null,
       effective_date: effectiveDate,
       call_center: callCenter,
       phone_number: phoneNumber,
@@ -273,8 +225,8 @@ export async function processAflacFilesForDealTracker(
       daily_deal_flow_fetched_at: (callCenter || phoneNumber) ? new Date().toISOString() : (existing?.daily_deal_flow_fetched_at ?? null),
       source_policy_table: 'aflac_policies',
       source_policy_id: policy.id,
-      source_commission_table: commission ? 'aflac_commissions' : null,
-      source_commission_id: commission?.id || null,
+      source_commission_table: existing?.source_commission_table ?? null,
+      source_commission_id: existing?.source_commission_id ?? null,
       isNew: !existing,
       isUpdated: !!existing,
     }
@@ -299,11 +251,13 @@ export async function processAflacFilesForDealTracker(
  */
 export async function processAflacCommissionsForDealTracker(
   agencyCarrierId: string,
-  fileId: string
+  fileId: string,
+  commissionsOverride?: ReadonlyArray<Record<string, unknown>>
 ): Promise<DealTrackerPreviewEntry[]> {
   console.log('[Deal Tracker] processAflacCommissionsForDealTracker called', {
     agencyCarrierId,
     fileId,
+    fromMemory: !!(commissionsOverride && commissionsOverride.length > 0),
   })
 
   const { data: agencyCarrier, error: acError } = await supabase
@@ -330,18 +284,23 @@ export async function processAflacCommissionsForDealTracker(
   const carrierCode = carrier.code || 'AFLAC'
   const carrierId = carrier.id
 
-  const commissions = await fetchAllPaginated(() =>
-    supabase
-      .from('aflac_commissions')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .eq('file_id', fileId)
-      .order('id', { ascending: true })
-  )
+  let commissions: any[]
+  if (commissionsOverride && commissionsOverride.length > 0) {
+    commissions = commissionsOverride as any[]
+  } else {
+    commissions = await fetchAllPaginated(() =>
+      supabase
+        .from('aflac_commissions')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .eq('file_id', fileId)
+        .order('id', { ascending: true })
+    )
 
-  if (!commissions || commissions.length === 0) {
-    console.warn('[Deal Tracker] No AFLAC commissions found for file_id:', fileId)
-    return []
+    if (!commissions || commissions.length === 0) {
+      console.warn('[Deal Tracker] No AFLAC commissions found for file_id:', fileId)
+      return []
+    }
   }
 
   const policyNumbers = Array.from(new Set(commissions.map((c: any) => c.policy_number).filter(Boolean)))

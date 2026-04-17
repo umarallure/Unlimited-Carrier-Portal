@@ -312,11 +312,13 @@ export async function processRNAFilesForDealTracker(
  */
 export async function processRNACommissionsForDealTracker(
   agencyCarrierId: string,
-  fileId: string
+  fileId: string,
+  commissionsOverride?: ReadonlyArray<Record<string, unknown>>
 ): Promise<DealTrackerPreviewEntry[]> {
   console.log('[Deal Tracker] processRNACommissionsForDealTracker called', {
     agencyCarrierId,
     fileId,
+    fromMemory: !!(commissionsOverride && commissionsOverride.length > 0),
   })
 
   const { data: agencyCarrier, error: acError } = await supabase
@@ -344,20 +346,26 @@ export async function processRNACommissionsForDealTracker(
   const ddfCarrier = carrierCode || carrierName
   const carrierId = carrier.id
 
-  const { data: commissions, error: commissionsError } = await supabase
-    .from('rna_commissions')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .eq('file_id', fileId)
+  let commissions: any[]
+  if (commissionsOverride && commissionsOverride.length > 0) {
+    commissions = commissionsOverride as any[]
+  } else {
+    const { data: fetched, error: commissionsError } = await supabase
+      .from('rna_commissions')
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .eq('file_id', fileId)
 
-  if (commissionsError) {
-    console.error('[Deal Tracker] Error fetching RNA commissions:', commissionsError)
-    throw new Error(`Failed to fetch commissions: ${commissionsError.message}`)
-  }
+    if (commissionsError) {
+      console.error('[Deal Tracker] Error fetching RNA commissions:', commissionsError)
+      throw new Error(`Failed to fetch commissions: ${commissionsError.message}`)
+    }
 
-  if (!commissions || commissions.length === 0) {
-    console.warn('[Deal Tracker] No RNA commissions found for file_id:', fileId)
-    return []
+    if (!fetched || fetched.length === 0) {
+      console.warn('[Deal Tracker] No RNA commissions found for file_id:', fileId)
+      return []
+    }
+    commissions = fetched
   }
 
   const policyNumbers = Array.from(new Set(commissions.map((c: any) => c.policy_number).filter(Boolean))) as string[]

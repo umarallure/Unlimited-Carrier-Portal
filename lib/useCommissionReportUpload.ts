@@ -110,11 +110,16 @@ function resolveRowDateYmdForDupes(
   carrierCode: string,
   fileStatementDate: string
 ): string {
-  const raw = fileStatementDate.trim() ? fileStatementDate : row.date
-  if (!raw?.trim()) return ''
-  const d = new Date(raw.includes('T') ? raw : `${raw}T12:00:00`)
-  if (Number.isNaN(d.getTime())) return String(raw).trim().slice(0, 10)
-  return d.toISOString().slice(0, 10)
+  const raw = (fileStatementDate.trim() ? fileStatementDate : row.date) ?? ''
+  const str = String(raw).trim()
+  if (!str) return ''
+  const ymd = str.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (ymd) return ymd[1]
+  const us = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/)
+  if (us) {
+    return `${us[3]}-${String(parseInt(us[1], 10)).padStart(2, '0')}-${String(parseInt(us[2], 10)).padStart(2, '0')}`
+  }
+  return str.slice(0, 10)
 }
 
 /** Business key: policy + statement/paid date + signed commission amount. */
@@ -168,9 +173,17 @@ export function findWithinFileCommissionDuplicates(
 function normalizeTrackerDate(value: unknown): string {
   if (value == null || value === '') return ''
   const str = String(value).trim().split('to')[0].trim()
-  const d = new Date(str.replace(/\./g, '-').replace(/\//g, '-'))
+  if (!str) return ''
+  const ymd = str.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (ymd) return ymd[1]
+  const us = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/)
+  if (us) {
+    return `${us[3]}-${String(parseInt(us[1], 10)).padStart(2, '0')}-${String(parseInt(us[2], 10)).padStart(2, '0')}`
+  }
+  const normalized = str.replace(/\./g, '-').replace(/\//g, '-')
+  const d = new Date(normalized.includes('T') ? normalized : `${normalized}T12:00:00`)
   if (Number.isNaN(d.getTime())) return ''
-  return d.toISOString().slice(0, 10)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 function netAmountFromTrackerRow(t: {
@@ -450,9 +463,14 @@ export type OpenCommissionReportOptions = {
   /**
    * When true (default), closing the dialog without a successful Save removes
    * all commission rows for this file from the carrier table and commission_tracker.
-   * (Data is already inserted at upload/PDF parse; the dialog is a confirmation step.)
+   * For deferred uploads (e.g. AMAM commission), nothing is in the DB until Save, so abandon is a no-op.
    */
   deleteOnAbandon?: boolean
+  /**
+   * Parsed commission rows not yet written to the carrier table (deferred upload).
+   * When set, the dialog loads from this payload instead of querying the database.
+   */
+  pendingRows?: Record<string, unknown>[]
 }
 
 function commissionTableForCarrier(carrierCode: string): string | null {
@@ -581,6 +599,19 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
           setCommissionRows([])
           return
         }
+        const pending = openOpts?.pendingRows
+        if (pending && pending.length > 0) {
+          const policyNumbers = pending
+            .map((r) => String((r as Record<string, unknown>).policy_number ?? '').trim())
+            .filter(Boolean)
+          const dealTrackerMap = await fetchDealTrackerByPolicies(agencyCarrierId, policyNumbers)
+          const rows = pending.map((r) =>
+            dbRowToDisplay(r as Record<string, any>, carrierCode, dealTrackerMap)
+          )
+          setCommissionRows(rows)
+          return
+        }
+
         const { data, error } = await supabase
           .from(table)
           .select('*')
@@ -636,12 +667,32 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
           delete (r as any).created_at
           return r
         })
-        const upsertOptions = { onConflict: 'id', ignoreDuplicates: false }
-        const { error } = await supabase
-          .from(table)
-          .upsert(chunk, upsertOptions)
-        if (error) throw error
-        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
+        const hasStableIds = editedRows.some((r) => !!r.id)
+        if (!hasStableIds) {
+          // Deferred flow (rows came from pendingRows): make save idempotent by replacing
+          // this file's commission rows before insert so double-clicks/retries do not duplicate.
+          const { error: delErr } = await supabase
+            .from(table)
+            .delete()
+            .eq('agency_carrier_id', agencyCarrierId)
+            .eq('file_id', fileId)
+          if (delErr) throw delErr
+
+          const { error: insErr } = await supabase
+            .from(table)
+            .insert(chunk)
+          if (insErr) throw insErr
+        } else {
+          const upsertOptions = { onConflict: 'id', ignoreDuplicates: false }
+          const { error } = await supabase
+            .from(table)
+            .upsert(chunk, upsertOptions)
+          if (error) throw error
+        }
+        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode, {
+          fileId,
+          replacePoliciesFromFile: true,
+        })
         closedAfterSaveRef.current = true
         deleteCommissionRowsOnAbandonRef.current = false
         setShowCommissionReport(false)
