@@ -40,7 +40,6 @@ const FIELD_LABELS: Record<string, string> = {
   call_center: 'Call Center',
   phone_number: 'Phone',
   deal_creation_date: 'Deal Date',
-  commission_date: 'Commission Date',
   effective_date: 'Effective Date',
   notes: 'Notes',
   status: 'Status',
@@ -64,7 +63,8 @@ interface DealTrackerVerificationDialogProps {
   onCancel: () => void
   /** When set to 'Commission' and onNext is provided, show "Next" instead of "Confirm & Save" to open Commission Report dialog */
   fileType?: string
-  onNext?: () => void
+  /** Called after validation; should persist deal_tracker then open Commission Report (see confirmDealTrackerOnly). */
+  onNext?: (entries: DealTrackerPreviewEntry[]) => void | Promise<void>
 }
 
 function formatNum(val: number | null | undefined): string {
@@ -188,7 +188,7 @@ export function DealTrackerVerificationDialog({
     }
   }
 
-  const handleNextStep = () => {
+  const handleNextStep = async () => {
     const bad = editableEntries.find(isEntryIncomplete)
     if (bad) {
       setError(
@@ -203,7 +203,14 @@ export function DealTrackerVerificationDialog({
       return
     }
     setError(null)
-    onNext?.()
+    setSaving(true)
+    try {
+      await onNext?.(editableEntries)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to save deal tracker before continuing')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleCancel = () => {
@@ -527,9 +534,6 @@ export function DealTrackerVerificationDialog({
                   <TableHead className="w-28 font-semibold text-foreground" title="Policy / deal creation date from carrier">
                     Deal Date
                   </TableHead>
-                  <TableHead className="w-28 font-semibold text-foreground" title="Statement / report date from commission file (e.g. AMAM RptDate, Corebridge statement)">
-                    Commission Date
-                  </TableHead>
                   <TableHead className="w-28 font-semibold text-foreground">Effective Date</TableHead>
                   <TableHead className="min-w-[80px] font-semibold text-foreground">Notes</TableHead>
                 </TableRow>
@@ -537,7 +541,7 @@ export function DealTrackerVerificationDialog({
               <TableBody>
                 {filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={18} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={17} className="py-8 text-center text-muted-foreground">
                       {filter === 'incomplete'
                         ? 'No incomplete GHL Stage rows — all rows have a valid stage.'
                         : 'No entries match the current filter. Switch to &quot;All&quot; to see all rows.'}
@@ -748,15 +752,6 @@ export function DealTrackerVerificationDialog({
                           className={cn(dialogTableInput, '[color-scheme:light] dark:[color-scheme:dark]')}
                         />
                       </TableCell>
-                      <TableCell className={cn('p-1', cellChanged('commission_date') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
-                        <Input
-                          type="date"
-                          value={toYmdForDateInput(entry.commission_date)}
-                          onChange={e => updateEntry(globalIndex, 'commission_date', asNullableInput(e.target.value))}
-                          className={cn(dialogTableInput, '[color-scheme:light] dark:[color-scheme:dark]')}
-                          title="From commission file (not stored on deal_tracker row)"
-                        />
-                      </TableCell>
                       <TableCell className={cn('p-1', cellChanged('effective_date') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
                         <Input
                           type="date"
@@ -876,8 +871,8 @@ export function DealTrackerVerificationDialog({
           </Button>
           {fileType === 'Commission' && onNext ? (
             <Button
-              onClick={handleNextStep}
-              disabled={isLoading || editableEntries.length === 0 || hasIncomplete}
+              onClick={() => void handleNextStep()}
+              disabled={saving || isLoading || editableEntries.length === 0 || hasIncomplete}
               title={
                 hasIncomplete
                   ? 'Fill Effective Date, Call Center, Phone, and set a valid GHL Stage on every row (use Incomplete tab) before continuing'
@@ -885,7 +880,14 @@ export function DealTrackerVerificationDialog({
               }
               className="min-w-[120px] bg-orange-600 font-semibold text-white hover:bg-orange-700"
             >
-              Next
+              {saving ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Saving…
+                </>
+              ) : (
+                'Next'
+              )}
             </Button>
           ) : (
             <Button

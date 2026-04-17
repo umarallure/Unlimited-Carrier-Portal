@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: NextRequest) {
   try {
-    const { fileId, agencyCarrierId, carrierCode, storagePath } = await req.json()
+    const { fileId, agencyCarrierId, carrierCode, storagePath, deferWrite } = await req.json()
 
     if (!fileId || !agencyCarrierId || !carrierCode || !storagePath) {
       return NextResponse.json({ error: 'Missing required parameters.' }, { status: 400 })
@@ -380,7 +380,16 @@ export async function POST(req: NextRequest) {
     if (!rows.length) {
       console.warn('[Sentinel PDF] No policy rows detected for file:', storagePath)
       console.log('[Sentinel PDF][debug] raw line sample:', lines.slice(0, 80))
-      return NextResponse.json({ rowsInserted: 0 })
+      return NextResponse.json({ rowsInserted: 0, rows: [] })
+    }
+
+    if (deferWrite === true) {
+      console.log('[Sentinel PDF] deferWrite: returning rows without DB insert')
+      return NextResponse.json({
+        rowsInserted: 0,
+        rows,
+        deferred: true,
+      })
     }
 
     console.log(

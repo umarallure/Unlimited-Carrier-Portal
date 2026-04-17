@@ -241,11 +241,13 @@ export async function processCorebridgeFilesForDealTracker(
  */
 export async function processCorebridgeCommissionsForDealTracker(
   agencyCarrierId: string,
-  fileId: string
+  fileId: string,
+  commissionsOverride?: ReadonlyArray<Record<string, unknown>>
 ): Promise<DealTrackerPreviewEntry[]> {
   console.log('[Deal Tracker] processCorebridgeCommissionsForDealTracker called', {
     agencyCarrierId,
     fileId,
+    fromMemory: !!(commissionsOverride && commissionsOverride.length > 0),
   })
 
   const { data: agencyCarrier, error: acError } = await supabase
@@ -272,18 +274,23 @@ export async function processCorebridgeCommissionsForDealTracker(
   const carrierCode = carrier.code || 'COREBRIDGE'
   const carrierId = carrier.id
 
-  const commissions = await fetchAllPaginated(() =>
-    supabase
-      .from('corebridge_commissions')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .eq('file_id', fileId)
-      .order('row_number', { ascending: true })
-  )
+  let commissions: any[]
+  if (commissionsOverride && commissionsOverride.length > 0) {
+    commissions = commissionsOverride as any[]
+  } else {
+    commissions = await fetchAllPaginated(() =>
+      supabase
+        .from('corebridge_commissions')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .eq('file_id', fileId)
+        .order('row_number', { ascending: true })
+    )
 
-  if (!commissions || commissions.length === 0) {
-    console.warn('[Deal Tracker] No Corebridge commissions found for file_id:', fileId)
-    return []
+    if (!commissions || commissions.length === 0) {
+      console.warn('[Deal Tracker] No Corebridge commissions found for file_id:', fileId)
+      return []
+    }
   }
 
   const policyNumbers = Array.from(new Set(commissions.map((c: any) => c.policy_number).filter(Boolean)))
@@ -465,7 +472,7 @@ export async function processCorebridgeCommissionsForDealTracker(
       source_policy_table: existing?.source_policy_table ?? null,
       source_policy_id: existing?.source_policy_id ?? null,
       source_commission_table: 'corebridge_commissions',
-      source_commission_id: latest.id ?? null,
+      source_commission_id: latest.id != null ? latest.id : null,
       isNew: !existing,
       isUpdated: !!existing,
     }

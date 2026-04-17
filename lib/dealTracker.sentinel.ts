@@ -159,10 +159,11 @@ export async function processSentinelFilesForDealTracker(
     const dealCreationDateFromPolicy = (policy.issue_date as string | undefined) || null
     const effectiveDateFromPolicy = (policy.issue_date as string | undefined) || null
 
-    // Do NOT wipe out existing dates. Only set these when we actually have a value for this run.
+    // Preserve the deal creation date already stored in the DB.
+    // Only use the policy file's issue_date when there is no existing date.
     const dealCreationDate =
-      dealCreationDateFromPolicy ??
-      (existing?.deal_creation_date as string | null) ??
+      (existing?.deal_creation_date as string | null | undefined) ||
+      dealCreationDateFromPolicy ||
       null
 
     const effectiveDate = mergeEffectiveDate(
@@ -253,11 +254,13 @@ export async function processSentinelFilesForDealTracker(
 /** Commission-driven Sentinel processing using Payable Comm as the commission amount. */
 export async function processSentinelCommissionsForDealTracker(
   agencyCarrierId: string,
-  fileId: string
+  fileId: string,
+  commissionsOverride?: ReadonlyArray<Record<string, unknown>>
 ): Promise<DealTrackerPreviewEntry[]> {
   console.log('[Deal Tracker] processSentinelCommissionsForDealTracker called', {
     agencyCarrierId,
     fileId,
+    fromMemory: !!(commissionsOverride && commissionsOverride.length > 0),
   })
 
   const { data: agencyCarrier, error: acError } = await supabase
@@ -284,18 +287,23 @@ export async function processSentinelCommissionsForDealTracker(
   const carrierCode = carrier.code || 'SENTINEL'
   const carrierId = carrier.id
 
-  const commissions = await fetchAllPaginated(() =>
-    supabase
-      .from('sentinel_commissions')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .eq('file_id', fileId)
-      .order('row_number', { ascending: true })
-  )
+  let commissions: any[]
+  if (commissionsOverride && commissionsOverride.length > 0) {
+    commissions = commissionsOverride as any[]
+  } else {
+    commissions = await fetchAllPaginated(() =>
+      supabase
+        .from('sentinel_commissions')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .eq('file_id', fileId)
+        .order('row_number', { ascending: true })
+    )
 
-  if (!commissions || commissions.length === 0) {
-    console.warn('[Deal Tracker] No Sentinel commissions found for file_id:', fileId)
-    return []
+    if (!commissions || commissions.length === 0) {
+      console.warn('[Deal Tracker] No Sentinel commissions found for file_id:', fileId)
+      return []
+    }
   }
 
   const policyNumbers = Array.from(
@@ -509,7 +517,7 @@ export async function processSentinelCommissionsForDealTracker(
       source_policy_table: existing?.source_policy_table ?? (policy ? 'sentinel_policies' : null),
       source_policy_id: existing?.source_policy_id ?? policy?.id ?? null,
       source_commission_table: 'sentinel_commissions',
-      source_commission_id: latest.id ?? null,
+      source_commission_id: latest.id != null ? latest.id : null,
       isNew: !existing,
       isUpdated: !!existing,
     }

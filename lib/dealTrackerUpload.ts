@@ -29,9 +29,8 @@ import { processSentinelFilesForDealTracker, processSentinelCommissionsForDealTr
 import { processAflacFilesForDealTracker, processAflacCommissionsForDealTracker } from './dealTracker.aflac'
 import { processAhlFilesForDealTracker, processAhlCommissionsForDealTracker } from './dealTracker.ahl'
 import { supabase } from './supabaseClient'
-import { syncCommissionTrackerForAgencyCarrier } from './commissionTracker'
 
-/** Payload for deferred deal-tracker flow (in-memory rows + target table + file id). Not used in current upload workflow. */
+/** In-memory commission/policy rows + target table + file id when DB insert is deferred until Commission Report Save. */
 export interface PendingRowsPayload {
   fileId: string
   targetTable: string
@@ -90,10 +89,11 @@ export async function processDealTrackerAfterUpload(
     if (isAetna) {
       if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing Aetna commission file for deal tracker...')
-        previewEntries = await processAetnaCommissionsForDealTracker(agencyCarrierId, fileId)
-        // Also normalize into commission_tracker so the commission report table
-        // stays consistent with the rest of the system.
-        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processAetnaCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processAetnaCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       } else {
         console.log('[Deal Tracker] Processing Aetna policy file for deal tracker...')
         previewEntries = await processAetnaFilesForDealTracker(agencyCarrierId, fileId)
@@ -111,7 +111,6 @@ export async function processDealTrackerAfterUpload(
         if (fileType === 'Commission') {
           console.log('[Deal Tracker] Processing AMAM commission file for deal tracker...')
           previewEntries = await processAmamCommissionsForDealTracker(agencyCarrierId, fileId)
-          await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
         } else {
           console.log('[Deal Tracker] Processing AMAM policy file for deal tracker...')
           previewEntries = await processAmamFilesForDealTracker(agencyCarrierId, fileId)
@@ -120,8 +119,11 @@ export async function processDealTrackerAfterUpload(
     } else if (isMoh) {
       if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing MOH commission file for deal tracker...')
-        previewEntries = await processMohCommissionsForDealTracker(agencyCarrierId, fileId)
-        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processMohCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processMohCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       } else {
         console.log('[Deal Tracker] Processing MOH policy file for deal tracker...')
         previewEntries = await processMohFilesForDealTracker(agencyCarrierId, fileId)
@@ -129,7 +131,11 @@ export async function processDealTrackerAfterUpload(
     } else if (isRNA) {
       if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing RNA commission file for deal tracker...')
-        previewEntries = await processRNACommissionsForDealTracker(agencyCarrierId, fileId)
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processRNACommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processRNACommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       } else {
         console.log('[Deal Tracker] Processing RNA policy file for deal tracker...')
         previewEntries = await processRNAFilesForDealTracker(agencyCarrierId, fileId)
@@ -151,9 +157,11 @@ export async function processDealTrackerAfterUpload(
         previewEntries = await processCorebridgeFilesForDealTracker(agencyCarrierId, fileId)
       } else if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing Corebridge commission file for deal tracker...')
-        previewEntries = await processCorebridgeCommissionsForDealTracker(agencyCarrierId, fileId)
-        console.log('[Deal Tracker] Syncing commission_tracker for Corebridge...')
-        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processCorebridgeCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processCorebridgeCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       }
     } else if (isAflac) {
       if (fileType === 'Policy') {
@@ -161,7 +169,11 @@ export async function processDealTrackerAfterUpload(
         previewEntries = await processAflacFilesForDealTracker(agencyCarrierId, fileId)
       } else if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing AFLAC commission file for deal tracker...')
-        previewEntries = await processAflacCommissionsForDealTracker(agencyCarrierId, fileId)
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processAflacCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processAflacCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       }
     } else if (isSentinel) {
       if (fileType === 'Policy') {
@@ -169,8 +181,11 @@ export async function processDealTrackerAfterUpload(
         previewEntries = await processSentinelFilesForDealTracker(agencyCarrierId, fileId)
       } else if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing Sentinel commission file for deal tracker...')
-        previewEntries = await processSentinelCommissionsForDealTracker(agencyCarrierId, fileId)
-        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processSentinelCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processSentinelCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       }
     } else if (isAhl) {
       if (fileType === 'Policy') {
@@ -178,8 +193,11 @@ export async function processDealTrackerAfterUpload(
         previewEntries = await processAhlFilesForDealTracker(agencyCarrierId, fileId)
       } else if (fileType === 'Commission') {
         console.log('[Deal Tracker] Processing AHL commission file for deal tracker...')
-        previewEntries = await processAhlCommissionsForDealTracker(agencyCarrierId, fileId)
-        await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode)
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processAhlCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processAhlCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       }
     }
 
@@ -205,6 +223,11 @@ export async function processDealTrackerAfterUpload(
 export interface SaveDealTrackerAfterConfirmationOptions {
   pendingRows?: PendingRowsPayload
   onProgress?: (message: string) => void
+  /**
+   * Persist deal_tracker only (used when user clicks Next before the Commission Report step).
+   * Skips inserting deferred commission/policy rows and skips commission_tracker sync — those run on full confirm after Commission Report Save.
+   */
+  dealTrackerOnly?: boolean
 }
 
 async function syncEditedEntriesToCommissionTracker(
@@ -216,22 +239,18 @@ async function syncEditedEntriesToCommissionTracker(
     (e) => e.source_commission_table && e.source_commission_id,
   )
   if (!editable.length) return
-  onProgress?.('Syncing edited commission values to commission tracker...')
+  onProgress?.('Syncing edited commission metadata to commission tracker...')
   for (const entry of editable) {
     const sourceTable = String(entry.source_commission_table)
     const sourceRowId = String(entry.source_commission_id)
-    const dealValue = typeof entry.deal_value === 'number' ? entry.deal_value : Number(entry.deal_value ?? 0)
-    const chargeBack =
-      typeof entry.charge_back === 'number'
-        ? entry.charge_back
-        : (entry.charge_back == null ? null : Number(entry.charge_back))
+    // Keep financial transaction amounts in commission_tracker sourced from
+    // carrier commission tables only. deal_tracker values are policy-level
+    // aggregates and can otherwise duplicate advance on chargeback rows.
     const payload: Record<string, unknown> = {
       policy_number: entry.policy_number,
       carrier: entry.carrier,
       name: entry.name ?? null,
       sales_agent: entry.sales_agent ?? null,
-      advance_amount: !Number.isNaN(dealValue) && dealValue > 0 ? dealValue : null,
-      charge_back_amount: chargeBack,
       updated_at: now,
     }
     if (entry.commission_date && String(entry.commission_date).trim() !== '') {
@@ -270,41 +289,105 @@ export async function saveDealTrackerAfterConfirmation(
       }
     }
 
+    if (options?.dealTrackerOnly) {
+      try {
+        const result = await saveDealTrackerEntries(entries, { onProgress })
+        return {
+          success: true,
+          ...result,
+        }
+      } catch (error: any) {
+        console.error('Error saving deal tracker entries (dealTrackerOnly):', error)
+        return {
+          success: false,
+          inserted: 0,
+          updated: 0,
+          failed: entries.length,
+          error: error.message || 'Failed to save deal tracker entries',
+        }
+      }
+    }
+
     let entriesToSave = entries
     if (options?.pendingRows?.rows?.length) {
-      onProgress?.('Writing policy/commission rows to database...')
-      const { targetTable, rows } = options.pendingRows
-      const BATCH_SIZE = 500
-      const now = new Date().toISOString()
-      const policyNumberToId = new Map<string, string>()
-      for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-        const chunk = rows.slice(i, i + BATCH_SIZE).map((r: any) => {
-          const row = { ...r, updated_at: now }
-          delete (row as any).id
-          delete (row as any).created_at
-          return row
-        })
-        const { data: inserted, error } = await supabase
+      const { targetTable, rows, fileId: pendingFileId } = options.pendingRows
+      const agencyCarrierId = entries[0]?.agency_carrier_id
+      const isCommissionTable = targetTable.endsWith('_commissions')
+
+      // HARD GUARD:
+      // Commission rows must be written only by Commission Report Save.
+      // Deal tracker confirm must never insert commission table rows.
+      if (isCommissionTable) {
+        if (!agencyCarrierId || !pendingFileId) {
+          throw new Error('Missing commission context while linking deal tracker to saved commission rows.')
+        }
+        onProgress?.('Linking deal tracker to saved commission rows...')
+        const { data: existingRows, error: linkErr } = await supabase
           .from(targetTable)
-          .upsert(chunk, { onConflict: 'agency_carrier_id,policy_number', ignoreDuplicates: false })
           .select('id, policy_number')
-        if (error) throw new Error(`Failed to write ${targetTable}: ${error.message}`)
-        if (inserted) inserted.forEach((row: { id: string; policy_number: string }) => policyNumberToId.set(row.policy_number, row.id))
-      }
-      entriesToSave = entries.map(entry => {
-        const id = policyNumberToId.get(entry.policy_number)
-        if (!id) return entry
-        const out = { ...entry }
-        if (targetTable.endsWith('_policies')) (out as any).source_policy_id = id
-        if (targetTable.endsWith('_commissions')) {
+          .eq('agency_carrier_id', agencyCarrierId)
+          .eq('file_id', pendingFileId)
+          .order('row_number', { ascending: true })
+        if (linkErr) throw new Error(`Failed to load ${targetTable} for linking: ${linkErr.message}`)
+        if (!existingRows || existingRows.length === 0) {
+          throw new Error(
+            'Commission rows are not saved yet. Please save the Commission Report first, then confirm deal tracker.'
+          )
+        }
+        const policyNumberToId = new Map<string, string>()
+        for (const r of existingRows) {
+          const pn = String((r as { policy_number?: string }).policy_number ?? '')
+          if (pn && !policyNumberToId.has(pn)) {
+            policyNumberToId.set(pn, String((r as { id: string }).id))
+          }
+        }
+        entriesToSave = entries.map(entry => {
+          const id = policyNumberToId.get(entry.policy_number)
+          if (!id) return entry
+          const out = { ...entry }
           ;(out as any).source_commission_id = id
           ;(out as any).source_commission_table = targetTable
+          return out
+        })
+      } else {
+        onProgress?.('Writing policy/commission rows to database...')
+        const BATCH_SIZE = 500
+        const now = new Date().toISOString()
+        const policyNumberToId = new Map<string, string>()
+        for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+          const chunk = rows.slice(i, i + BATCH_SIZE).map((r: any) => {
+            const row = { ...r, updated_at: now }
+            delete (row as any).id
+            delete (row as any).created_at
+            return row
+          })
+          const { data: inserted, error } = await supabase
+            .from(targetTable)
+            .upsert(chunk, { onConflict: 'agency_carrier_id,policy_number', ignoreDuplicates: false })
+            .select('id, policy_number')
+          if (error) throw new Error(`Failed to write ${targetTable}: ${error.message}`)
+          if (inserted) inserted.forEach((row: { id: string; policy_number: string }) => policyNumberToId.set(row.policy_number, row.id))
         }
-        return out
-      })
+        entriesToSave = entries.map(entry => {
+          const id = policyNumberToId.get(entry.policy_number)
+          if (!id) return entry
+          const out = { ...entry }
+          if (targetTable.endsWith('_policies')) (out as any).source_policy_id = id
+          if (targetTable.endsWith('_commissions')) {
+            ;(out as any).source_commission_id = id
+            ;(out as any).source_commission_table = targetTable
+          }
+          return out
+        })
+      }
     }
     const result = await saveDealTrackerEntries(entriesToSave, { onProgress })
-    await syncEditedEntriesToCommissionTracker(entriesToSave, onProgress)
+    const pendingTarget = options?.pendingRows?.targetTable ?? ''
+    const isCommissionPendingFlow = pendingTarget.endsWith('_commissions')
+    // Commission uploads: commission_tracker must be written only by Commission Report Save.
+    if (!isCommissionPendingFlow) {
+      await syncEditedEntriesToCommissionTracker(entriesToSave, onProgress)
+    }
     return {
       success: true,
       ...result,

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import ReactFlow, {
   Node,
   Edge,
@@ -423,8 +423,13 @@ type LastUploadContext = {
 
 export function UploadTreeFlow() {
   const dealTracker = useDealTrackerUpload()
+  /** AMAM deferred commission: in-memory rows until Commission Report Save (passed into dialog). */
+  const deferredCommissionRowsRef = useRef<Record<string, unknown>[] | null>(null)
   const commissionReport = useCommissionReportUpload({
-    onAfterSave: () => dealTracker.confirmAndSave(),
+    onAfterSave: async () => {
+      deferredCommissionRowsRef.current = null
+      await dealTracker.confirmAndSave()
+    },
   })
   const [lastUploadContext, setLastUploadContext] = useState<LastUploadContext | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState([])
@@ -445,7 +450,7 @@ export function UploadTreeFlow() {
   >(async () => {
     const ctx = commissionReport.reportContext
     if (!ctx) return
-    await dealTracker.confirmAndSave()
+    await dealTracker.confirmDealTrackerOnly()
     await rollbackCommissionFileSession(ctx)
     commissionReport.closeAfterDealTrackerOnly()
   }, [commissionReport, dealTracker])
@@ -578,7 +583,13 @@ export function UploadTreeFlow() {
                   if (result.success) {
                     await loadDailyStatuses() // Refetch – carrier and Policy/Commission nodes update (uses local day range)
                     const count = (result as { count?: number }).count ?? 0
-                    
+                    const pendingPayload =
+                      'pendingRows' in result && result.pendingRows
+                        ? result.pendingRows
+                        : undefined
+                    deferredCommissionRowsRef.current =
+                      pendingPayload?.rows?.length ? pendingPayload.rows : null
+
                     // Process deal tracker for supported carriers
                     console.log('[UploadTreeFlow] Upload successful, checking deal tracker processing...', {
                       carrierCode: carrier.code,
@@ -603,7 +614,8 @@ export function UploadTreeFlow() {
                         ac.id,
                         result.fileId,
                         upperCarrierCode,
-                        fileType
+                        fileType,
+                        pendingPayload
                       )
                       console.log('[UploadTreeFlow] Deal tracker processing result:', dealTrackerResult)
                     } else {
@@ -961,14 +973,22 @@ export function UploadTreeFlow() {
           ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL', 'SENTINEL'].includes(
             (lastUploadContext?.carrierCode || '').toUpperCase()
           )
-            ? () => {
+            ? async (entries) => {
+                await dealTracker.confirmDealTrackerOnly(entries)
                 dealTracker.setShowVerification(false)
-                if (lastUploadContext)
+                if (lastUploadContext) {
                   commissionReport.openCommissionReport(
                     lastUploadContext.agencyCarrierId,
                     lastUploadContext.fileId,
-                    lastUploadContext.carrierCode
+                    lastUploadContext.carrierCode,
+                    {
+                      pendingRows:
+                        deferredCommissionRowsRef.current && deferredCommissionRowsRef.current.length > 0
+                          ? deferredCommissionRowsRef.current
+                          : undefined,
+                    }
                   )
+                }
               }
             : undefined
         }

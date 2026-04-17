@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, type ReactNode } from 'react'
+import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { TreeNode } from './Tree'
 import { Building2, FileText, Upload, Loader2, RefreshCw, CloudUpload, CheckCircle, AlertCircle, ChevronRight, ChevronDown, Calendar } from 'lucide-react'
@@ -17,8 +17,12 @@ import { cn } from '@/lib/utils'
 
 export function UploadTree() {
   const dealTracker = useDealTrackerUpload()
+  const deferredCommissionRowsRef = useRef<Record<string, unknown>[] | null>(null)
   const commissionReport = useCommissionReportUpload({
-    onAfterSave: () => dealTracker.confirmAndSave(),
+    onAfterSave: async () => {
+      deferredCommissionRowsRef.current = null
+      await dealTracker.confirmAndSave()
+    },
   })
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([])
   const [loading, setLoading] = useState(true)
@@ -184,6 +188,11 @@ export function UploadTree() {
       })
 
       if (result.success) {
+        const pendingPayload =
+          'pendingRows' in result && result.pendingRows ? result.pendingRows : undefined
+        deferredCommissionRowsRef.current =
+          pendingPayload?.rows?.length ? pendingPayload.rows : null
+
         // Process deal tracker for supported carriers
         console.log('[UploadTree] Upload successful, checking deal tracker processing...', {
           carrierCode,
@@ -202,7 +211,13 @@ export function UploadTree() {
             carrierCode,
             fileType,
           })
-          await dealTracker.processAfterUpload(agencyCarrierId, result.fileId, carrierCode, fileType)
+          await dealTracker.processAfterUpload(
+            agencyCarrierId,
+            result.fileId,
+            carrierCode,
+            fileType,
+            pendingPayload
+          )
         }
         
         await loadDailyStatuses() // Refresh – carrier shows green only when both Policy and Commission uploaded
@@ -323,13 +338,20 @@ export function UploadTree() {
           ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL', 'SENTINEL'].includes(
             (lastUploadContext?.carrierCode || '').toUpperCase()
           )
-            ? () => {
+            ? async (entries) => {
+                await dealTracker.confirmDealTrackerOnly(entries)
                 dealTracker.setShowVerification(false)
                 if (lastUploadContext) {
                   commissionReport.openCommissionReport(
                     lastUploadContext.agencyCarrierId,
                     lastUploadContext.fileId,
-                    lastUploadContext.carrierCode
+                    lastUploadContext.carrierCode,
+                    {
+                      pendingRows:
+                        deferredCommissionRowsRef.current && deferredCommissionRowsRef.current.length > 0
+                          ? deferredCommissionRowsRef.current
+                          : undefined,
+                    }
                   )
                 }
               }

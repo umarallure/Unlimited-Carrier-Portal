@@ -68,15 +68,28 @@ function normalizePolicyNumber(value: string | null | undefined): string {
 function normalizeCommissionDate(value: string | null | undefined): string {
   const str = String(value ?? '').trim()
   if (!str) return ''
-  const parsed = new Date(str.split('to')[0].trim().replace(/\./g, '-').replace(/\//g, '-'))
-  if (Number.isNaN(parsed.getTime())) return str
-  return parsed.toISOString().slice(0, 10)
+  const raw = str.split('to')[0].trim()
+  const ymd = raw.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (ymd) return ymd[1]
+  const us = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\b|[\sT].*)?$/)
+  if (us) {
+    const mm = String(parseInt(us[1], 10)).padStart(2, '0')
+    const dd = String(parseInt(us[2], 10)).padStart(2, '0')
+    return `${us[3]}-${mm}-${dd}`
+  }
+  return raw
 }
 
 function netCommissionAmount(row: Pick<CommissionRow, 'advance_amount' | 'charge_back_amount'>): number {
-  const adv = typeof row.advance_amount === 'number' ? row.advance_amount : Number(row.advance_amount ?? 0)
+  const adv =
+    typeof row.advance_amount === 'number'
+      ? row.advance_amount
+      : Number.parseFloat(String(row.advance_amount ?? '0').replace(/,/g, ''))
   if (!Number.isNaN(adv) && adv !== 0) return Math.round(adv * 100) / 100
-  const cb = typeof row.charge_back_amount === 'number' ? row.charge_back_amount : Number(row.charge_back_amount ?? 0)
+  const cb =
+    typeof row.charge_back_amount === 'number'
+      ? row.charge_back_amount
+      : Number.parseFloat(String(row.charge_back_amount ?? '0').replace(/,/g, ''))
   if (!Number.isNaN(cb) && cb !== 0) return Math.round(cb * 100) / 100
   return 0
 }
@@ -284,8 +297,16 @@ export default function CommissionReportPage() {
     const str = String(value).trim()
     if (!str) return null
     const rangePart = str.split('to')[0].trim()
-    const parsed = new Date(rangePart.replace(/\./g, '-').replace(/\//g, '-'))
-    return isNaN(parsed.getTime()) ? null : parsed
+    const ymd = rangePart.match(/^(\d{4})-(\d{2})-(\d{2})/)
+    if (ymd) {
+      return new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]))
+    }
+    const us = rangePart.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\b|[\sT].*)?$/)
+    if (us) {
+      return new Date(Number(us[3]), Number(us[1]) - 1, Number(us[2]))
+    }
+    const parsed = new Date(rangePart.includes('T') ? rangePart : `${rangePart}T12:00:00`)
+    return Number.isNaN(parsed.getTime()) ? null : parsed
   }
 
   const filtered = rows.filter(row => {

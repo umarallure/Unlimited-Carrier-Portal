@@ -115,6 +115,15 @@ export function isInvalidGhlStageForSave(v: unknown): boolean {
 }
 
 /**
+ * resolveGhlStage can return null when carrier_status is missing. Preview rows must still pass
+ * isInvalidGhlStageForSave when the user saves after the Commission Report step.
+ */
+export function ensureGhlStageForPreviewSave(stage: string | null | undefined): string {
+  if (!isInvalidGhlStageForSave(stage)) return String(stage).trim()
+  return 'Issued - Pending First Draft'
+}
+
+/**
  * Compare old and new row and return field names whose values changed (for highlighting in verification dialog).
  */
 export function getChangedFields(
@@ -1300,11 +1309,14 @@ export async function fetchDailyDealFlowInfo(
  */
 export async function processAetnaCommissionsForDealTracker(
   agencyCarrierId: string,
-  fileId: string
+  fileId: string,
+  /** In-memory rows when upload deferred commission insert until Commission Report Save */
+  commissionsOverride?: ReadonlyArray<Record<string, unknown>>
 ): Promise<DealTrackerPreviewEntry[]> {
   console.log('[Deal Tracker] processAetnaCommissionsForDealTracker called', {
     agencyCarrierId,
     fileId,
+    fromMemory: !!(commissionsOverride && commissionsOverride.length > 0),
   })
 
   // Get carrier information
@@ -1332,22 +1344,28 @@ export async function processAetnaCommissionsForDealTracker(
   const carrierCode = carrier.code || 'AETNA'
   const carrierId = carrier.id
 
-  // Fetch all commissions from the uploaded file
-  console.log('[Deal Tracker] Fetching commissions from aetna_commissions...')
-  const { data: commissions, error: commissionsError } = await supabase
-    .from('aetna_commissions')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .eq('file_id', fileId)
+  let commissions: any[]
+  if (commissionsOverride && commissionsOverride.length > 0) {
+    console.log('[Deal Tracker] Using in-memory Aetna commission rows (deferred DB write)...')
+    commissions = commissionsOverride as any[]
+  } else {
+    console.log('[Deal Tracker] Fetching commissions from aetna_commissions...')
+    const { data: fetched, error: commissionsError } = await supabase
+      .from('aetna_commissions')
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .eq('file_id', fileId)
 
-  if (commissionsError) {
-    console.error('[Deal Tracker] Error fetching commissions:', commissionsError)
-    throw new Error(`Failed to fetch commissions: ${commissionsError.message}`)
-  }
+    if (commissionsError) {
+      console.error('[Deal Tracker] Error fetching commissions:', commissionsError)
+      throw new Error(`Failed to fetch commissions: ${commissionsError.message}`)
+    }
 
-  if (!commissions || commissions.length === 0) {
-    console.warn('[Deal Tracker] No commissions found for file_id:', fileId)
-    return []
+    if (!fetched || fetched.length === 0) {
+      console.warn('[Deal Tracker] No commissions found for file_id:', fileId)
+      return []
+    }
+    commissions = fetched
   }
 
   console.log('[Deal Tracker] Commissions found:', commissions.length)
@@ -1554,7 +1572,7 @@ export async function processAetnaCommissionsForDealTracker(
         commission_type: commission.commissiontype || existing.commission_type,
         effective_date: mergedEffective,
         source_commission_table: 'aetna_commissions',
-        source_commission_id: commission.id,
+        source_commission_id: commission.id != null ? commission.id : null,
         isNew: false,
         isUpdated: true,
       }
@@ -1645,7 +1663,7 @@ export async function processAetnaCommissionsForDealTracker(
           source_policy_table: 'aetna_policies',
           source_policy_id: policy.id,
           source_commission_table: 'aetna_commissions',
-          source_commission_id: commission.id,
+          source_commission_id: commission.id != null ? commission.id : null,
           isNew: true,
           isUpdated: false,
         }
@@ -2667,7 +2685,7 @@ export async function processAmamCommissionsForDealTracker(
 
       const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
-        ghl_stage: mappedGhlStage ?? existing.ghl_stage,
+        ghl_stage: ensureGhlStageForPreviewSave(mappedGhlStage ?? existing.ghl_stage),
         carrier_status: existing.carrier_status ?? null,
         policy_status: forceWithdrawnStatus
           ? 'Withdrawn'
@@ -2751,7 +2769,7 @@ export async function processAmamCommissionsForDealTracker(
       name: insuredName || null,
       tasks: null,
       ghl_name: ddfInfo?.lead_name ?? null,
-      ghl_stage: mappedGhlStage,
+      ghl_stage: ensureGhlStageForPreviewSave(mappedGhlStage),
       policy_status: forceWithdrawnStatus
         ? 'Withdrawn'
         : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusForNew),
@@ -2993,7 +3011,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
           : null
       const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
-        ghl_stage: mappedGhlStage ?? existing.ghl_stage,
+        ghl_stage: ensureGhlStageForPreviewSave(mappedGhlStage ?? existing.ghl_stage),
         carrier_status: existing.carrier_status ?? null,
         policy_status: forceWithdrawnStatus
           ? 'Withdrawn'
@@ -3069,7 +3087,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       name: insuredName || null,
       tasks: null,
       ghl_name: ddfInfo?.lead_name ?? null,
-      ghl_stage: mappedGhlNew,
+      ghl_stage: ensureGhlStageForPreviewSave(mappedGhlNew),
       policy_status: forceWithdrawnStatus
         ? 'Withdrawn'
         : normalizePolicyStatusForMappedGhlStage(mappedGhlNew, policyStatusForNew),
@@ -3232,7 +3250,10 @@ export async function saveDealTrackerEntries(
   // Do NOT blindly recompute `status` on every save.
   // Business rule: `status` should only change when commissions change financials (deal_value / charge_back).
   // If a policy-only upload runs (no commission source) and financials are unchanged, preserve existing DB status.
-  const existingFinanceMap = new Map<string, { deal_value: number | null; charge_back: number | null; status: string | null }>()
+  const existingFinanceMap = new Map<
+    string,
+    { deal_value: number | null; cc_value: number | null; charge_back: number | null; status: string | null }
+  >()
   const byAgency = new Map<string, string[]>()
   for (const e of cleanEntries) {
     if (!e.agency_carrier_id || !e.policy_number) continue
@@ -3249,16 +3270,18 @@ export async function saveDealTrackerEntries(
       const nums = uniq.slice(i, i + CHUNK)
       const { data: rows } = await supabase
         .from('deal_tracker')
-        .select('agency_carrier_id, policy_number, deal_value, charge_back, status')
+        .select('agency_carrier_id, policy_number, deal_value, cc_value, charge_back, status')
         .eq('agency_carrier_id', agencyCarrierId)
         .in('policy_number', nums)
       if (rows) {
         for (const row of rows as any[]) {
           const key = `${row.agency_carrier_id}\0${row.policy_number}`
           const dv = row.deal_value != null ? (typeof row.deal_value === 'number' ? row.deal_value : parseFloat(String(row.deal_value))) : null
+          const ccDb = row.cc_value != null ? (typeof row.cc_value === 'number' ? row.cc_value : parseFloat(String(row.cc_value))) : null
           const cb = row.charge_back != null ? (typeof row.charge_back === 'number' ? row.charge_back : parseFloat(String(row.charge_back))) : null
           existingFinanceMap.set(key, {
             deal_value: Number.isFinite(dv as number) ? (dv as number) : null,
+            cc_value: Number.isFinite(ccDb as number) ? (ccDb as number) : null,
             charge_back: Number.isFinite(cb as number) ? (cb as number) : null,
             status: row.status ?? null,
           })
@@ -3280,24 +3303,46 @@ export async function saveDealTrackerEntries(
     const key = `${e.agency_carrier_id}\0${e.policy_number}`
     const prev = existingFinanceMap.get(key)
 
-    const dv = e.deal_value != null ? (typeof e.deal_value === 'number' ? e.deal_value : parseFloat(String(e.deal_value))) : null
+    let dv = e.deal_value != null ? (typeof e.deal_value === 'number' ? e.deal_value : parseFloat(String(e.deal_value))) : null
+    let ccv =
+      e.cc_value != null ? (typeof e.cc_value === 'number' ? e.cc_value : parseFloat(String(e.cc_value))) : null
     const cb = e.charge_back != null ? (typeof e.charge_back === 'number' ? e.charge_back : parseFloat(String(e.charge_back))) : null
     const isCommissionFlow = !!(e.source_commission_table || e.source_commission_id)
 
-    // Rule-based status may only change when commission/financials change. If this save has no
-    // commission source (policy-only upload) and the row already exists, always preserve existing status.
+    // Commission save: if deal_tracker already has a non-zero advance and the incoming batch suggests a different deal_value, keep DB deal_value + cc_value; carrier line amounts remain in *_commissions / commission_tracker.
+    if (isCommissionFlow && prev) {
+      const pDv = prev.deal_value
+      const prevNonZero = pDv != null && Number.isFinite(pDv) && Math.abs(pDv) > 0
+      if (prevNonZero && !sameNum(pDv, dv)) {
+        dv = prev.deal_value
+        if (prev.cc_value != null && Number.isFinite(prev.cc_value)) {
+          ccv = prev.cc_value
+        } else if (dv != null && Number.isFinite(dv)) {
+          ccv = dv / 2
+        }
+      }
+    }
+
+    // Policy-only uploads must never overwrite financials already on deal_tracker.
+    // Keep existing deal_value/cc_value/charge_back and status for non-commission saves.
     if (!isCommissionFlow && prev) {
-      return { ...e, status: prev.status }
+      return {
+        ...e,
+        deal_value: prev.deal_value,
+        cc_value: prev.cc_value,
+        charge_back: prev.charge_back,
+        status: prev.status,
+      }
     }
 
     const financialsChanged =
       prev == null ? true : (!sameNum(prev.deal_value, dv) || !sameNum(prev.charge_back, cb))
     if (isCommissionFlow && !financialsChanged && prev) {
-      return { ...e, status: prev.status }
+      return { ...e, deal_value: dv, cc_value: ccv, status: prev.status }
     }
 
     const status = statusFromDealValueAndChargeback(dv, cb)
-    return { ...e, status }
+    return { ...e, deal_value: dv, cc_value: ccv, status }
   })
 
   // Preserve effective_date from DB when incoming is null/empty (e.g. DDF-sourced value should not be overwritten on updates)

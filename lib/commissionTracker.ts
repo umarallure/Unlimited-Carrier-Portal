@@ -20,15 +20,27 @@ function normalizeDate(value: any): string | null {
   if (!value) return null
   const str = String(value).trim()
   if (!str) return null
-  // Support values like '2025-12-07', '2025/12/07', or '2025-12-07 to 2026-01-20'
+  // Calendar-safe normalization (no timezone conversion).
+  // Prefer direct YYYY-MM-DD token if present.
   const rangePart = str.split('to')[0].trim()
-  const parsed = new Date(
-    rangePart
-      .replace(/\./g, '-')
-      .replace(/\//g, '-')
-  )
-  if (isNaN(parsed.getTime())) return null
-  return parsed.toISOString().slice(0, 10)
+  const ymd = rangePart.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (ymd) return ymd[1]
+
+  // Common US format from carrier rows/dialog: MM/DD/YYYY
+  const us = rangePart.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\b|[\sT].*)?$/)
+  if (us) {
+    const mm = String(parseInt(us[1], 10)).padStart(2, '0')
+    const dd = String(parseInt(us[2], 10)).padStart(2, '0')
+    return `${us[3]}-${mm}-${dd}`
+  }
+
+  // Last fallback: parse date-like strings, but keep local calendar components.
+  const parsed = new Date(rangePart.includes('T') ? rangePart : `${rangePart}T12:00:00`)
+  if (Number.isNaN(parsed.getTime())) return null
+  const y = parsed.getFullYear()
+  const m = String(parsed.getMonth() + 1).padStart(2, '0')
+  const d = String(parsed.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
 }
 
 function toNumberOrNull(v: any): number | null {
@@ -83,7 +95,7 @@ function dateRawForSourceRow(sourceTable: string, row: any): unknown {
     )
   }
 
-  if (sourceTable === 'aetna_commissions' || sourceTable === 'ahl_commissions') {
+  if (sourceTable === 'aetna_commissions' || sourceTable === 'aflac_commissions' || sourceTable === 'ahl_commissions') {
     return (
       row['commissionpaiddate'] ??
       row['statement_date'] ??
@@ -99,7 +111,7 @@ function dateRawForSourceRow(sourceTable: string, row: any): unknown {
     )
   }
 
-  if (sourceTable === 'corebridge_commissions') {
+  if (sourceTable === 'corebridge_commissions' || sourceTable === 'sentinel_commissions') {
     return (
       row['statement_date'] ??
       row['Date'] ??
@@ -124,7 +136,12 @@ function dateRawForSourceRow(sourceTable: string, row: any): unknown {
  * normalized table stay consistent.
  */
 function buildCommissionRowsFromSource(
-  sourceTable: 'amam_commissions' | 'aetna_commissions' | 'ahl_commissions' | 'moh_commissions',
+  sourceTable:
+    | 'amam_commissions'
+    | 'aetna_commissions'
+    | 'aflac_commissions'
+    | 'ahl_commissions'
+    | 'moh_commissions',
   rawRows: any[],
   agencyCarrierId: string,
   carrierId: string | null,
@@ -179,7 +196,11 @@ function buildCommissionRowsFromSource(
       row['Advance'] ??
       row['advance'] ??
       row['ADVANCE'] ??
-      ((sourceTable === 'aetna_commissions' || sourceTable === 'ahl_commissions') ? row['commissionamount'] : null) ??
+      ((
+        sourceTable === 'aetna_commissions' ||
+        sourceTable === 'aflac_commissions' ||
+        sourceTable === 'ahl_commissions'
+      ) ? row['commissionamount'] : null) ??
       (sourceTable === 'moh_commissions' ? row['comm_amt'] : null) ??
       null
 
@@ -218,16 +239,26 @@ function buildCommissionRowsFromSource(
 export async function syncCommissionTrackerForAgencyCarrier(
   agencyCarrierId: string,
   carrierCode: string,
+  options?: {
+    /** Limit normalization to a single uploaded file. */
+    fileId?: string | null
+    /**
+     * When syncing a specific file from Commission Report Save, replace tracker rows
+     * for the same policies (same source table) so only the dialog-selected date remains.
+     */
+    replacePoliciesFromFile?: boolean
+  },
 ): Promise<void> {
   const upperCode = (carrierCode || '').toUpperCase()
   const isAetna = upperCode === 'AETNA'
   const isAmam = upperCode === 'AMAM'
+  const isAflac = upperCode === 'AFLAC'
   const isCorebridge = upperCode === 'COREBRIDGE'
   const isAhl = upperCode === 'AHL'
   const isMoh = upperCode === 'MOH'
+  const isSentinel = upperCode === 'SENTINEL'
 
-  if (!isAetna && !isAmam && !isCorebridge && !isAhl && !isMoh) {
-    // For now we only normalize AMAM + AETNA + AHL + MOH + COREBRIDGE into commission_tracker
+  if (!isAetna && !isAmam && !isAflac && !isCorebridge && !isAhl && !isMoh && !isSentinel) {
     return
   }
 
@@ -258,10 +289,14 @@ export async function syncCommissionTrackerForAgencyCarrier(
     // corebridge_commissions is a single commission/chargeback
     // transaction, so we normalize into commission_tracker with one
     // row per source row and key off (source_table, source_row_id).
-    const { data: coreRows, error: coreError } = await supabase
+    let coreQuery = supabase
       .from('corebridge_commissions')
       .select('id, policy_number, statement_date, commission_amount, comm_type, file_id')
       .eq('agency_carrier_id', agencyCarrierId)
+    if (options?.fileId) {
+      coreQuery = coreQuery.eq('file_id', options.fileId)
+    }
+    const { data: coreRows, error: coreError } = await coreQuery
 
     if (coreError || !coreRows || coreRows.length === 0) {
       if (coreError) {
@@ -319,31 +354,30 @@ export async function syncCommissionTrackerForAgencyCarrier(
 
     if (!trackerRows.length) return
 
+    let wipeQuery = supabase
+      .from('commission_tracker')
+      .delete()
+      .eq('agency_carrier_id', agencyCarrierId)
+      .eq('source_table', 'corebridge_commissions')
+    if (options?.replacePoliciesFromFile) {
+      const policies = [...new Set(trackerRows.map((r) => r.policy_number).filter(Boolean))]
+      if (policies.length > 0) {
+        wipeQuery = wipeQuery.in('policy_number', policies)
+      }
+    }
+    const { error: wipeError } = await wipeQuery
+    if (wipeError) {
+      console.error(
+        '[CommissionTracker] Failed to wipe existing Corebridge commission_tracker rows before insert:',
+        wipeError.message,
+      )
+      return
+    }
+
     const BATCH_SIZE = 500
     for (let i = 0; i < trackerRows.length; i += BATCH_SIZE) {
       const batch = trackerRows.slice(i, i + BATCH_SIZE)
-      const sourceRowIds = batch
-        .map((r) => r.source_row_id)
-        .filter((id): id is string => !!id)
-
-      if (sourceRowIds.length) {
-        const { error: deleteError } = await supabase
-          .from('commission_tracker')
-          .delete()
-          .eq('source_table', 'corebridge_commissions')
-          .in('source_row_id', sourceRowIds)
-
-        if (deleteError) {
-          console.error(
-            '[CommissionTracker] Failed to delete existing Corebridge commission_tracker rows before insert:',
-            deleteError.message,
-          )
-          break
-        }
-      }
-
       const { error } = await supabase.from('commission_tracker').insert(batch)
-
       if (error) {
         console.error(
           '[CommissionTracker] Failed to insert Corebridge commission_tracker batch:',
@@ -356,15 +390,122 @@ export async function syncCommissionTrackerForAgencyCarrier(
     return
   }
 
-  const sourceTable = isAetna ? 'aetna_commissions' : isAhl ? 'ahl_commissions' : isMoh ? 'moh_commissions' : 'amam_commissions'
+  if (isSentinel) {
+    let sentinelQuery = supabase
+      .from('sentinel_commissions')
+      .select('id, policy_number, statement_date, payable_commission, commission_rate_pct, client_name, writing_agent_name, file_id')
+      .eq('agency_carrier_id', agencyCarrierId)
+    if (options?.fileId) {
+      sentinelQuery = sentinelQuery.eq('file_id', options.fileId)
+    }
+    const { data: sentinelRows, error: sentinelError } = await sentinelQuery
 
-  // Load all commissions for this agency_carrier (bounded)
-  const { data: rawRows, error: rawError } = await supabase
+    if (sentinelError || !sentinelRows || sentinelRows.length === 0) {
+      if (sentinelError) {
+        console.warn(
+          '[CommissionTracker] Failed to fetch sentinel_commissions rows for',
+          agencyCarrierId,
+          sentinelError.message,
+        )
+      }
+      return
+    }
+
+    const trackerRows: CommissionTrackerRow[] = []
+    for (const r of sentinelRows as any[]) {
+      if (!r.policy_number) continue
+      const normalizedDate = normalizeDate(r.statement_date)
+      if (!normalizedDate) continue
+
+      const amtRaw =
+        r.payable_commission != null
+          ? (typeof r.payable_commission === 'number'
+              ? r.payable_commission
+              : parseFloat(String(r.payable_commission).replace(/,/g, '')))
+          : 0
+      if (Number.isNaN(amtRaw)) continue
+
+      let advanceAmount: number | null = null
+      let chargeBackAmount: number | null = null
+      if (amtRaw < 0) chargeBackAmount = amtRaw
+      else if (amtRaw > 0) advanceAmount = amtRaw
+
+      trackerRows.push({
+        agency_carrier_id: agencyCarrierId,
+        carrier_id: carrierId,
+        carrier: carrierName,
+        policy_number: String(r.policy_number),
+        name: r.client_name ? String(r.client_name) : null,
+        sales_agent: r.writing_agent_name ? String(r.writing_agent_name) : null,
+        date: normalizedDate,
+        commission_rate: r.commission_rate_pct != null ? parseFloat(String(r.commission_rate_pct)) : null,
+        advance_amount: advanceAmount,
+        charge_back_amount: chargeBackAmount,
+        source_table: 'sentinel_commissions',
+        source_row_id: r.id ? String(r.id) : null,
+        source_file_id: (r.file_id as string | null) ?? null,
+      })
+    }
+
+    if (!trackerRows.length) return
+
+    let sentinelWipeQuery = supabase
+      .from('commission_tracker')
+      .delete()
+      .eq('agency_carrier_id', agencyCarrierId)
+      .eq('source_table', 'sentinel_commissions')
+    if (options?.replacePoliciesFromFile) {
+      const policies = [...new Set(trackerRows.map((r) => r.policy_number).filter(Boolean))]
+      if (policies.length > 0) {
+        sentinelWipeQuery = sentinelWipeQuery.in('policy_number', policies)
+      }
+    }
+    const { error: sentinelWipeError } = await sentinelWipeQuery
+    if (sentinelWipeError) {
+      console.error(
+        '[CommissionTracker] Failed to wipe existing Sentinel commission_tracker rows before insert:',
+        sentinelWipeError.message,
+      )
+      return
+    }
+
+    const BATCH_SIZE = 500
+    for (let i = 0; i < trackerRows.length; i += BATCH_SIZE) {
+      const batch = trackerRows.slice(i, i + BATCH_SIZE)
+      const { error } = await supabase.from('commission_tracker').insert(batch)
+      if (error) {
+        console.error(
+          '[CommissionTracker] Failed to insert Sentinel commission_tracker batch:',
+          error.message,
+        )
+        break
+      }
+    }
+
+    return
+  }
+
+  const sourceTable = isAetna
+    ? 'aetna_commissions'
+    : isAflac
+      ? 'aflac_commissions'
+      : isAhl
+        ? 'ahl_commissions'
+        : isMoh
+          ? 'moh_commissions'
+          : 'amam_commissions'
+
+  // Load commissions for this agency_carrier (optionally only the just-saved file).
+  let sourceQuery = supabase
     .from(sourceTable)
     .select('*')
     .eq('agency_carrier_id', agencyCarrierId)
     .order('created_at', { ascending: false })
     .limit(5000)
+  if (options?.fileId) {
+    sourceQuery = sourceQuery.eq('file_id', options.fileId)
+  }
+  const { data: rawRows, error: rawError } = await sourceQuery
 
   if (rawError || !rawRows || rawRows.length === 0) {
     if (rawError) {
@@ -392,32 +533,30 @@ export async function syncCommissionTrackerForAgencyCarrier(
 
   if (!rows.length) return
 
-  // Idempotent batches: delete existing rows for these source ids, then re-insert.
+  let wipeQuery = supabase
+    .from('commission_tracker')
+    .delete()
+    .eq('agency_carrier_id', agencyCarrierId)
+    .eq('source_table', sourceTable)
+  if (options?.replacePoliciesFromFile) {
+    const policies = [...new Set(rows.map((r) => r.policy_number).filter(Boolean))]
+    if (policies.length > 0) {
+      wipeQuery = wipeQuery.in('policy_number', policies)
+    }
+  }
+  const { error: wipeError } = await wipeQuery
+  if (wipeError) {
+    console.error(
+      '[CommissionTracker] Failed to wipe existing commission_tracker rows before insert:',
+      wipeError.message,
+    )
+    return
+  }
+
   const BATCH_SIZE = 500
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batch = rows.slice(i, i + BATCH_SIZE)
-    const sourceRowIds = batch
-      .map((r) => r.source_row_id)
-      .filter((id): id is string => !!id)
-
-    if (sourceRowIds.length) {
-      const { error: deleteError } = await supabase
-        .from('commission_tracker')
-        .delete()
-        .eq('source_table', sourceTable)
-        .in('source_row_id', sourceRowIds)
-
-      if (deleteError) {
-        console.error(
-          '[CommissionTracker] Failed to delete existing commission_tracker rows before insert:',
-          deleteError.message,
-        )
-        break
-      }
-    }
-
     const { error } = await supabase.from('commission_tracker').insert(batch)
-
     if (error) {
       console.error(
         '[CommissionTracker] Failed to insert commission_tracker batch:',
