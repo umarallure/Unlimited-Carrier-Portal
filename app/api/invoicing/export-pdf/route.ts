@@ -82,6 +82,8 @@ function renderHtml(p: ExportPayload): string {
       margin: 18px;
       color: var(--text);
       background: var(--bg);
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
     }
     .header-wrap {
       border: 1px solid var(--line);
@@ -125,6 +127,13 @@ function renderHtml(p: ExportPayload): string {
     .summary td:first-child {
       background: var(--summary);
       font-weight: 600;
+    }
+    @page { size: A4; margin: 10mm; }
+    @media print {
+      body {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
     }
   </style>
 </head>
