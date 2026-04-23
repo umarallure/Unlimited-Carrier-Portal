@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Calendar, Loader2, Shield } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -15,7 +15,11 @@ import {
   formatInvoicingStatusLabel,
   getPreviousChargebackByCallCenter,
   markInvoiceBatchPaid,
+  saveInvoiceDraftSnapshot,
+  loadInvoiceDraftSnapshot,
+  clearInvoiceDraftSnapshot,
   normalizeCallCenterName,
+  type InvoiceDraftSnapshot,
   type BpoInvoiceLine,
   type InvoicingStatus,
   type InvoiceDraftResult,
@@ -41,7 +45,83 @@ const invoiceTableHead =
   'whitespace-nowrap border-b border-slate-200 bg-slate-50 px-2 py-2 text-left text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100'
 const invoiceCell = 'border-b border-slate-100 px-2 py-1.5 align-middle text-xs text-slate-800 dark:border-slate-800 dark:text-slate-200'
 
+const PRESET_CALL_CENTERS = [
+  'AJ BPO',
+  'Alternative BPO',
+  'Ambition BPO',
+  'Argon Comm',
+  'Argon Comm BPO',
+  'Ark Tech',
+  'ArkTech BPO',
+  'Ascendra BPO',
+  'Avenue Consultancy',
+  'Broker Leads BPO',
+  'Care Solutions',
+  'Cerberus BPO',
+  'Core Marketing',
+  'Corebiz',
+  'Corebiz BPO',
+  'CoreBiz BPO',
+  'Crafting Leads BPO',
+  'CrossNotch',
+  'CrossNotch BPO',
+  'Crown Connect BPO',
+  'Cyber Leads',
+  'Digicon BPO',
+  'DownTown',
+  'DownTown BPO',
+  'ECH09X',
+  'Emperor BPO',
+  'Everest BPO',
+  'Everline solution BPO',
+  'Exito BPO',
+  'F24051656878',
+  'GrowthOnics BPO',
+  'Helix BPO',
+  'HYF-TEL',
+  'INB BPO',
+  'Inrernal BPO',
+  'Internal',
+  'Internal BPO',
+  'Jason BPO',
+  'Lavish BPO',
+  'Leads BPO',
+  'Libra BPO',
+  'Maverick Communications',
+  'NanoTech',
+  'Networkize',
+  'NexGen BPO',
+  'NextPoint BPO',
+  'Optimum BPO',
+  'Plexi',
+  'Plexi BPO',
+  'Poshenee Tech',
+  'Pro Soliutions BPO',
+  'Pro Solutions BPO',
+  'Progressive BPO',
+  'Quotes BPO',
+  'Reliant',
+  'Retention BPO',
+  'Rock BPO',
+  'Seller',
+  'SellerZ',
+  'SellerZ BPO',
+  'StratiX BPO',
+  'TechPlanet',
+  'TechVated Marketing',
+  'The Zupax Marketing',
+  'Trust Link',
+  'Unified Systems BPO',
+  'Vize BPO',
+  'VYN BPO',
+  'WinBPO',
+  'Winners Limited',
+  'Wolf Innovations',
+  'Zupax Marketing',
+] as const
+
 export default function InvoicingPage() {
+  const INVOICE_SLAB_DAYS = 14
   const supabase = createClient()
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
@@ -51,10 +131,16 @@ export default function InvoicingPage() {
   const [bpoDetail, setBpoDetail] = useState<BpoInvoiceDetailResult | null>(null)
   const [previousChargebackByCallCenter, setPreviousChargebackByCallCenter] = useState<Record<string, string>>({})
   const [excludedPolicyKeys, setExcludedPolicyKeys] = useState<Record<string, true>>({})
+  const [excludedLineIds, setExcludedLineIds] = useState<Record<string, true>>({})
   const [lineEdits, setLineEdits] = useState<Record<string, Partial<BpoInvoiceLine>>>({})
   const [pdfExportedByCenter, setPdfExportedByCenter] = useState<Record<string, true>>({})
-  const [availableCallCenters, setAvailableCallCenters] = useState<string[]>([])
+  const [availableCallCenters] = useState<string[]>(() =>
+    Array.from(new Set(PRESET_CALL_CENTERS.map((c) => normalizeCallCenterName(c)))).sort((a, b) =>
+      a.localeCompare(b),
+    ),
+  )
   const [selectedCallCenter, setSelectedCallCenter] = useState<string>('ALL')
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null)
 
   const balanceDueForBpo = (callCenter: string, subtotal: number): number => {
     const raw = previousChargebackByCallCenter[callCenter] ?? '0'
@@ -67,22 +153,28 @@ export default function InvoicingPage() {
     return Math.round(n * 100) / 100
   }
 
-  useEffect(() => {
-    const loadCallCenters = async () => {
-      const { data, error } = await supabase
-        .from('deal_tracker')
-        .select('call_center')
-        .not('call_center', 'is', null)
-        .limit(5000)
-      if (error) return
-      const rows = (data || []) as Array<{ call_center: string | null }>
-      const centers = Array.from(
-        new Set(rows.map((r) => normalizeCallCenterName(r.call_center)).filter((v) => v.length > 0)),
-      ).sort((a, b) => a.localeCompare(b))
-      setAvailableCallCenters(centers)
-    }
-    void loadCallCenters()
-  }, [])
+  function addDays(ymd: string, days: number): string {
+    if (!ymd) return ''
+    const d = new Date(`${ymd}T00:00:00`)
+    if (Number.isNaN(d.getTime())) return ''
+    d.setDate(d.getDate() + days)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+
+  const applySlabFrom = (fromYmd: string) => {
+    setDateFrom(fromYmd)
+    setDateTo(addDays(fromYmd, INVOICE_SLAB_DAYS - 1))
+  }
+
+  const shiftSlab = (direction: -1 | 1) => {
+    if (!dateFrom) return
+    const nextFrom = addDays(dateFrom, direction * INVOICE_SLAB_DAYS)
+    if (!nextFrom) return
+    applySlabFrom(nextFrom)
+  }
 
   const generateInvoice = async (callCenterFilter?: string | null) => {
     if (!dateFrom || !dateTo) {
@@ -107,13 +199,115 @@ export default function InvoicingPage() {
       setBpoDetail(bpo)
       setPreviousChargebackByCallCenter(previousText)
       setExcludedPolicyKeys({})
+      setExcludedLineIds({})
       setLineEdits({})
       setPdfExportedByCenter({})
+      setDraftSavedAt(null)
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to generate invoice draft.'
       alert(message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const saveDraftLocally = async () => {
+    if (selectedCallCenter === 'ALL') {
+      alert('Please select one call center. Drafts are saved per slab per call center.')
+      return
+    }
+    if (!draft || !bpoDetail) {
+      alert('Generate invoice first, then move it to draft.')
+      return
+    }
+    const payload: InvoiceDraftSnapshot = {
+      dateFrom,
+      dateTo,
+      selectedCallCenter,
+      draft,
+      bpoDetail,
+      previousChargebackByCallCenter,
+      excludedPolicyKeys,
+      excludedLineIds,
+      lineEdits,
+      pdfExportedByCenter,
+      savedAt: new Date().toISOString(),
+    }
+    try {
+      const { data } = await supabase.auth.getUser()
+      await saveInvoiceDraftSnapshot({
+        startDate: dateFrom,
+        endDate: dateTo,
+        callCenterFilter: selectedCallCenter,
+        payload,
+        savedByEmail: data.user?.email || null,
+      })
+      setDraftSavedAt(payload.savedAt)
+      alert('Invoice moved to draft. You can load and continue editing anytime.')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to save draft.'
+      alert(message)
+    }
+  }
+
+  const loadDraftLocally = async () => {
+    if (selectedCallCenter === 'ALL') {
+      alert('Please select one call center to load its draft.')
+      return
+    }
+    if (!dateFrom || !dateTo) {
+      alert('Select invoice date range first to load server draft.')
+      return
+    }
+    try {
+      const record = await loadInvoiceDraftSnapshot({
+        startDate: dateFrom,
+        endDate: dateTo,
+        callCenterFilter: selectedCallCenter,
+      })
+      if (!record?.payload) {
+        alert('No saved draft found for this cycle/call center.')
+        return
+      }
+      const saved = record.payload
+      setDateFrom(saved.dateFrom || dateFrom)
+      setDateTo(saved.dateTo || dateTo)
+      setSelectedCallCenter(saved.selectedCallCenter || selectedCallCenter)
+      setDraft(saved.draft)
+      setBpoDetail(saved.bpoDetail)
+      setPreviousChargebackByCallCenter(saved.previousChargebackByCallCenter || {})
+      setExcludedPolicyKeys(saved.excludedPolicyKeys || {})
+      setExcludedLineIds(saved.excludedLineIds || {})
+      setLineEdits(saved.lineEdits || {})
+      setPdfExportedByCenter(saved.pdfExportedByCenter || {})
+      setDraftSavedAt(record.updated_at || saved.savedAt || null)
+      alert('Draft loaded successfully.')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to load draft.'
+      alert(message)
+    }
+  }
+
+  const clearDraftLocally = async () => {
+    if (selectedCallCenter === 'ALL') {
+      alert('Please select one call center to clear its draft.')
+      return
+    }
+    if (!dateFrom || !dateTo) {
+      alert('Select invoice date range first to clear server draft.')
+      return
+    }
+    try {
+      await clearInvoiceDraftSnapshot({
+        startDate: dateFrom,
+        endDate: dateTo,
+        callCenterFilter: selectedCallCenter,
+      })
+      setDraftSavedAt(null)
+      alert('Saved draft cleared.')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to clear draft.'
+      alert(message)
     }
   }
 
@@ -148,7 +342,18 @@ export default function InvoicingPage() {
       setBpoDetail(null)
       setPreviousChargebackByCallCenter({})
       setExcludedPolicyKeys({})
+      setExcludedLineIds({})
       setLineEdits({})
+      try {
+        await clearInvoiceDraftSnapshot({
+          startDate: visibleDraft.startDate,
+          endDate: visibleDraft.endDate,
+          callCenterFilter: selectedCallCenter === 'ALL' ? null : selectedCallCenter,
+        })
+      } catch (draftClearError) {
+        console.warn('Failed to clear saved draft after mark paid:', draftClearError)
+      }
+      setDraftSavedAt(null)
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to mark invoice as paid.'
       alert(message)
@@ -195,12 +400,50 @@ export default function InvoicingPage() {
         delete next[callCenter]
         return next
       })
+      try {
+        await clearInvoiceDraftSnapshot({
+          startDate: visibleDraft.startDate,
+          endDate: visibleDraft.endDate,
+          callCenterFilter: selectedCallCenter === 'ALL' ? null : selectedCallCenter,
+        })
+      } catch (draftClearError) {
+        console.warn('Failed to clear saved draft after center mark paid:', draftClearError)
+      }
+      setDraftSavedAt(null)
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : `Failed to mark ${callCenter} as paid.`
       alert(message)
     } finally {
       setSaving(false)
     }
+  }
+
+  const addManualRow = (callCenter: string, kind: 'sales' | 'chargeback') => {
+    setBpoDetail((prev) => {
+      if (!prev) return prev
+      const groups = prev.groups.map((group) => {
+        if (group.callCenter !== callCenter) return group
+        const newLine: BpoInvoiceLine = {
+          id: `manual-${kind}-${callCenter}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          insuredName: '',
+          leadValue: 0,
+          invoicingStatus: kind === 'sales' ? 'new_sale' : 'New Charge Back',
+          carrier: '',
+          product: null,
+          agentAccount: '',
+          draftDate: '',
+          monthlyPremium: null,
+          coverageAmount: null,
+          comPct: null,
+          comType: kind === 'sales' ? 'Advance' : 'Recover Unea',
+          policyNumber: '',
+        }
+        return kind === 'sales'
+          ? { ...group, salesLines: [...group.salesLines, newLine] }
+          : { ...group, chargebackLines: [...group.chargebackLines, newLine] }
+      })
+      return { ...prev, groups }
+    })
   }
 
   const policyKeyByCenterAndNumber = new Map<string, string>()
@@ -254,10 +497,12 @@ export default function InvoicingPage() {
         groups: bpoDetail.groups
           .map((group) => {
             const salesLines = group.salesLines.filter((line) => {
+              if (excludedLineIds[line.id]) return false
               const key = resolvePolicyKey(group.callCenter, line.policyNumber)
               return !key || !excludedPolicyKeys[key]
             }).map(applyLineEdit)
             const chargebackLines = group.chargebackLines.filter((line) => {
+              if (excludedLineIds[line.id]) return false
               const key = resolvePolicyKey(group.callCenter, line.policyNumber)
               return !key || !excludedPolicyKeys[key]
             }).map(applyLineEdit)
@@ -304,6 +549,14 @@ export default function InvoicingPage() {
     )
     if (!confirmed) return
     setExcludedPolicyKeys((prev) => ({ ...prev, [policyKey]: true }))
+  }
+
+  const confirmAndExcludeLine = (lineId: string) => {
+    const confirmed = window.confirm(
+      'Removing this policy will remove its payment from the current invoice cycle. It will be included again in the next invoicing cycle when you regenerate invoices. Do you want to continue?'
+    )
+    if (!confirmed) return
+    setExcludedLineIds((prev) => ({ ...prev, [lineId]: true }))
   }
 
   const exportPdfForGroup = async (group: BpoInvoiceDetailResult['groups'][number]) => {
@@ -658,15 +911,23 @@ export default function InvoicingPage() {
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">From</span>
               <div className="flex items-center gap-2">
                 <Calendar className="h-4 w-4 shrink-0 text-orange-500" />
-                <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="h-9 w-[180px]" />
+                <Input type="date" value={dateFrom} onChange={(e) => applySlabFrom(e.target.value)} className="h-9 w-[180px]" />
               </div>
             </div>
             <div className="flex flex-col gap-1">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">To</span>
               <div className="flex items-center gap-2">
                 <Calendar className="h-4 w-4 shrink-0 text-orange-500" />
-                <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="h-9 w-[180px]" />
+                <Input type="date" value={dateTo} readOnly className="h-9 w-[180px] opacity-80" />
               </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button type="button" variant="outline" onClick={() => shiftSlab(-1)} disabled={!dateFrom}>
+                Prev Slab
+              </Button>
+              <Button type="button" variant="outline" onClick={() => shiftSlab(1)} disabled={!dateFrom}>
+                Next Slab
+              </Button>
             </div>
             <Button
               onClick={() => void generateInvoice(selectedCallCenter === 'ALL' ? null : selectedCallCenter)}
@@ -698,6 +959,20 @@ export default function InvoicingPage() {
                 </option>
               ))}
             </select>
+            <Button size="sm" variant="outline" onClick={() => void saveDraftLocally()}>
+              Move to Draft
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void loadDraftLocally()} disabled={selectedCallCenter === 'ALL'}>
+              Load Draft
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void clearDraftLocally()} disabled={selectedCallCenter === 'ALL'}>
+              Clear Draft
+            </Button>
+            {draftSavedAt && (
+              <span className="text-xs text-muted-foreground">
+                Draft saved: {new Date(draftSavedAt).toLocaleString()}
+              </span>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -772,6 +1047,12 @@ export default function InvoicingPage() {
               <div className="flex items-center justify-center gap-2">
                 <Button size="sm" variant="outline" onClick={() => void exportPdfForGroup(group)}>
                   Export PDF
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => addManualRow(group.callCenter, 'sales')}>
+                  Add Sales Row
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => addManualRow(group.callCenter, 'chargeback')}>
+                  Add Chargeback Row
                 </Button>
                 <Button
                   size="sm"
@@ -926,8 +1207,8 @@ export default function InvoicingPage() {
                                 variant="outline"
                                 onClick={() => {
                                   const policyKey = policyKeyByLineId.get(line.id) ?? resolvePolicyKey(group.callCenter, line.policyNumber)
-                                  if (!policyKey) return
-                                  confirmAndExcludePolicy(policyKey)
+                                  if (policyKey) confirmAndExcludePolicy(policyKey)
+                                  else confirmAndExcludeLine(line.id)
                                 }}
                               >
                                 Remove
@@ -1081,8 +1362,8 @@ export default function InvoicingPage() {
                                 variant="outline"
                                 onClick={() => {
                                   const policyKey = policyKeyByLineId.get(line.id) ?? resolvePolicyKey(group.callCenter, line.policyNumber)
-                                  if (!policyKey) return
-                                  confirmAndExcludePolicy(policyKey)
+                                  if (policyKey) confirmAndExcludePolicy(policyKey)
+                                  else confirmAndExcludeLine(line.id)
                                 }}
                               >
                                 Remove
