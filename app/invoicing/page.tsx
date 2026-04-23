@@ -367,7 +367,102 @@ export default function InvoicingPage() {
       setPdfExportedByCenter((prev) => ({ ...prev, [group.callCenter]: true }))
     } catch (error) {
       console.error('PDF export failed:', error)
-      window.alert('PDF export failed. Please try again.')
+      const esc = (v: string) =>
+        v
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;')
+      const money = (n: number | null | undefined) => (n == null ? '—' : `$${formatMoney(n)}`)
+      const salesRows = group.salesLines
+        .map(
+          (line) => `
+            <tr>
+              <td>${esc(line.insuredName)}</td>
+              <td style="text-align:right;">${money(line.leadValue)}</td>
+              <td>${esc(line.carrier)}</td>
+              <td>${esc(line.product ?? '—')}</td>
+              <td>${esc(line.agentAccount)}</td>
+              <td>${esc(line.draftDate)}</td>
+              <td style="text-align:right;">${money(line.monthlyPremium)}</td>
+              <td style="text-align:right;">${money(line.coverageAmount)}</td>
+              <td style="text-align:right;">${esc(line.comPct ?? '—')}</td>
+              <td>${esc(line.comType)}</td>
+            </tr>
+          `,
+        )
+        .join('')
+      const chargeRows = group.chargebackLines
+        .map(
+          (line) => `
+            <tr>
+              <td>${esc(line.insuredName)}</td>
+              <td style="text-align:right;">${money(line.leadValue)}</td>
+              <td>${esc(line.carrier)}</td>
+              <td>${esc(line.product ?? '—')}</td>
+              <td>${esc(line.agentAccount)}</td>
+              <td>${esc(line.draftDate)}</td>
+              <td style="text-align:right;">${money(line.monthlyPremium)}</td>
+              <td style="text-align:right;">${money(line.coverageAmount)}</td>
+              <td style="text-align:right;">${esc(line.comPct ?? '—')}</td>
+              <td>${esc(line.comType)}</td>
+            </tr>
+          `,
+        )
+        .join('')
+      const prevNeg = Number.parseFloat(previousChargebackByCallCenter[group.callCenter] ?? '0') || 0
+      const html = `<!doctype html>
+      <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>${esc(suggested)}</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 18px; color: #111; }
+          h1 { margin: 0; font-size: 20px; }
+          .sub { margin: 4px 0 12px; color: #444; font-size: 12px; }
+          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 12px; }
+          th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+          th { background: #f5f5f5; }
+        </style>
+      </head>
+      <body>
+        <h1>${esc(group.callCenter)}</h1>
+        <div class="sub">${esc(visibleBpoDetail.rangeLabel)}</div>
+        <h3>Sales</h3>
+        <table>
+          <thead><tr><th>Sales</th><th>Lead value (50%)</th><th>Carrier</th><th>Product Type</th><th>Agent Account</th><th>Draft Date</th><th>Monthly Premium</th><th>Coverage Amount</th><th>Com %</th><th>Com Type</th></tr></thead>
+          <tbody>${salesRows || '<tr><td colspan="10">No sales in this period.</td></tr>'}</tbody>
+        </table>
+        <h3>Chargebacks</h3>
+        <table>
+          <thead><tr><th>Chargebacks</th><th>Lead value (50%)</th><th>Carrier</th><th>Product Type</th><th>Agent Account</th><th>Draft Date</th><th>Monthly Premium</th><th>Coverage Amount</th><th>Com %</th><th>Com Type</th></tr></thead>
+          <tbody>${chargeRows || '<tr><td colspan="10">No chargebacks in this period.</td></tr>'}</tbody>
+        </table>
+        <table>
+          <tbody>
+            <tr><td>New Business Total</td><td style="text-align:right;">${money(group.newBusinessTotal)}</td></tr>
+            <tr><td>Chargebacks Total</td><td style="text-align:right;">${money(group.chargebacksTotal)}</td></tr>
+            <tr><td>Negative Balance From Last Week</td><td style="text-align:right;">-${money(Math.abs(prevNeg))}</td></tr>
+            <tr><td>Balance Due</td><td style="text-align:right;">${money(balanceDueForBpo(group.callCenter, group.subtotal))}</td></tr>
+          </tbody>
+        </table>
+      </body>
+      </html>`
+      const w = window.open('', '_blank')
+      if (w) {
+        w.document.open()
+        w.document.write(html)
+        w.document.close()
+        setTimeout(() => {
+          w.focus()
+          w.print()
+        }, 250)
+        setPdfExportedByCenter((prev) => ({ ...prev, [group.callCenter]: true }))
+        window.alert('Server PDF export failed on this environment. Opened print dialog fallback (Save as PDF).')
+      } else {
+        window.alert('PDF export failed and popup was blocked. Please allow popups and try again.')
+      }
     }
   }
 
