@@ -52,6 +52,7 @@ export default function InvoicingPage() {
   const [previousChargebackByCallCenter, setPreviousChargebackByCallCenter] = useState<Record<string, string>>({})
   const [excludedPolicyKeys, setExcludedPolicyKeys] = useState<Record<string, true>>({})
   const [lineEdits, setLineEdits] = useState<Record<string, Partial<BpoInvoiceLine>>>({})
+  const [pdfExportedByCenter, setPdfExportedByCenter] = useState<Record<string, true>>({})
   const [availableCallCenters, setAvailableCallCenters] = useState<string[]>([])
   const [selectedCallCenter, setSelectedCallCenter] = useState<string>('ALL')
 
@@ -107,6 +108,7 @@ export default function InvoicingPage() {
       setPreviousChargebackByCallCenter(previousText)
       setExcludedPolicyKeys({})
       setLineEdits({})
+      setPdfExportedByCenter({})
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to generate invoice draft.'
       alert(message)
@@ -117,6 +119,13 @@ export default function InvoicingPage() {
 
   const markPaid = async () => {
     if (!visibleDraft || visibleDraft.groups.length === 0) return
+    const missingPdfCenters = visibleDraft.groups
+      .map((g) => g.callCenter)
+      .filter((center) => !pdfExportedByCenter[center])
+    if (missingPdfCenters.length > 0) {
+      alert(`Please export PDF first for: ${missingPdfCenters.join(', ')}`)
+      return
+    }
     setSaving(true)
     try {
       const { data } = await supabase.auth.getUser()
@@ -150,6 +159,10 @@ export default function InvoicingPage() {
 
   const markGroupPaid = async (callCenter: string) => {
     if (!visibleDraft) return
+    if (!pdfExportedByCenter[callCenter]) {
+      alert(`Please export PDF for ${callCenter} before marking paid.`)
+      return
+    }
     const group = visibleDraft.groups.find((g) => g.callCenter === callCenter)
     if (!group) return
     setSaving(true)
@@ -176,6 +189,11 @@ export default function InvoicingPage() {
       setBpoDetail((prev) => {
         if (!prev) return prev
         return { ...prev, groups: prev.groups.filter((g) => g.callCenter !== callCenter) }
+      })
+      setPdfExportedByCenter((prev) => {
+        const next = { ...prev }
+        delete next[callCenter]
+        return next
       })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : `Failed to mark ${callCenter} as paid.`
@@ -346,6 +364,7 @@ export default function InvoicingPage() {
       a.click()
       a.remove()
       URL.revokeObjectURL(url)
+      setPdfExportedByCenter((prev) => ({ ...prev, [group.callCenter]: true }))
     } catch (error) {
       console.error('PDF export failed:', error)
       window.alert('PDF export failed. Please try again.')
@@ -542,7 +561,16 @@ export default function InvoicingPage() {
             <Button onClick={() => void exportPdf()} variant="outline" disabled={!visibleBpoDetail || visibleBpoDetail.groups.length === 0}>
               Export PDF
             </Button>
-            <Button onClick={markPaid} disabled={saving} className="shrink-0 bg-green-600 text-white hover:bg-green-700">
+            <Button
+              onClick={markPaid}
+              disabled={
+                saving ||
+                !visibleDraft ||
+                visibleDraft.groups.length === 0 ||
+                visibleDraft.groups.some((g) => !pdfExportedByCenter[g.callCenter])
+              }
+              className="shrink-0 bg-green-600 text-white hover:bg-green-700"
+            >
               {saving ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -589,7 +617,7 @@ export default function InvoicingPage() {
                 <Button
                   size="sm"
                   onClick={() => void markGroupPaid(group.callCenter)}
-                  disabled={saving}
+                  disabled={saving || !pdfExportedByCenter[group.callCenter]}
                   className="bg-green-600 text-white hover:bg-green-700"
                 >
                   Mark Paid
