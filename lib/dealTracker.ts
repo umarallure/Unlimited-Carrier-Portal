@@ -366,7 +366,8 @@ export async function bulkFetchStatusMappings(
     .eq('carrier_id', carrierId)
 
   if (!error && mappings && mappings.length > 0) {
-    mappings.forEach(m => {
+    const typedMappings = mappings as Array<{ policy_status_in_carrier_portal: string; stage_monday: string }>
+    typedMappings.forEach((m) => {
       statusMap.set(m.policy_status_in_carrier_portal, m.stage_monday)
     })
     console.log('[Deal Tracker] Loaded', mappings.length, 'status mappings by carrier_id')
@@ -380,7 +381,8 @@ export async function bulkFetchStatusMappings(
       .eq('carrier_code', carrierCode)
 
     if (!fallbackError && fallbackMappings && fallbackMappings.length > 0) {
-      fallbackMappings.forEach(m => {
+      const typedFallbackMappings = fallbackMappings as Array<{ policy_status_in_carrier_portal: string; stage_monday: string }>
+      typedFallbackMappings.forEach((m) => {
         statusMap.set(m.policy_status_in_carrier_portal, m.stage_monday)
       })
       console.log('[Deal Tracker] Loaded', fallbackMappings.length, 'status mappings by carrier_code')
@@ -399,7 +401,8 @@ export async function bulkFetchStatusMappings(
         .eq('carrier_code', 'AETNA')
 
       if (!aetnaError && aetnaMappings && aetnaMappings.length > 0) {
-        aetnaMappings.forEach(m => {
+        const typedAetnaMappings = aetnaMappings as Array<{ policy_status_in_carrier_portal: string; stage_monday: string }>
+        typedAetnaMappings.forEach((m) => {
           statusMap.set(m.policy_status_in_carrier_portal, m.stage_monday)
         })
         console.log('[Deal Tracker] Loaded', aetnaMappings.length, 'AETNA fallback status mappings')
@@ -1386,7 +1389,8 @@ export async function processAetnaCommissionsForDealTracker(
 
   const existingMap = new Map<string, any>()
   if (existingEntries) {
-    existingEntries.forEach(entry => {
+    const typedExistingEntries = existingEntries as Array<{ policy_number: string }>
+    typedExistingEntries.forEach((entry) => {
       existingMap.set(entry.policy_number, entry)
     })
   }
@@ -1449,7 +1453,8 @@ export async function processAetnaCommissionsForDealTracker(
       .in('policy_number', allCommissionPolicyNumbers)
 
     if (!policiesError && policies) {
-      policies.forEach(p => {
+      const typedPolicies = policies as Array<{ policy_number: string }>
+      typedPolicies.forEach((p) => {
         policiesMap.set(p.policy_number, p)
       })
       console.log('[Deal Tracker] Found', policies.length, 'policy rows for commission batch')
@@ -2476,7 +2481,8 @@ export async function processAmamCommissionsForDealTracker(
     return []
   }
 
-  const policyNumbers = Array.from(new Set(commissions.map(c => c.policy_number)))
+  const typedCommissions = commissions as Array<{ policy_number: string; advance?: string | number | null; created_at?: string | null }>
+  const policyNumbers = Array.from(new Set(typedCommissions.map((c) => c.policy_number)))
   const { data: existingEntries, error: existingError } = await supabase
     .from('deal_tracker')
     .select('*')
@@ -2489,14 +2495,15 @@ export async function processAmamCommissionsForDealTracker(
 
   const existingMap = new Map<string, any>()
   if (existingEntries) {
-    existingEntries.forEach(entry => {
+    const typedExistingEntries = existingEntries as Array<{ policy_number: string }>
+    typedExistingEntries.forEach((entry) => {
       existingMap.set(entry.policy_number, entry)
     })
   }
 
   const commissionMap = new Map<string, any>()
   const commissionAmountsMap = new Map<string, number>()
-  commissions.forEach(comm => {
+  typedCommissions.forEach((comm) => {
     const policyNum = comm.policy_number
     if (!policyNum) return
     const amount = comm.advance != null
@@ -2528,7 +2535,8 @@ export async function processAmamCommissionsForDealTracker(
       .eq('agency_carrier_id', agencyCarrierId)
       .in('policy_number', allCommissionPolicyNumbers)
     if (policies) {
-      policies.forEach(p => {
+      const typedPolicies = policies as Array<{ policy_number: string }>
+      typedPolicies.forEach((p) => {
         policiesMap.set(p.policy_number, p)
       })
     }

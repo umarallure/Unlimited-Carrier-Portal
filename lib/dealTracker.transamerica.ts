@@ -25,6 +25,11 @@ function buildTransamericaInsuredName(p: { insured_name?: string | null; owner_n
   return (insured || owner || '').trim()
 }
 
+function hasExistingDealTrackerAgentField(value: unknown): boolean {
+  if (value == null) return false
+  return String(value).trim() !== ''
+}
+
 /**
  * Process Transamerica carrier policy files and create deal tracker entries.
  * Policy-only flow (commission upload not supported yet); optional DDF lookup.
@@ -194,8 +199,12 @@ export async function processTransamericaFilesForDealTracker(
       notes: existing?.notes ?? null,
       status: (existing && financialsUnchanged(existing, dealValue, null)) ? (existing.status ?? statusFromDealValue(dealValue)) : statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
-      sales_agent: null,
-      writing_number: null,
+      sales_agent: hasExistingDealTrackerAgentField(existing?.sales_agent)
+        ? String(existing.sales_agent).trim()
+        : null,
+      writing_number: hasExistingDealTrackerAgentField(existing?.writing_number)
+        ? String(existing.writing_number).trim()
+        : null,
       commission_type: null,
       effective_date: effectiveDate,
       call_center: callCenter,

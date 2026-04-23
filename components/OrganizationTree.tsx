@@ -38,10 +38,11 @@ export function OrganizationTree() {
       }
 
       console.log(`Found ${agencies.length} agencies`)
+      const agencyRows = (agencies || []) as Array<{ id: string; name: string }>
 
       // Now fetch nested data for each agency
       const nodes: TreeNode[] = await Promise.all(
-        (agencies || []).map(async (agency) => {
+        agencyRows.map(async (agency) => {
           // Fetch carriers for this agency
           const { data: agencyCarriers } = await supabase
             .from('agency_carriers')

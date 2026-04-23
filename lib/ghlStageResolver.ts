@@ -609,18 +609,32 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
     if (stageSet.has('Chargeback Cancellation')) return sanitizeManualStage('Chargeback Cancellation')
   }
 
-  // "Act Past Due" handling:
-  // within 31 calendar days from draft/effective date -> Pending Lapse Pending Reason
-  // after 31 calendar days -> Issued-not-paid bucket (FDPF Pending Reason)
-  if (isActPastDueStatus && stageSet.has('Pending Lapse') && stageSet.has('FDPF Pending Reason') && effDate) {
+  // "Act Past Due" handling (hard guard):
+  // NEVER classify Act Past Due as Active Placed/Paid as Advanced.
+  // within 31 calendar days from effective date -> Pending Lapse bucket
+  // after 31 calendar days -> FDPF Pending Reason (issued-not-paid bucket)
+  // if effective date is missing, default to Pending Lapse bucket when possible.
+  if (isActPastDueStatus) {
+    const pendingLapseStage = stageSet.has('Pending Lapse Pending Reason')
+      ? 'Pending Lapse Pending Reason'
+      : (stageSet.has('Pending Lapse') ? 'Pending Lapse' : null)
+    const fdpfStage = stageSet.has('FDPF Pending Reason') ? 'FDPF Pending Reason' : null
+
+    if (!effDate) {
+      if (pendingLapseStage) return sanitizeManualStage(pendingLapseStage)
+      if (fdpfStage && fdpfPendingReasonAllowed) return sanitizeManualStage(fdpfStage)
+      return selectPreFdpfStage()
+    }
+
     const cutoff = startOfLocalDay(effDate)
     cutoff.setDate(cutoff.getDate() + 31)
     const todayDay = startOfLocalDay(today)
     if (todayDay <= cutoff) {
-      if (stageSet.has('Pending Lapse Pending Reason')) return sanitizeManualStage('Pending Lapse Pending Reason')
+      if (pendingLapseStage) return sanitizeManualStage(pendingLapseStage)
       return sanitizeManualStage('Pending Lapse')
     }
     if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
+    if (fdpfStage) return sanitizeManualStage(fdpfStage)
     return sanitizeManualStage('FDPF Pending Reason')
   }
 

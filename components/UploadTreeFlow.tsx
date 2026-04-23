@@ -745,7 +745,8 @@ export function UploadTreeFlow() {
       .select('id')
 
     if (agencyCarriers && agencyCarriers.length > 0) {
-      const ids = agencyCarriers.map(ac => ac.id)
+      const typedAgencyCarriers = agencyCarriers as Array<{ id: string }>
+      const ids = typedAgencyCarriers.map((ac) => ac.id)
       const dayRange = getLocalDayRange(uploadDate)
       const statusMap = await fetchDailyStatus(uploadDate, ids, { startISO: dayRange.start, endISO: dayRange.end })
       setDailyStatusMap(statusMap)

@@ -135,7 +135,7 @@ export default function CommissionReportPage() {
         while (true) {
           const to = from + PAGE_SIZE - 1
           const { data, error } = await supabase
-            .from<any, CommissionRow>('commission_tracker')
+            .from('commission_tracker')
             .select('*')
             .order('date', { ascending: false })
             .range(from, to)
@@ -146,7 +146,7 @@ export default function CommissionReportPage() {
             break
           }
 
-          const chunk = data || []
+          const chunk = (data || []) as CommissionRow[]
           all = all.concat(chunk)
 
           if (chunk.length < PAGE_SIZE) {
@@ -215,13 +215,14 @@ export default function CommissionReportPage() {
 
         // Fetch carrier codes once for mapping name/id -> code
         const { data: carriers, error: carriersError } = await supabase
-          .from<any, CarrierRecord>('carriers')
+          .from('carriers')
           .select('id, name, code')
 
         if (!carriersError && carriers) {
+          const typedCarriers = carriers as CarrierRecord[]
           const byId = new Map<string, string | null>()
           const byName = new Map<string, string | null>()
-          carriers.forEach(c => {
+          typedCarriers.forEach((c) => {
             byId.set(c.id, c.code)
             byName.set(c.name, c.code)
           })

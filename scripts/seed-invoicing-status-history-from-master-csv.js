@@ -4,7 +4,7 @@
  * Uses only needed columns:
  * - Policy # (required)
  * - Business Type (required -> invoicing_status)
- * - Week Date (preferred effective_date)
+ * - Week Of / Week Date (week marker from legacy sheet; saved as `week_of` text label)
  * - Carrier (optional matcher)
  * - Call Center (optional matcher)
  *
@@ -168,13 +168,16 @@ async function main() {
       carrier: toNull(r['Carrier']),
       call_center: toNull(r['Call Center']),
       status: mapBusinessTypeToStatus(r['Business Type']),
-      effective_date: parseUsDateToYmd(r['Week Date']),
+      // Preserve the original Week Of label (often a range like "March 23rd 2026 - April 5th 2026").
+      // If Week Of is empty, keep Week Date text so week_of is still populated.
+      week_of: toNull(r['Week Of']) ?? toNull(r['Week Date']),
+      effective_date: parseUsDateToYmd(r['Week Date']) ?? parseUsDateToYmd(r['Week Of']),
     }))
     .filter((r) => r.policy_number && r.policy_number_norm && r.status && r.effective_date)
 
   console.log(`Parsed ${records.length} rows; eligible for seeding: ${normalizedRows.length}`)
   if (normalizedRows.length === 0) {
-    console.error('No eligible rows with Policy # + Business Type + Week Date.')
+    console.error('No eligible rows with Policy # + Business Type + Week Of/Week Date.')
     process.exit(1)
   }
 
@@ -257,6 +260,7 @@ async function main() {
         call_center: row.call_center,
         status: row.status,
         effective_date: row.effective_date,
+        week_of: row.week_of,
       })
       continue
     }
@@ -266,6 +270,7 @@ async function main() {
       policy_number: row.policy_number,
       invoicing_status: row.status,
       effective_date: row.effective_date,
+      week_of: row.week_of,
     })
   }
 
@@ -273,10 +278,10 @@ async function main() {
   console.log(`Resolved rows: ${payload.length}; unresolved policies: ${unresolved}`)
   if (unresolvedRows.length > 0) {
     const outPath = path.join(process.cwd(), 'tmp-unresolved-invoicing-seed.csv')
-    const header = 'policy_number,carrier,call_center,status,effective_date'
+    const header = 'policy_number,carrier,call_center,status,effective_date,week_of'
     const body = unresolvedRows
       .map((r) =>
-        [r.policy_number, r.carrier, r.call_center, r.status, r.effective_date]
+        [r.policy_number, r.carrier, r.call_center, r.status, r.effective_date, r.week_of]
           .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
           .join(','),
       )
