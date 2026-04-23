@@ -141,6 +141,9 @@ export default function InvoicingPage() {
   )
   const [selectedCallCenter, setSelectedCallCenter] = useState<string>('ALL')
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null)
+  const [showWeekScript, setShowWeekScript] = useState(false)
+  const [weekScriptRowsFromDrafts, setWeekScriptRowsFromDrafts] = useState<Array<{ callCenter: string; payment: number }>>([])
+  const [weekScriptLoading, setWeekScriptLoading] = useState(false)
 
   const balanceDueForBpo = (callCenter: string, subtotal: number): number => {
     const raw = previousChargebackByCallCenter[callCenter] ?? '0'
@@ -893,6 +896,104 @@ export default function InvoicingPage() {
     XLSX.writeFile(wb, `invoices_${fileFrom}_${fileTo}.xlsx`)
   }
 
+  const loadWeekScriptForCycle = async () => {
+    if (!dateFrom || !dateTo) {
+      alert('Select invoice slab first.')
+      return
+    }
+    setWeekScriptLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('invoicing_drafts')
+        .select('payload, updated_at')
+        .eq('start_date', dateFrom)
+        .eq('end_date', dateTo)
+        .is('locked_at', null)
+        .is('paid_batch_id', null)
+        .order('updated_at', { ascending: false })
+      if (error) throw error
+
+      const merged = new Map<string, { payment: number; updatedAt: string }>()
+      const rows = (data || []) as Array<{ payload?: InvoiceDraftSnapshot; updated_at?: string }>
+      for (const row of rows) {
+        const payload = row.payload
+        if (!payload?.bpoDetail?.groups) continue
+        for (const group of payload.bpoDetail.groups) {
+          const center = normalizeCallCenterName(group.callCenter)
+          const prevRaw = payload.previousChargebackByCallCenter?.[group.callCenter] ?? payload.previousChargebackByCallCenter?.[center] ?? '0'
+          const prev = Number.parseFloat(String(prevRaw))
+          const previous = Number.isNaN(prev) ? 0 : prev
+          const payment = round2(group.subtotal - previous)
+          const existing = merged.get(center)
+          const stamp = row.updated_at || ''
+          if (!existing || stamp >= existing.updatedAt) {
+            merged.set(center, { payment, updatedAt: stamp })
+          }
+        }
+      }
+
+      // Include currently loaded draft in priority so latest in-UI edits show up instantly.
+      if (visibleBpoDetail) {
+        for (const group of visibleBpoDetail.groups) {
+          const center = normalizeCallCenterName(group.callCenter)
+          const payment = round2(balanceDueForBpo(group.callCenter, group.subtotal))
+          merged.set(center, { payment, updatedAt: new Date().toISOString() })
+        }
+      }
+
+      setWeekScriptRowsFromDrafts(
+        Array.from(merged.entries()).map(([callCenter, v]) => ({ callCenter, payment: v.payment })),
+      )
+      setShowWeekScript(true)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to load week script.'
+      alert(message)
+    } finally {
+      setWeekScriptLoading(false)
+    }
+  }
+
+  const weekScriptRows = weekScriptRowsFromDrafts
+  const payableRows = weekScriptRows
+    .filter((r) => r.payment > 0)
+    .sort((a, b) => b.payment - a.payment)
+  const noPaymentRows = weekScriptRows
+    .filter((r) => r.payment <= 0)
+    .sort((a, b) => a.payment - b.payment)
+  const totalPayout = round2(payableRows.reduce((sum, r) => sum + r.payment, 0))
+
+  const exportWeekScriptCsv = () => {
+    if (weekScriptRows.length === 0) {
+      alert('No week script data loaded. Click Week Script first.')
+      return
+    }
+    const escCsv = (v: string) => `"${String(v).replace(/"/g, '""')}"`
+    const lines: string[] = []
+    lines.push('Call Center,Payment')
+    for (const r of payableRows) {
+      lines.push(`${escCsv(r.callCenter)},${r.payment.toFixed(2)}`)
+    }
+    lines.push(`${escCsv('Total Payout')},${totalPayout.toFixed(2)}`)
+    if (noPaymentRows.length > 0) {
+      lines.push('')
+      lines.push('Call Centers with No Payment this Week,Payment')
+      for (const r of noPaymentRows) {
+        lines.push(`${escCsv(r.callCenter)},${r.payment.toFixed(2)}`)
+      }
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const from = dateFrom ? dateFrom.replace(/-/g, '') : 'from'
+    const to = dateTo ? dateTo.replace(/-/g, '') : 'to'
+    a.href = url
+    a.download = `week_script_${from}_${to}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="admin-page space-y-6 print:space-y-4">
       <PageHeader
@@ -900,6 +1001,23 @@ export default function InvoicingPage() {
         description="Generate BPO (call center) invoices: sales first, then chargebacks. Lead value shows 50% of the underlying commission amount (not gross). Use Mark paid when the batch is settled."
         icon={<span className="text-xl font-bold text-orange-400">$</span>}
       />
+      <div className="flex flex-wrap items-center gap-2 print:hidden">
+        <Button
+          onClick={() => void loadWeekScriptForCycle()}
+          variant="outline"
+          disabled={weekScriptLoading || !dateFrom || !dateTo}
+        >
+          {weekScriptLoading ? 'Loading Script...' : 'Week Script'}
+        </Button>
+        <Button onClick={exportWeekScriptCsv} variant="outline" disabled={weekScriptRows.length === 0}>
+          Export Week Script CSV
+        </Button>
+        {showWeekScript && (
+          <Button variant="outline" onClick={() => setShowWeekScript(false)}>
+            Hide Week Script
+          </Button>
+        )}
+      </div>
 
       <Card className="print:hidden">
         <CardHeader>
@@ -1016,6 +1134,63 @@ export default function InvoicingPage() {
             </Button>
           </div>
         </div>
+      )}
+
+      {showWeekScript && visibleBpoDetail && (
+        <Card className="print:hidden">
+          <CardHeader>
+            <CardTitle>Week Script ({visibleBpoDetail.rangeLabel})</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr>
+                    <th className="border border-slate-300 bg-slate-100 px-3 py-2 text-left dark:border-slate-700 dark:bg-slate-900">Call Center</th>
+                    <th className="border border-slate-300 bg-slate-100 px-3 py-2 text-right dark:border-slate-700 dark:bg-slate-900">Payment</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payableRows.map((r) => (
+                    <tr key={`payable-${r.callCenter}`}>
+                      <td className="border border-slate-300 px-3 py-1.5 dark:border-slate-700">{r.callCenter}</td>
+                      <td className="border border-slate-300 px-3 py-1.5 text-right font-mono dark:border-slate-700">${formatMoney(r.payment)}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-emerald-50 dark:bg-emerald-950/30">
+                    <td className="border border-slate-300 px-3 py-2 font-semibold dark:border-slate-700">Total Payout</td>
+                    <td className="border border-slate-300 px-3 py-2 text-right font-mono font-bold dark:border-slate-700">${formatMoney(totalPayout)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            {noPaymentRows.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr>
+                      <th className="border border-orange-300 bg-orange-100 px-3 py-2 text-left text-orange-900 dark:border-orange-800 dark:bg-orange-950/30 dark:text-orange-200">
+                        Call Centers with No Payment this Week
+                      </th>
+                      <th className="border border-orange-300 bg-orange-100 px-3 py-2 text-right text-orange-900 dark:border-orange-800 dark:bg-orange-950/30 dark:text-orange-200">
+                        Payment
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {noPaymentRows.map((r) => (
+                      <tr key={`nopay-${r.callCenter}`}>
+                        <td className="border border-slate-300 px-3 py-1.5 dark:border-slate-700">{r.callCenter}</td>
+                        <td className="border border-slate-300 px-3 py-1.5 text-right font-mono dark:border-slate-700">${formatMoney(r.payment)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {visibleBpoDetail && visibleBpoDetail.groups.length === 0 && visibleDraft && visibleDraft.groups.length === 0 && (
