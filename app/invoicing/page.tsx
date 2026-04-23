@@ -454,7 +454,7 @@ export default function InvoicingPage() {
           }
           .section-title.sales { background: var(--sales); }
           .section-title.chargebacks { background: var(--chargebacks); }
-          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 10px; }
+          table { width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 10px; table-layout: fixed; }
           th, td { border: 1px solid var(--line); padding: 6px 7px; text-align: left; }
           thead th {
             background: #0a204f;
@@ -479,7 +479,7 @@ export default function InvoicingPage() {
             background: var(--summary);
             font-weight: 600;
           }
-          @page { size: A4; margin: 10mm; }
+          @page { size: A4 landscape; margin: 8mm; }
           @media print {
             body {
               -webkit-print-color-adjust: exact;

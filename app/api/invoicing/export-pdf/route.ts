@@ -103,7 +103,7 @@ function renderHtml(p: ExportPayload): string {
     }
     .section-title.sales { background: var(--sales); }
     .section-title.chargebacks { background: var(--chargebacks); }
-    table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 10px; table-layout: fixed; }
     th, td { border: 1px solid var(--line); padding: 6px 7px; text-align: left; }
     thead th {
       background: #0a204f;
@@ -128,7 +128,7 @@ function renderHtml(p: ExportPayload): string {
       background: var(--summary);
       font-weight: 600;
     }
-    @page { size: A4; margin: 10mm; }
+    @page { size: A4 landscape; margin: 8mm; }
     @media print {
       body {
         -webkit-print-color-adjust: exact;
@@ -201,7 +201,12 @@ export async function POST(req: NextRequest) {
     try {
       const page = await browser.newPage()
       await page.setContent(html, { waitUntil: 'networkidle0' })
-      const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '12mm', right: '10mm', bottom: '12mm', left: '10mm' } })
+      const pdf = await page.pdf({
+        format: 'A4',
+        landscape: true,
+        printBackground: true,
+        margin: { top: '8mm', right: '8mm', bottom: '8mm', left: '8mm' },
+      })
       const pdfBody = Uint8Array.from(pdf)
       return new Response(pdfBody, {
         headers: {
