@@ -66,12 +66,13 @@ export default function UploadHistoryPage() {
     if (error) {
       console.error('Error fetching uploads:', error)
     } else {
-      setUploads(data || [])
-      const uniqueCarriers = Array.from(
+      const rows = (data || []) as any[]
+      setUploads(rows)
+      const uniqueCarriers: string[] = Array.from(
         new Set(
-          (data || [])
+          rows
             .map((f: any) => f.agency_carriers?.carriers?.name)
-            .filter(Boolean)
+            .filter((name: unknown): name is string => typeof name === 'string' && name.trim().length > 0)
         )
       ).sort()
       setCarriers(uniqueCarriers)

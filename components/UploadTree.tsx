@@ -84,9 +84,10 @@ export function UploadTree() {
         setLoading(false)
         return
       }
+      const agencyRows = agencies as Array<{ id: string; name: string }>
 
       const nodes: TreeNode[] = await Promise.all(
-        agencies.map(async (agency) => {
+        agencyRows.map(async (agency) => {
           const { data: agencyCarriers } = await supabase
             .from('agency_carriers')
             .select(`

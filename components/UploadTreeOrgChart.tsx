@@ -176,7 +176,8 @@ export function UploadTreeOrgChart() {
   const loadDailyStatuses = useCallback(async () => {
     const { data: rows } = await supabase.from('agency_carriers').select('id')
     if (!rows?.length) return
-    const ids = rows.map(r => r.id)
+    const typedRows = rows as Array<{ id: string }>
+    const ids = typedRows.map((r) => r.id)
     const dayRange = getLocalDayRange(uploadDate)
     const map = await fetchDailyStatus(uploadDate, ids, { startISO: dayRange.start, endISO: dayRange.end })
     setDailyStatusMap(map)
