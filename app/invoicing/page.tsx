@@ -418,28 +418,83 @@ export default function InvoicingPage() {
         <meta charset="utf-8" />
         <title>${esc(suggested)}</title>
         <style>
-          body { font-family: Arial, sans-serif; margin: 18px; color: #111; }
-          h1 { margin: 0; font-size: 20px; }
-          .sub { margin: 4px 0 12px; color: #444; font-size: 12px; }
-          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 12px; }
-          th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
-          th { background: #f5f5f5; }
+          :root {
+            --bg: #020922;
+            --panel: #071638;
+            --text: #e5ecff;
+            --muted: #9fb2de;
+            --line: #1f376f;
+            --sales: #00c2b2;
+            --chargebacks: #ff5a1f;
+            --summary: #2f3f76;
+          }
+          body {
+            font-family: Arial, sans-serif;
+            margin: 18px;
+            color: var(--text);
+            background: var(--bg);
+          }
+          .header-wrap {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 14px 16px;
+            background: linear-gradient(180deg, #071c47 0%, #051433 100%);
+          }
+          h1 { margin: 0; font-size: 20px; color: #ffffff; }
+          .sub { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+          .section-title {
+            margin: 16px 0 0;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 700;
+            padding: 7px 10px;
+            border-radius: 6px 6px 0 0;
+          }
+          .section-title.sales { background: var(--sales); }
+          .section-title.chargebacks { background: var(--chargebacks); }
+          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 10px; }
+          th, td { border: 1px solid var(--line); padding: 6px 7px; text-align: left; }
+          thead th {
+            background: #0a204f;
+            color: #cfe0ff;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+          }
+          tbody td { background: var(--panel); }
+          .summary {
+            margin-top: 12px;
+            width: 360px;
+            margin-left: auto;
+            border-collapse: collapse;
+          }
+          .summary td {
+            border: 1px solid var(--line);
+            padding: 8px;
+            background: var(--panel);
+          }
+          .summary td:first-child {
+            background: var(--summary);
+            font-weight: 600;
+          }
         </style>
       </head>
       <body>
-        <h1>${esc(group.callCenter)}</h1>
-        <div class="sub">${esc(visibleBpoDetail.rangeLabel)}</div>
-        <h3>Sales</h3>
+        <div class="header-wrap">
+          <h1>${esc(group.callCenter)}</h1>
+          <div class="sub">${esc(visibleBpoDetail.rangeLabel)}</div>
+        </div>
+        <div class="section-title sales">Sales</div>
         <table>
           <thead><tr><th>Sales</th><th>Lead value (50%)</th><th>Carrier</th><th>Product Type</th><th>Agent Account</th><th>Draft Date</th><th>Monthly Premium</th><th>Coverage Amount</th><th>Com %</th><th>Com Type</th></tr></thead>
           <tbody>${salesRows || '<tr><td colspan="10">No sales in this period.</td></tr>'}</tbody>
         </table>
-        <h3>Chargebacks</h3>
+        <div class="section-title chargebacks">Chargebacks</div>
         <table>
           <thead><tr><th>Chargebacks</th><th>Lead value (50%)</th><th>Carrier</th><th>Product Type</th><th>Agent Account</th><th>Draft Date</th><th>Monthly Premium</th><th>Coverage Amount</th><th>Com %</th><th>Com Type</th></tr></thead>
           <tbody>${chargeRows || '<tr><td colspan="10">No chargebacks in this period.</td></tr>'}</tbody>
         </table>
-        <table>
+        <table class="summary">
           <tbody>
             <tr><td>New Business Total</td><td style="text-align:right;">${money(group.newBusinessTotal)}</td></tr>
             <tr><td>Chargebacks Total</td><td style="text-align:right;">${money(group.chargebacksTotal)}</td></tr>
