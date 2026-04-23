@@ -1001,23 +1001,6 @@ export default function InvoicingPage() {
         description="Generate BPO (call center) invoices: sales first, then chargebacks. Lead value shows 50% of the underlying commission amount (not gross). Use Mark paid when the batch is settled."
         icon={<span className="text-xl font-bold text-orange-400">$</span>}
       />
-      <div className="flex flex-wrap items-center gap-2 print:hidden">
-        <Button
-          onClick={() => void loadWeekScriptForCycle()}
-          variant="outline"
-          disabled={weekScriptLoading || !dateFrom || !dateTo}
-        >
-          {weekScriptLoading ? 'Loading Script...' : 'Week Script'}
-        </Button>
-        <Button onClick={exportWeekScriptCsv} variant="outline" disabled={weekScriptRows.length === 0}>
-          Export Week Script CSV
-        </Button>
-        {showWeekScript && (
-          <Button variant="outline" onClick={() => setShowWeekScript(false)}>
-            Hide Week Script
-          </Button>
-        )}
-      </div>
 
       <Card className="print:hidden">
         <CardHeader>
@@ -1086,6 +1069,22 @@ export default function InvoicingPage() {
             <Button size="sm" variant="outline" onClick={() => void clearDraftLocally()} disabled={selectedCallCenter === 'ALL'}>
               Clear Draft
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void loadWeekScriptForCycle()}
+              disabled={weekScriptLoading || !dateFrom || !dateTo}
+            >
+              {weekScriptLoading ? 'Loading Summary...' : 'Breakout Summary'}
+            </Button>
+            <Button size="sm" variant="outline" onClick={exportWeekScriptCsv} disabled={weekScriptRows.length === 0}>
+              Export Breakout CSV
+            </Button>
+            {showWeekScript && (
+              <Button size="sm" variant="outline" onClick={() => setShowWeekScript(false)}>
+                Hide Summary
+              </Button>
+            )}
             {draftSavedAt && (
               <span className="text-xs text-muted-foreground">
                 Draft saved: {new Date(draftSavedAt).toLocaleString()}
@@ -1136,10 +1135,10 @@ export default function InvoicingPage() {
         </div>
       )}
 
-      {showWeekScript && visibleBpoDetail && (
+      {showWeekScript && (
         <Card className="print:hidden">
           <CardHeader>
-            <CardTitle>Week Script ({visibleBpoDetail.rangeLabel})</CardTitle>
+            <CardTitle>Breakout Summary ({dateFrom && dateTo ? `${dateFrom} to ${dateTo}` : 'Current slab'})</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="overflow-x-auto">
