@@ -71,14 +71,32 @@ export function normalizeCallCenterName(callCenter: string | null | undefined): 
   const raw = String(callCenter ?? '').trim()
   if (!raw) return 'Unassigned'
   const compact = raw.replace(/\s+/g, ' ').toLowerCase()
-  if (compact === 'sellerzbpo' || compact === 'sellerz bpo' || compact === 'seller z bpo') return 'Jason BPO'
+  if (
+    compact === 'seller' ||
+    compact === 'sellerz' ||
+    compact === 'sellerzbpo' ||
+    compact === 'sellerz bpo' ||
+    compact === 'seller z bpo'
+  ) return 'Jason BPO'
   if (compact === 'jasonbpo' || compact === 'jason bpo') return 'Jason BPO'
   if (compact === 'argon comm') return 'Argon Comm BPO'
   if (compact === 'argon comm bpo') return 'Argon Comm BPO'
+  if (compact === 'ark tech') return 'ArkTech BPO'
+  if (compact === 'arktech bpo') return 'ArkTech BPO'
+  if (compact === 'corebiz' || compact === 'corebiz bpo') return 'CoreBiz BPO'
   if (compact === 'crossnotch') return 'CrossNotch BPO'
   if (compact === 'crossnotch bpo') return 'CrossNotch BPO'
+  if (compact === 'downtown') return 'DownTown BPO'
+  if (compact === 'downtown bpo') return 'DownTown BPO'
+  if (compact === 'plexi') return 'Plexi BPO'
+  if (compact === 'plexi bpo') return 'Plexi BPO'
+  if (compact === 'pro soliutions bpo') return 'Pro Solutions BPO'
+  if (compact === 'internal') return 'Internal BPO'
+  if (compact === 'inrernal bpo') return 'Internal BPO'
   if (compact === 'zupax marketing') return 'Zupax Marketing'
   if (compact === 'the zupax marketing') return 'Zupax Marketing'
+  if (compact === 'zupax bpo') return 'Zupax Marketing'
+  if (compact === 'the zupax bpo') return 'Zupax Marketing'
   return raw
 }
 
@@ -87,19 +105,69 @@ function callCenterFilterCandidates(filterCallCenter: string | null | undefined)
   if (!normalized) return []
   const out = new Set<string>([normalized, String(filterCallCenter ?? '').trim()])
   if (normalized === 'Jason BPO') {
+    out.add('Seller')
+    out.add('SellerZ')
+    out.add('SELLERZ')
     out.add('SellerzBpo')
     out.add('Sellerz BPO')
+    out.add('SellerZ BPO')
+    out.add('SellerZBPO')
     out.add('sellerzbpo')
     out.add('sellerz bpo')
+    out.add('sellerz')
     out.add('Jason BPO')
     out.add('jasonbpo')
     out.add('jason bpo')
   }
+  if (normalized === 'DownTown BPO') {
+    out.add('DownTown BPO')
+    out.add('Downtown BPO')
+    out.add('downtown bpo')
+    out.add('Downtown')
+    out.add('downtown')
+  }
+  if (normalized === 'ArkTech BPO') {
+    out.add('Ark Tech')
+    out.add('ArkTech BPO')
+    out.add('ark tech')
+    out.add('arktech bpo')
+  }
+  if (normalized === 'CoreBiz BPO') {
+    out.add('Corebiz')
+    out.add('Corebiz BPO')
+    out.add('CoreBiz BPO')
+    out.add('corebiz')
+    out.add('corebiz bpo')
+  }
+  if (normalized === 'Plexi BPO') {
+    out.add('Plexi')
+    out.add('Plexi BPO')
+    out.add('plexi')
+    out.add('plexi bpo')
+  }
+  if (normalized === 'Pro Solutions BPO') {
+    out.add('Pro Solutions BPO')
+    out.add('Pro Soliutions BPO')
+    out.add('pro solutions bpo')
+    out.add('pro soliutions bpo')
+  }
+  if (normalized === 'Internal BPO') {
+    out.add('Internal')
+    out.add('Internal BPO')
+    out.add('Inrernal BPO')
+    out.add('internal')
+    out.add('internal bpo')
+    out.add('inrernal bpo')
+  }
   if (normalized === 'Zupax Marketing') {
     out.add('Zupax Marketing')
     out.add('The Zupax Marketing')
+    out.add('Zupax BPO')
+    out.add('The Zupax BPO')
     out.add('zupax marketing')
     out.add('the zupax marketing')
+    out.add('zupax bpo')
+    out.add('the zupax bpo')
   }
   return Array.from(out).map((v) => v.trim()).filter(Boolean)
 }
@@ -841,7 +909,7 @@ export async function buildInvoiceDraft(
       .select('agency_carrier_id, policy_number, invoicing_status, effective_date, created_at')
       .in('policy_number', policyNumbers)
       .in('agency_carrier_id', agencyCarrierIds)
-      .lt('effective_date', startDate)
+      .lte('effective_date', startDate)
       .order('effective_date', { ascending: false })
       .order('created_at', { ascending: false })
 
@@ -1321,6 +1389,29 @@ export type BpoInvoiceDetailResult = {
   groups: BpoInvoiceGroupDetail[]
 }
 
+export type InvoiceDraftSnapshot = {
+  dateFrom: string
+  dateTo: string
+  selectedCallCenter: string
+  draft: InvoiceDraftResult
+  bpoDetail: BpoInvoiceDetailResult
+  previousChargebackByCallCenter: Record<string, string>
+  excludedPolicyKeys: Record<string, true>
+  excludedLineIds: Record<string, true>
+  lineEdits: Record<string, Partial<BpoInvoiceLine>>
+  pdfExportedByCenter: Record<string, true>
+  savedAt: string
+}
+
+export type InvoiceDraftRecord = {
+  id: string
+  start_date: string
+  end_date: string
+  call_center_filter: string | null
+  payload: InvoiceDraftSnapshot
+  updated_at: string
+}
+
 export type LegacyInvoiceStatusSeedRow = {
   policyNumber: string
   carrier: string
@@ -1538,6 +1629,11 @@ function carrierMatchCandidates(carrier: string | null | undefined): string[] {
     out.add('mutual of omaha')
     out.add('mutualofomaha')
   }
+  if (compact === 'rna' || compact.includes('royalneighborsofamerica')) {
+    out.add('rna')
+    out.add('royal neighbors of america')
+    out.add('royalneighborsofamerica')
+  }
   return Array.from(out).filter(Boolean)
 }
 
@@ -1694,7 +1790,7 @@ export async function buildBpoInvoiceLines(
             .select('agency_carrier_id, policy_number, invoicing_status, effective_date, created_at')
             .in('policy_number', policyNumbers)
             .in('agency_carrier_id', agencyCarrierIds)
-            .lt('effective_date', startDate)
+            .lte('effective_date', startDate)
             .order('effective_date', { ascending: false })
             .order('created_at', { ascending: false })
         : Promise.resolve({ data: [], error: null }),
@@ -2317,6 +2413,100 @@ export async function markInvoiceBatchPaid(input: {
   }
 
   return { batchId }
+}
+
+export async function saveInvoiceDraftSnapshot(input: {
+  startDate: string
+  endDate: string
+  callCenterFilter: string | null
+  payload: InvoiceDraftSnapshot
+  savedByEmail?: string | null
+}): Promise<{ id: string }> {
+  const normalizedFilter = input.callCenterFilter ? normalizeCallCenterName(input.callCenterFilter) : null
+  let existingQuery = supabase
+    .from('invoicing_drafts')
+    .select('id')
+    .eq('start_date', input.startDate)
+    .eq('end_date', input.endDate)
+    .is('locked_at', null)
+    .is('paid_batch_id', null)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+  existingQuery = normalizedFilter == null
+    ? existingQuery.is('call_center_filter', null)
+    : existingQuery.eq('call_center_filter', normalizedFilter)
+  const { data: existing, error: existingError } = await existingQuery.maybeSingle()
+  if (existingError) throw new Error(existingError.message)
+
+  if (existing?.id) {
+    const { error: updateError } = await supabase
+      .from('invoicing_drafts')
+      .update({
+        payload: input.payload as unknown as Record<string, unknown>,
+        saved_by_email: input.savedByEmail || null,
+      })
+      .eq('id', existing.id)
+    if (updateError) throw new Error(updateError.message)
+    return { id: String(existing.id) }
+  }
+
+  const { data: inserted, error: insertError } = await supabase
+    .from('invoicing_drafts')
+    .insert({
+      start_date: input.startDate,
+      end_date: input.endDate,
+      call_center_filter: normalizedFilter,
+      payload: input.payload as unknown as Record<string, unknown>,
+      saved_by_email: input.savedByEmail || null,
+    })
+    .select('id')
+    .single()
+  if (insertError || !inserted?.id) throw new Error(insertError?.message || 'Failed to save invoice draft.')
+  return { id: String(inserted.id) }
+}
+
+export async function loadInvoiceDraftSnapshot(input: {
+  startDate: string
+  endDate: string
+  callCenterFilter: string | null
+}): Promise<InvoiceDraftRecord | null> {
+  const normalizedFilter = input.callCenterFilter ? normalizeCallCenterName(input.callCenterFilter) : null
+  let query = supabase
+    .from('invoicing_drafts')
+    .select('id, start_date, end_date, call_center_filter, payload, updated_at')
+    .eq('start_date', input.startDate)
+    .eq('end_date', input.endDate)
+    .is('locked_at', null)
+    .is('paid_batch_id', null)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+  query = normalizedFilter == null
+    ? query.is('call_center_filter', null)
+    : query.eq('call_center_filter', normalizedFilter)
+  const { data, error } = await query.maybeSingle()
+  if (error) throw new Error(error.message)
+  if (!data) return null
+  return data as unknown as InvoiceDraftRecord
+}
+
+export async function clearInvoiceDraftSnapshot(input: {
+  startDate: string
+  endDate: string
+  callCenterFilter: string | null
+}): Promise<void> {
+  const normalizedFilter = input.callCenterFilter ? normalizeCallCenterName(input.callCenterFilter) : null
+  let query = supabase
+    .from('invoicing_drafts')
+    .delete()
+    .eq('start_date', input.startDate)
+    .eq('end_date', input.endDate)
+    .is('locked_at', null)
+    .is('paid_batch_id', null)
+  query = normalizedFilter == null
+    ? query.is('call_center_filter', null)
+    : query.eq('call_center_filter', normalizedFilter)
+  const { error } = await query
+  if (error) throw new Error(error.message)
 }
 
 export async function getPreviousChargebackByCallCenter(callCenters: string[]): Promise<Record<string, number>> {
