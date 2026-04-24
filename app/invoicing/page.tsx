@@ -915,6 +915,63 @@ export default function InvoicingPage() {
 
       const merged = new Map<string, { payment: number; updatedAt: string }>()
       const rows = (data || []) as Array<{ payload?: InvoiceDraftSnapshot; updated_at?: string }>
+
+      const computePayloadGroupSubtotal = (
+        payload: InvoiceDraftSnapshot,
+        group: InvoiceDraftSnapshot['bpoDetail']['groups'][number],
+      ): number => {
+        const policyKeyByCenterAndNumber = new Map<string, string>()
+        for (const draftGroup of payload.draft?.groups || []) {
+          for (const p of draftGroup.policies || []) {
+            policyKeyByCenterAndNumber.set(`${draftGroup.callCenter}::${p.policyNumber}`, p.policyKey)
+            const normalized = normalizePolicyNumberForMatch(p.policyNumber)
+            if (normalized && normalized !== p.policyNumber) {
+              policyKeyByCenterAndNumber.set(`${draftGroup.callCenter}::${normalized}`, p.policyKey)
+            }
+          }
+        }
+
+        const resolvePayloadPolicyKey = (callCenter: string, policyNumber: string): string | undefined => {
+          const direct = policyKeyByCenterAndNumber.get(`${callCenter}::${policyNumber}`)
+          if (direct) return direct
+          const normalized = normalizePolicyNumberForMatch(policyNumber)
+          if (!normalized) return undefined
+          return policyKeyByCenterAndNumber.get(`${callCenter}::${normalized}`)
+        }
+
+        const applyPayloadEdit = (line: BpoInvoiceLine): BpoInvoiceLine => {
+          const edit = payload.lineEdits?.[line.id]
+          return edit ? { ...line, ...edit } : line
+        }
+
+        const toLeadValue = (line: BpoInvoiceLine): number => {
+          const n = Number(line.leadValue)
+          return Number.isFinite(n) ? n : 0
+        }
+
+        const salesLines = (group.salesLines || [])
+          .filter((line) => {
+            if (payload.excludedLineIds?.[line.id]) return false
+            const key = resolvePayloadPolicyKey(group.callCenter, line.policyNumber)
+            return !key || !payload.excludedPolicyKeys?.[key]
+          })
+          .map(applyPayloadEdit)
+
+        const chargebackLines = (group.chargebackLines || [])
+          .filter((line) => {
+            if (payload.excludedLineIds?.[line.id]) return false
+            const key = resolvePayloadPolicyKey(group.callCenter, line.policyNumber)
+            return !key || !payload.excludedPolicyKeys?.[key]
+          })
+          .map(applyPayloadEdit)
+
+        const subtotal = round2(
+          salesLines.reduce((s, l) => s + toLeadValue(l), 0) +
+          chargebackLines.reduce((s, l) => s + toLeadValue(l), 0),
+        )
+        return subtotal
+      }
+
       for (const row of rows) {
         const payload = row.payload
         if (!payload?.bpoDetail?.groups) continue
@@ -923,7 +980,8 @@ export default function InvoicingPage() {
           const prevRaw = payload.previousChargebackByCallCenter?.[group.callCenter] ?? payload.previousChargebackByCallCenter?.[center] ?? '0'
           const prev = Number.parseFloat(String(prevRaw))
           const previous = Number.isNaN(prev) ? 0 : prev
-          const payment = round2(group.subtotal - previous)
+          const recomputedSubtotal = computePayloadGroupSubtotal(payload, group)
+          const payment = round2(recomputedSubtotal - previous)
           const existing = merged.get(center)
           const stamp = row.updated_at || ''
           if (!existing || stamp >= existing.updatedAt) {

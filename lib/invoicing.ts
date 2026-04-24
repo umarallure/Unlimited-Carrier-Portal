@@ -341,6 +341,14 @@ function deriveNextStatus(current: InvoicingStatus | null, grossAmount: number):
   return 'cb_never_paid'
 }
 
+function canTriggerStageChargeback(priorStatus: InvoicingStatus | null): boolean {
+  return priorStatus === 'new_sale' || priorStatus === 'paid_delete' || priorStatus === 'repay' || priorStatus === 'cb_repay'
+}
+
+function canTriggerStageRepay(priorStatus: InvoicingStatus | null): boolean {
+  return isChargebackLikeStatus(priorStatus)
+}
+
 function parseSortableTimestamp(row: DealTrackerCallCenterRow): number {
   const raw = row.updated_at || row.created_at || ''
   const parsed = raw ? new Date(raw).getTime() : 0
@@ -1120,7 +1128,6 @@ export async function buildInvoiceDraft(
   const cbStageAgencyIds = Array.from(new Set(cbStageDeals.map((d) => d.agency_carrier_id).filter(Boolean)))
   const cbFacts = await batchFetchCommissionFacts(cbStagePolicyNumbers, cbStageAgencyIds)
   const policiesWithAnyChargebackCommission = cbFacts.policiesWithAnyChargebackCommission
-  const latestSignalsByPolicy = cbFacts.latestSignalsByPolicy
   const latestChargebackGrossByPolicy = cbFacts.latestChargebackGrossByPolicy
   const referenceDate = endDate
 
@@ -1149,12 +1156,12 @@ export async function buildInvoiceDraft(
     const nextStatus = deriveNextStatus(statusBeforeCb, fullGross)
     policy.latestInvoicingStatus = nextStatus
     if (!isBillableStatus(nextStatus)) continue
+    const canApplyCbFromStatus = canTriggerStageChargeback(statusBeforeCb)
+    if (!canApplyCbFromStatus) continue
     const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(policy.policyKey)
-    const signal = latestSignalsByPolicy.get(policy.policyKey)
     const statementGross = latestChargebackGrossByPolicy.get(policy.policyKey)
     const useStatementChargeback =
       hasAnyCbCommission &&
-      signal?.latestKind === 'chargeback' &&
       statementGross != null
     const stageGross = useStatementChargeback
       ? roundMoney(statementGross)
@@ -1203,15 +1210,14 @@ export async function buildInvoiceDraft(
         const dealValue = toNumber(deal.deal_value)
         if (dealValue <= 0) continue
         const priorStatus = unseenStatus.get(key) ?? null
+        if (!canTriggerStageChargeback(priorStatus)) continue
         const fullGross = roundMoney(-Math.abs(dealValue))
         const nextStatus = deriveNextStatus(priorStatus, fullGross)
         if (!isBillableStatus(nextStatus)) continue
         const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(key)
-        const signal = latestSignalsByPolicy.get(key)
         const statementGross = latestChargebackGrossByPolicy.get(key)
         const useStatementChargeback =
           hasAnyCbCommission &&
-          signal?.latestKind === 'chargeback' &&
           statementGross != null
         const stageGross = useStatementChargeback
           ? roundMoney(statementGross)
@@ -1260,7 +1266,6 @@ export async function buildInvoiceDraft(
       const unseenAgencyIds = Array.from(new Set(unseen.map((d) => d.agency_carrier_id).filter(Boolean)))
       const hRows = await batchFetchStatusHistory(unseenPolicyNumbers, unseenAgencyIds)
       const unseenFacts = await batchFetchCommissionFacts(unseenPolicyNumbers, unseenAgencyIds)
-      const policiesWithAnyPositiveCommission = unseenFacts.policiesWithAnyPositiveCommission
       const unseenSignals = unseenFacts.latestSignalsByPolicy
       const unseenStatus = new Map<string, InvoicingStatus>()
       for (const row of hRows) {
@@ -1273,9 +1278,8 @@ export async function buildInvoiceDraft(
         if (policyMap.has(key)) continue
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
         if (shouldExcludeInvoiceEntry(deal.carrier, deal.call_center, draftRaw)) continue
-        if (!policiesWithAnyPositiveCommission.has(key)) continue
         const priorStatus = unseenStatus.get(key) ?? null
-        if (!(priorStatus == null || isChargebackLikeStatus(priorStatus))) continue
+        if (!canTriggerStageRepay(priorStatus)) continue
         const dealValue = toNumber(deal.deal_value)
         if (dealValue <= 0) continue
         const callCenter = deal.call_center?.trim() || 'Unassigned'
@@ -2051,7 +2055,6 @@ export async function buildBpoInvoiceLines(
   const cbStageAgencyIds = Array.from(new Set(cbStageDeals.map((d) => d.agency_carrier_id).filter(Boolean)))
   const cbFacts = await batchFetchCommissionFacts(cbStagePolicyNumbers, cbStageAgencyIds)
   const policiesWithAnyChargebackCommission = cbFacts.policiesWithAnyChargebackCommission
-  const latestSignalsByPolicy = cbFacts.latestSignalsByPolicy
   const latestChargebackGrossByPolicy = cbFacts.latestChargebackGrossByPolicy
   const cbStageCommissionRates = await getCommissionRatesForPolicies(cbStagePolicyNumbers)
   const referenceDate = endDate
@@ -2083,15 +2086,14 @@ export async function buildBpoInvoiceLines(
     const statusBeforeCb = currentStatusByPolicy.has(key)
       ? currentStatusByPolicy.get(key) ?? null
       : (latestStatusByPolicy.get(key) ?? null)
+    if (!canTriggerStageChargeback(statusBeforeCb)) continue
     const cbStatus = deriveNextStatus(statusBeforeCb, fullGross)
     currentStatusByPolicy.set(key, cbStatus)
     if (!isBillableStatus(cbStatus)) continue
     const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(key)
-    const signal = latestSignalsByPolicy.get(key)
     const statementGross = latestChargebackGrossByPolicy.get(key)
     const useStatementChargeback =
       hasAnyCbCommission &&
-      signal?.latestKind === 'chargeback' &&
       statementGross != null
     const leadValue = useStatementChargeback
       ? roundMoney(statementGross * BPO_INVOICE_LEAD_VALUE_SHARE)
@@ -2148,15 +2150,14 @@ export async function buildBpoInvoiceLines(
         const dealValue = toNumber(deal.deal_value)
         if (dealValue <= 0) continue
         const priorStatus = unseenStatus.get(key) ?? null
+        if (!canTriggerStageChargeback(priorStatus)) continue
         const fullGross = roundMoney(-Math.abs(dealValue))
         const cbStatus = deriveNextStatus(priorStatus, fullGross)
         if (!isBillableStatus(cbStatus)) continue
         const hasAnyCbCommission = policiesWithAnyChargebackCommission.has(key)
-        const signal = latestSignalsByPolicy.get(key)
         const statementGross = latestChargebackGrossByPolicy.get(key)
         const useStatementChargeback =
           hasAnyCbCommission &&
-          signal?.latestKind === 'chargeback' &&
           statementGross != null
         const leadValue = useStatementChargeback
           ? roundMoney(statementGross * BPO_INVOICE_LEAD_VALUE_SHARE)
@@ -2213,7 +2214,6 @@ export async function buildBpoInvoiceLines(
       const unseenAgencyIds = Array.from(new Set(unseen.map((d) => d.agency_carrier_id).filter(Boolean)))
       const hRows = await batchFetchStatusHistory(unseenPolicyNumbers, unseenAgencyIds)
       const unseenFacts = await batchFetchCommissionFacts(unseenPolicyNumbers, unseenAgencyIds)
-      const policiesWithAnyPositiveCommission = unseenFacts.policiesWithAnyPositiveCommission
       const unseenSignals = unseenFacts.latestSignalsByPolicy
       const unseenCommissionRates = await getCommissionRatesForPolicies(unseenPolicyNumbers)
       const unseenStatus = new Map<string, InvoicingStatus>()
@@ -2228,9 +2228,8 @@ export async function buildBpoInvoiceLines(
         if (salesLineAddedByPolicy.has(key)) continue
         const filterDraftRaw = deal.effective_date || deal.deal_creation_date || endDate
         if (shouldExcludeInvoiceEntry(deal.carrier, deal.call_center, filterDraftRaw)) continue
-        if (!policiesWithAnyPositiveCommission.has(key)) continue
         const priorStatus = unseenStatus.get(key) ?? null
-        if (!(priorStatus == null || isChargebackLikeStatus(priorStatus))) continue
+        if (!canTriggerStageRepay(priorStatus)) continue
         const dealValue = toNumber(deal.deal_value)
         if (dealValue <= 0) continue
         const lastCbGross = unseenSignals.get(key)?.latestChargebackGross ?? null
