@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import Papa from 'papaparse'
+import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 import { getDealTrackerEntries, getChangedFieldsFromHistory } from '@/lib/dealTracker'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -334,7 +335,7 @@ export default function DealTrackerPage() {
   const endIndex = startIndex + pageSize
   const paginatedEntries = filteredEntries.slice(startIndex, endIndex)
 
-  const exportCsv = () => {
+  const exportExcel = () => {
     if (!filteredEntries.length) return
     const headers = [
       'Name',
@@ -391,26 +392,17 @@ export default function DealTrackerPage() {
         e.agency_carrier_id ?? '',
       ]
     })
-    const csv = [headers, ...rows]
-      .map((row) =>
-        row
-          .map((val) => {
-            const s = String(val ?? '')
-            return s.includes(',') || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s
-          })
-          .join(',')
-      )
-      .join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows])
+    ws['!cols'] = [
+      { wch: 24 }, { wch: 16 }, { wch: 18 }, { wch: 22 }, { wch: 24 },
+      { wch: 22 }, { wch: 12 }, { wch: 24 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 20 }, { wch: 14 }, { wch: 20 }, { wch: 16 },
+      { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 36 }, { wch: 36 },
+    ]
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Deal Tracker')
     const today = new Date().toISOString().slice(0, 10)
-    link.href = url
-    link.setAttribute('download', `deal-tracker-${showMode}-${today}.csv`)
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
+    XLSX.writeFile(wb, `deal-tracker-${showMode}-${today}.xlsx`)
   }
 
   const handleImportClick = () => {
@@ -1033,10 +1025,10 @@ export default function DealTrackerPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={exportCsv}
+                onClick={exportExcel}
                 className={adminOutlineBtn}
               >
-                Export CSV
+                Export Excel
               </Button>
               <input
                 ref={importInputRef}

@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import * as XLSX from 'xlsx'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@/components/ui/table'
 import { Input } from '@/components/ui/input'
@@ -105,6 +106,7 @@ export default function CommissionReportPage() {
 
   const [rows, setRows] = useState<CommissionRow[]>([])
   const [allRows, setAllRows] = useState<CommissionRow[]>([])
+  const [rawRows, setRawRows] = useState<CommissionRow[]>([])
   const [loading, setLoading] = useState(true)
   const [carrierCode, setCarrierCode] = useState<string>('ALL')
   const [sourceFilter, setSourceFilter] = useState<string>('all')
@@ -155,6 +157,9 @@ export default function CommissionReportPage() {
 
           from = to + 1
         }
+
+        // Keep a raw copy of all transaction rows for export (no dedupe).
+        setRawRows(all)
 
         const dedupedTransactions = new Map<string, CommissionRow>()
         for (const row of all) {
@@ -359,6 +364,54 @@ export default function CommissionReportPage() {
   const startIndex = (currentPage - 1) * pageSize
   const endIndex = startIndex + pageSize
   const paginated = filtered.slice(startIndex, endIndex)
+
+  const exportExcel = () => {
+    if (!filtered.length) return
+    const policyKeys = new Set(filtered.map((r) => policyGroupKey(r)))
+    const transactionHeaders = [
+      'ID',
+      'Agency Carrier ID',
+      'Policy Number',
+      'Name',
+      'Carrier',
+      'Sales Agent',
+      'Date',
+      'Commission Rate',
+      'Advance Amount',
+      'Charge Back Amount',
+      'Source Table',
+    ]
+    const transactionRows = rawRows
+      .filter((r) => policyKeys.has(policyGroupKey(r)))
+      .sort((a, b) => {
+        const ad = normalizeDate(a.date)?.getTime() ?? 0
+        const bd = normalizeDate(b.date)?.getTime() ?? 0
+        return bd - ad
+      })
+      .map((r) => [
+        r.id ?? '',
+        r.agency_carrier_id ?? '',
+        r.policy_number ?? '',
+        r.name ?? '',
+        r.carrier ?? '',
+        r.sales_agent ?? '',
+        r.date ?? '',
+        r.commission_rate ?? '',
+        r.advance_amount ?? '',
+        r.charge_back_amount ?? '',
+        r.source_table ?? '',
+      ])
+    const transactionsWs = XLSX.utils.aoa_to_sheet([transactionHeaders, ...transactionRows])
+    transactionsWs['!cols'] = [
+      { wch: 36 }, { wch: 36 }, { wch: 16 }, { wch: 24 }, { wch: 20 },
+      { wch: 20 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 20 },
+    ]
+
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, transactionsWs, 'All Transactions')
+    const today = new Date().toISOString().slice(0, 10)
+    XLSX.writeFile(wb, `commission-tracker-${today}.xlsx`)
+  }
 
   const filterActiveCount = useMemo(() => {
     let n = 0
@@ -656,6 +709,9 @@ export default function CommissionReportPage() {
                 ({filtered.length} row{filtered.length === 1 ? '' : 's'})
               </span>
             </CardTitle>
+            <Button variant="outline" size="sm" onClick={exportExcel} className={adminOutlineBtn}>
+              Export Excel
+            </Button>
             <Button variant="outline" size="sm" onClick={openCreatePolicyDialog} className={adminOutlineBtn}>
               <Plus className="mr-1 h-4 w-4" />
               Add policy
