@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { chooseDdfSourceByDealCreationDate, ddfCutoverDateLabel, getDdfClient } from '@/lib/ddfSource'
 
 function normalizeName(name: string): string {
   return (name || '').replace(/\s+/g, ' ').trim()
@@ -45,15 +45,18 @@ function editDistance(a: string, b: string): number {
 }
 
 export async function GET(request: NextRequest) {
-  const url = process.env.NEXT_PUBLIC_EXTERNAL_SUPABASE_URL
-  const key = process.env.NEXT_PUBLIC_EXTERNAL_SUPABASE_ANON_KEY
   const carrier = request.nextUrl.searchParams.get('carrier') || 'AMAM'
   const testName = request.nextUrl.searchParams.get('name') || 'JANIS K MILL'
+  const dealCreationDate = request.nextUrl.searchParams.get('dealCreationDate')
+  const source = chooseDdfSourceByDealCreationDate(dealCreationDate)
 
   const out: Record<string, unknown> = {
-    configured: !!(url && key),
+    configured: true,
     carrier,
     testName,
+    dealCreationDate,
+    cutoverDate: ddfCutoverDateLabel(),
+    selectedSource: source,
     step: '',
     error: null as string | null,
     rowCount: 0,
@@ -63,12 +66,16 @@ export async function GET(request: NextRequest) {
     testMatchDetail: null as Record<string, unknown> | null,
   }
 
-  if (!url || !key) {
-    out.error = 'Missing NEXT_PUBLIC_EXTERNAL_SUPABASE_URL or NEXT_PUBLIC_EXTERNAL_SUPABASE_ANON_KEY in .env.local'
+  let client: ReturnType<typeof getDdfClient>['client']
+  let table = 'daily_deal_flow'
+  try {
+    const resolved = getDdfClient(source)
+    client = resolved.client
+    table = resolved.table
+  } catch (e: unknown) {
+    out.error = e instanceof Error ? e.message : 'Missing DDF connection env vars'
     return NextResponse.json(out, { status: 200 })
   }
-
-  const supabase = createClient(url, key)
 
   // Parse test name first so we can scope the query by name (fetch all DDF rows for this person, not just top 500 by date)
   const testParts = extractNameParts(testName)
@@ -81,10 +88,12 @@ export async function GET(request: NextRequest) {
   const isLiberty = carrierUpper === 'LIBERTY'
   const isCorebridge = carrierUpper === 'COREBRIDGE'
 
-  out.step = isAmam ? 'Querying daily_deal_flow with carrier ilike %AMAM% or %ANAM% or %American%' : `Querying daily_deal_flow with carrier filter for ${carrier}`
+  out.step = isAmam
+    ? `Querying ${table} (${source}) with carrier ilike %AMAM% or %ANAM% or %American%`
+    : `Querying ${table} (${source}) with carrier filter for ${carrier}`
 
-  let query = supabase
-    .from('daily_deal_flow')
+  let query = client!
+    .from(table)
     .select('*')
     .order('created_at', { ascending: false })
 
