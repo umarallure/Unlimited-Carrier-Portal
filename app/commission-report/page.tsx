@@ -125,7 +125,7 @@ export default function CommissionReportPage() {
   const [savingPolicy, setSavingPolicy] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [savingInlineEdits, setSavingInlineEdits] = useState(false)
-  const [draftByPolicyKey, setDraftByPolicyKey] = useState<Record<string, any>>({})
+  const [draftByTransactionId, setDraftByTransactionId] = useState<Record<string, any>>({})
 
   const fetchAllCommissionRows = async () => {
     setLoading(true)
@@ -470,47 +470,42 @@ export default function CommissionReportPage() {
 
   const startInlineEdit = () => {
     const next: Record<string, any> = {}
-    filtered.forEach((row) => {
-      const key = policyGroupKey(row)
-      const detailRows = allRows.filter(
-        (r) => r.agency_carrier_id === row.agency_carrier_id && r.policy_number === row.policy_number
-      )
-      const advanceTotal = detailRows.reduce((sum, r) => sum + (r.advance_amount ?? 0), 0)
-      const chargeBackTotal = detailRows.reduce((sum, r) => sum + (r.charge_back_amount ?? 0), 0)
-      next[key] = {
-        name: row.name ?? '',
-        date: row.date ?? '',
-        policy_number: row.policy_number ?? '',
-        carrier: row.carrier ?? '',
-        sales_agent: row.sales_agent ?? '',
-        commission_rate: row.commission_rate != null ? String(row.commission_rate) : '',
-        advance_amount: String(advanceTotal || ''),
-        charge_back_amount: String(chargeBackTotal || ''),
+    const policyKeys = new Set(filtered.map((row) => policyGroupKey(row)))
+    allRows.forEach((tx) => {
+      if (!tx.id) return
+      if (!policyKeys.has(policyGroupKey(tx))) return
+      next[String(tx.id)] = {
+        name: tx.name ?? '',
+        date: tx.date ?? '',
+        policy_number: tx.policy_number ?? '',
+        carrier: tx.carrier ?? '',
+        sales_agent: tx.sales_agent ?? '',
+        commission_rate: tx.commission_rate != null ? String(tx.commission_rate) : '',
+        advance_amount: tx.advance_amount != null ? String(tx.advance_amount) : '',
+        charge_back_amount: tx.charge_back_amount != null ? String(tx.charge_back_amount) : '',
       }
     })
-    setDraftByPolicyKey(next)
+    setDraftByTransactionId(next)
     setEditMode(true)
   }
 
   const cancelInlineEdit = () => {
     setEditMode(false)
-    setDraftByPolicyKey({})
+    setDraftByTransactionId({})
   }
 
-  const updateDraft = (key: string, field: string, value: string) => {
-    setDraftByPolicyKey((prev) => ({
+  const updateDraft = (txId: string, field: string, value: string) => {
+    setDraftByTransactionId((prev) => ({
       ...prev,
-      [key]: { ...(prev[key] || {}), [field]: value },
+      [txId]: { ...(prev[txId] || {}), [field]: value },
     }))
   }
 
   const saveInlineEdits = async () => {
     setSavingInlineEdits(true)
     try {
-      for (const row of filtered) {
-        const key = policyGroupKey(row)
-        const draft = draftByPolicyKey[key]
-        if (!draft || !row.id) continue
+      for (const [txId, draft] of Object.entries(draftByTransactionId)) {
+        if (!txId || !draft) continue
         const payload = {
           name: String(draft.name ?? '').trim() || null,
           date: String(draft.date ?? '').trim() || null,
@@ -525,12 +520,12 @@ export default function CommissionReportPage() {
             String(draft.charge_back_amount ?? '').trim() === '' ? null : Number.parseFloat(String(draft.charge_back_amount)),
           updated_at: new Date().toISOString(),
         }
-        const { error } = await supabase.from('commission_tracker').update(payload).eq('id', row.id)
+        const { error } = await supabase.from('commission_tracker').update(payload).eq('id', txId)
         if (error) throw error
       }
       await fetchAllCommissionRows()
       setEditMode(false)
-      setDraftByPolicyKey({})
+      setDraftByTransactionId({})
     } catch (error: any) {
       alert(error?.message || 'Failed to save commission edits.')
     } finally {
@@ -800,32 +795,26 @@ export default function CommissionReportPage() {
                     return (
                       <Fragment key={row.id || `${policyNumber}-${idx}`}>
                         <TableRow className={adminTableRowInteractive}>
-                          <TableCell className={adminTdStrong}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.name ?? ''} onChange={(e) => updateDraft(key, 'name', e.target.value)} className={inlineEditInputWide} /> : name}
-                          </TableCell>
+                          <TableCell className={adminTdStrong}>{name}</TableCell>
                           <TableCell className={adminTdMuted}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.date ?? ''} onChange={(e) => updateDraft(key, 'date', e.target.value)} className={inlineEditInput} /> : (row.date || '-')}
+                            {row.date || '-'}
                           </TableCell>
                           <TableCell className={`${adminTdMuted} font-mono text-sm`}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.policy_number ?? ''} onChange={(e) => updateDraft(key, 'policy_number', e.target.value)} className={cn(inlineEditInput, 'font-mono')} /> : policyNumber}
+                            {policyNumber}
                           </TableCell>
-                          <TableCell className={adminTdMuted}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.carrier ?? ''} onChange={(e) => updateDraft(key, 'carrier', e.target.value)} className={inlineEditInput} /> : carrierCodeDisplay}
-                          </TableCell>
-                          <TableCell className={adminTdMuted}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.sales_agent ?? ''} onChange={(e) => updateDraft(key, 'sales_agent', e.target.value)} className={inlineEditInput} /> : salesAgent}
+                          <TableCell className={adminTdMuted}>{carrierCodeDisplay}</TableCell>
+                          <TableCell className={adminTdMuted}>{salesAgent}</TableCell>
+                          <TableCell className={`${adminTdMuted} text-right`}>
+                            {commissionRate != null ? String(commissionRate) : ''}
                           </TableCell>
                           <TableCell className={`${adminTdMuted} text-right`}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.commission_rate ?? ''} onChange={(e) => updateDraft(key, 'commission_rate', e.target.value)} className={inlineEditInputNarrow} /> : (commissionRate != null ? String(commissionRate) : '')}
+                            {advanceTotal !== 0 ? formatMoney(advanceTotal) : ''}
                           </TableCell>
                           <TableCell className={`${adminTdMuted} text-right`}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.advance_amount ?? ''} onChange={(e) => updateDraft(key, 'advance_amount', e.target.value)} className={inlineEditInputNarrow} /> : (advanceTotal !== 0 ? formatMoney(advanceTotal) : '')}
-                          </TableCell>
-                          <TableCell className={`${adminTdMuted} text-right`}>
-                            {editMode ? <Input value={draftByPolicyKey[key]?.charge_back_amount ?? ''} onChange={(e) => updateDraft(key, 'charge_back_amount', e.target.value)} className={inlineEditInputNarrow} /> : (chargeBackTotal !== 0 ? formatMoney(chargeBackTotal) : '')}
+                            {chargeBackTotal !== 0 ? formatMoney(chargeBackTotal) : ''}
                           </TableCell>
                           <TableCell className={`${adminTdMuted} whitespace-nowrap text-center text-sm`}>
-                            {transactionCount > 1 ? (
+                            {transactionCount > 1 || editMode ? (
                               <button
                                 type="button"
                                 onClick={() => setExpandedKey(prev => (prev === key ? null : key))}
@@ -833,14 +822,14 @@ export default function CommissionReportPage() {
                                 title="View individual commission transactions for this policy"
                               >
                                 <span className="mr-1 font-mono">{transactionCount}</span>
-                                <span>{expandedKey === key ? 'Hide' : 'Details'}</span>
+                                <span>{expandedKey === key ? 'Hide' : (editMode ? 'Edit tx' : 'Details')}</span>
                               </button>
                             ) : (
                               <span className="text-muted-foreground">1</span>
                             )}
                           </TableCell>
                         </TableRow>
-                        {expandedKey === key && transactionCount > 1 && (
+                        {expandedKey === key && (
                           <TableRow className={adminExpandRowBg}>
                             <TableCell colSpan={9} className="p-0">
                               <div className="border-t border-border px-4 py-3 dark:border-slate-800">
@@ -869,25 +858,63 @@ export default function CommissionReportPage() {
                                           return da - db
                                         })
                                         .map((tx, i) => {
+                                          const txId = String(tx.id ?? '')
+                                          const txDraft = txId ? draftByTransactionId[txId] : null
                                           return (
                                             <TableRow key={tx.id || `${key}-tx-${i}`} className="border-b border-border/80 dark:border-slate-900/60">
                                               <TableCell className={`${adminTdMuted} text-xs`}>
-                                                {tx.date || '-'}
+                                                {editMode && txId ? (
+                                                  <Input
+                                                    value={txDraft?.date ?? tx.date ?? ''}
+                                                    onChange={(e) => updateDraft(txId, 'date', e.target.value)}
+                                                    className={inlineEditInput}
+                                                  />
+                                                ) : (tx.date || '-')}
                                               </TableCell>
                                               <TableCell className={`${adminTdStrong} text-xs`}>
-                                                {tx.name || '-'}
+                                                {editMode && txId ? (
+                                                  <Input
+                                                    value={txDraft?.name ?? tx.name ?? ''}
+                                                    onChange={(e) => updateDraft(txId, 'name', e.target.value)}
+                                                    className={inlineEditInputWide}
+                                                  />
+                                                ) : (tx.name || '-')}
                                               </TableCell>
                                               <TableCell className={`${adminTdMuted} text-xs`}>
-                                                {tx.sales_agent || '-'}
+                                                {editMode && txId ? (
+                                                  <Input
+                                                    value={txDraft?.sales_agent ?? tx.sales_agent ?? ''}
+                                                    onChange={(e) => updateDraft(txId, 'sales_agent', e.target.value)}
+                                                    className={inlineEditInput}
+                                                  />
+                                                ) : (tx.sales_agent || '-')}
                                               </TableCell>
                                               <TableCell className={`${adminTdMuted} text-right text-xs`}>
-                                                {tx.commission_rate != null ? String(tx.commission_rate) : ''}
+                                                {editMode && txId ? (
+                                                  <Input
+                                                    value={txDraft?.commission_rate ?? (tx.commission_rate != null ? String(tx.commission_rate) : '')}
+                                                    onChange={(e) => updateDraft(txId, 'commission_rate', e.target.value)}
+                                                    className={inlineEditInputNarrow}
+                                                  />
+                                                ) : (tx.commission_rate != null ? String(tx.commission_rate) : '')}
                                               </TableCell>
                                               <TableCell className={`${adminTdMuted} text-right text-xs`}>
-                                                {tx.advance_amount != null ? formatMoney(tx.advance_amount) : ''}
+                                                {editMode && txId ? (
+                                                  <Input
+                                                    value={txDraft?.advance_amount ?? (tx.advance_amount != null ? String(tx.advance_amount) : '')}
+                                                    onChange={(e) => updateDraft(txId, 'advance_amount', e.target.value)}
+                                                    className={inlineEditInputNarrow}
+                                                  />
+                                                ) : (tx.advance_amount != null ? formatMoney(tx.advance_amount) : '')}
                                               </TableCell>
                                               <TableCell className={`${adminTdMuted} text-right text-xs`}>
-                                                {tx.charge_back_amount != null ? formatMoney(tx.charge_back_amount) : ''}
+                                                {editMode && txId ? (
+                                                  <Input
+                                                    value={txDraft?.charge_back_amount ?? (tx.charge_back_amount != null ? String(tx.charge_back_amount) : '')}
+                                                    onChange={(e) => updateDraft(txId, 'charge_back_amount', e.target.value)}
+                                                    className={inlineEditInputNarrow}
+                                                  />
+                                                ) : (tx.charge_back_amount != null ? formatMoney(tx.charge_back_amount) : '')}
                                               </TableCell>
                                               <TableCell className="text-xs text-muted-foreground dark:text-slate-400">
                                                 {tx.source_table || ''}
