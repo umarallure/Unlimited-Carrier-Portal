@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
+import { chooseDdfSourceByDealCreationDate, getDdfClient } from './ddfSource'
 import { normalizeNameForSearch } from './dealTracker'
 
 export type InvoicingStatus =
@@ -1660,13 +1661,15 @@ function extractNamePartsForMatch(name: string): { first: string; last: string }
 async function fetchDailyDealFlowFinancialByNameCarrier(
   insuredName: string,
   carrier: string,
+  dealCreationDate?: string | null,
 ): Promise<{ productType: string | null; monthlyPremium: number | null; faceAmount: number | null }> {
   const normalizedName = normalizeNameForSearch(insuredName || '')
   const normalizedCarrier = normalizeCarrierForMatch(carrier)
   if (!normalizedName || !normalizedCarrier) {
     return { productType: null, monthlyPremium: null, faceAmount: null }
   }
-  const externalSupabase = getExternalSupabaseClient()
+  const source = chooseDdfSourceByDealCreationDate(dealCreationDate ?? null)
+  const { client: sourceClient, table } = source === 'new' ? getDdfClient('new') : { client: getExternalSupabaseClient(), table: 'daily_deal_flow' }
   const { first, last } = extractNamePartsForMatch(normalizedName)
   const attempts = [normalizedName]
   if (first && last && first !== last) attempts.push(`${first}%${last}`)
@@ -1675,8 +1678,8 @@ async function fetchDailyDealFlowFinancialByNameCarrier(
   const carrierCandidates = carrierMatchCandidates(carrier)
   for (const carrierCandidate of carrierCandidates) {
     for (const pattern of attempts) {
-      const { data, error } = await externalSupabase
-        .from('daily_deal_flow')
+      const { data, error } = await sourceClient
+        .from(table)
         .select('insured_name, carrier, product_type, monthly_premium, face_amount, created_at')
         .ilike('insured_name', pattern)
         .ilike('carrier', `%${carrierCandidate}%`)
@@ -1836,11 +1839,11 @@ export async function buildBpoInvoiceLines(
   const currentStatusByPolicy = new Map<string, InvoicingStatus | null>()
   const ddfFinancialByNameCarrier = new Map<string, { productType: string | null; monthlyPremium: number | null; faceAmount: number | null }>()
   const commissionRateByNormPolicyCache = new Map<string, number>()
-  const getDdfFinancial = async (insuredName: string, carrier: string) => {
-    const key = `${normalizeNameForSearch(insuredName)}::${normalizeCarrierForMatch(carrier)}`
+  const getDdfFinancial = async (insuredName: string, carrier: string, dealCreationDate?: string | null) => {
+    const key = `${normalizeNameForSearch(insuredName)}::${normalizeCarrierForMatch(carrier)}::${dealCreationDate ?? ''}`
     const cached = ddfFinancialByNameCarrier.get(key)
     if (cached) return cached
-    const fetched = await fetchDailyDealFlowFinancialByNameCarrier(insuredName, carrier)
+    const fetched = await fetchDailyDealFlowFinancialByNameCarrier(insuredName, carrier, dealCreationDate ?? null)
     ddfFinancialByNameCarrier.set(key, fetched)
     return fetched
   }
@@ -1887,7 +1890,11 @@ export async function buildBpoInvoiceLines(
     let ddfFinancial: { productType: string | null; monthlyPremium: number | null; faceAmount: number | null } | null = null
     const ensureDdfFinancial = async () => {
       if (ddfFinancial) return ddfFinancial
-      ddfFinancial = await getDdfFinancial(deal?.ghl_name || insuredName, tx.carrier || deal?.carrier || '')
+      ddfFinancial = await getDdfFinancial(
+        deal?.ghl_name || insuredName,
+        tx.carrier || deal?.carrier || '',
+        deal?.deal_creation_date ?? null,
+      )
       return ddfFinancial
     }
 
@@ -2006,7 +2013,11 @@ export async function buildBpoInvoiceLines(
         if (leadValue === 0) continue
         const callCenter = normalizeCallCenterName(deal.call_center)
         const insuredName = (deal.ghl_name || deal.name || '—').trim() || '—'
-        const ddfFinancial = await getDdfFinancial(deal.ghl_name || insuredName, deal.carrier || '')
+        const ddfFinancial = await getDdfFinancial(
+          deal.ghl_name || insuredName,
+          deal.carrier || '',
+          deal.deal_creation_date ?? null,
+        )
         const product = ddfFinancial.productType
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
@@ -2071,7 +2082,11 @@ export async function buildBpoInvoiceLines(
     if (dealValue <= 0) continue
     const callCenter = normalizeCallCenterName(deal.call_center)
     const insuredName = (deal.ghl_name || deal.name || '—').trim() || '—'
-    const ddfFinancial = await getDdfFinancial(deal.ghl_name || insuredName, deal.carrier || '')
+    const ddfFinancial = await getDdfFinancial(
+      deal.ghl_name || insuredName,
+      deal.carrier || '',
+      deal.deal_creation_date ?? null,
+    )
     const product = ddfFinancial.productType
     const agentAccount = (deal.sales_agent || '—').trim() || '—'
     const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
@@ -2166,7 +2181,11 @@ export async function buildBpoInvoiceLines(
         const callCenter = normalizeCallCenterName(deal.call_center)
         const insuredName = (deal.name || '—').trim() || '—'
         const insuredDisplayName = (deal.ghl_name || insuredName || '—').trim() || '—'
-        const ddfFinancial = await getDdfFinancial(deal.ghl_name || insuredDisplayName, deal.carrier || '')
+        const ddfFinancial = await getDdfFinancial(
+          deal.ghl_name || insuredDisplayName,
+          deal.carrier || '',
+          deal.deal_creation_date ?? null,
+        )
         const product = ddfFinancial.productType
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
@@ -2239,7 +2258,11 @@ export async function buildBpoInvoiceLines(
         if (repayGross <= 0) continue
         const callCenter = normalizeCallCenterName(deal.call_center)
         const insuredName = (deal.ghl_name || deal.name || '—').trim() || '—'
-        const ddfFinancial = await getDdfFinancial(deal.ghl_name || insuredName, deal.carrier || '')
+        const ddfFinancial = await getDdfFinancial(
+          deal.ghl_name || insuredName,
+          deal.carrier || '',
+          deal.deal_creation_date ?? null,
+        )
         const product = ddfFinancial.productType
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
