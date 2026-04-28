@@ -283,6 +283,7 @@ export default function DealTrackerPage() {
       const searchLower = searchTerm.toLowerCase()
       const matchesSearch = (
         entry.name?.toLowerCase().includes(searchLower) ||
+        entry.ghl_name?.toLowerCase().includes(searchLower) ||
         entry.policy_number?.toLowerCase().includes(searchLower) ||
         entry.sales_agent?.toLowerCase().includes(searchLower) ||
         entry.call_center?.toLowerCase().includes(searchLower) ||
@@ -339,6 +340,7 @@ export default function DealTrackerPage() {
     if (!filteredEntries.length) return
     const headers = [
       'Name',
+      'GHL Name',
       'Policy Number',
       'Carrier',
       'Policy Status',
@@ -371,6 +373,7 @@ export default function DealTrackerPage() {
             : 'unchanged'
       return [
         e.name ?? '',
+        e.ghl_name ?? '',
         e.policy_number ?? '',
         e.carrier ?? '',
         e.policy_status ?? '',
@@ -538,7 +541,7 @@ export default function DealTrackerPage() {
     setSavingInlineEdits(true)
     try {
       const fields = [
-        'name', 'policy_number', 'carrier', 'policy_status', 'ghl_stage', 'carrier_status', 'status',
+        'name', 'ghl_name', 'policy_number', 'carrier', 'policy_status', 'ghl_stage', 'carrier_status', 'status',
         'deal_value', 'cc_value', 'sales_agent', 'writing_number', 'call_center', 'phone_number',
         'deal_creation_date', 'effective_date',
       ]
@@ -556,6 +559,7 @@ export default function DealTrackerPage() {
           String(draft.cc_value ?? '').trim() === '' ? null : Number.parseFloat(String(draft.cc_value))
         const payload = {
           name: String(draft.name ?? '').trim() || null,
+          ghl_name: String(draft.ghl_name ?? '').trim() || null,
           policy_number: String(draft.policy_number ?? '').trim(),
           carrier: String(draft.carrier ?? '').trim(),
           policy_status: String(draft.policy_status ?? '').trim() || null,
@@ -1124,7 +1128,8 @@ export default function DealTrackerPage() {
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border hover:bg-transparent odd:bg-transparent even:bg-transparent dark:border-slate-800">
-                  <TableHead className={adminThPlain}>Name</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[220px]')}>Name</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[220px]')}>GHL Name</TableHead>
                   <TableHead className={adminThPlain}>Policy Number</TableHead>
                   <TableHead className={adminThPlain}>Carrier</TableHead>
                   <TableHead className={adminThPlain}>Policy Status</TableHead>
@@ -1149,13 +1154,13 @@ export default function DealTrackerPage() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={16} className="text-center py-8">
+                    <TableCell colSpan={17} className="text-center py-8">
                       <Loader2 className="w-8 h-8 animate-spin text-orange-400 mx-auto" />
                     </TableCell>
                   </TableRow>
                 ) : filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={16} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={17} className="py-8 text-center text-muted-foreground">
                       {hasActiveFilters ? 'No deals found matching your filters' : 'No deals found'}
                     </TableCell>
                   </TableRow>
@@ -1165,11 +1170,18 @@ export default function DealTrackerPage() {
                     const cellChanged = (field: string) => changedFields.includes(field)
                     return (
                     <TableRow key={entry.id} className={adminTableRowInteractive}>
-                      <TableCell className={cn(adminTdStrong, 'font-medium', cellChanged('name') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
+                      <TableCell className={cn(adminTdStrong, 'min-w-[220px] font-medium', cellChanged('name') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
                         {editMode ? (
                           <Input value={draftById[entry.id]?.name ?? ''} onChange={(e) => updateDraft(entry.id, 'name', e.target.value)} className={inlineEditInputWide} />
                         ) : (
                           entry.name || '-'
+                        )}
+                      </TableCell>
+                      <TableCell className={cn(adminTdMuted, 'min-w-[220px]', cellChanged('ghl_name') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
+                        {editMode ? (
+                          <Input value={draftById[entry.id]?.ghl_name ?? ''} onChange={(e) => updateDraft(entry.id, 'ghl_name', e.target.value)} className={inlineEditInputWide} />
+                        ) : (
+                          entry.ghl_name || '-'
                         )}
                       </TableCell>
                       <TableCell className={cn(adminTdMuted, 'font-mono text-sm')}>

@@ -7,7 +7,7 @@ import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
-import { chooseDdfSourceByDealCreationDate, getDdfClient } from './ddfSource'
+import { getDdfClient } from './ddfSource'
 
 export { mergeEffectiveDate } from './calendarDate'
 export { mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
@@ -1174,25 +1174,12 @@ export async function bulkFetchDailyDealFlowInfo(
   if (typeof window !== 'undefined') {
     return fetchDdfViaApi(insuredNames, carrier, dealCreationDateByName)
   }
-  const legacyNames: string[] = []
-  const newNames: string[] = []
-  insuredNames.forEach((name) => {
-    const normalized = normalizeNameForSearch(name)
-    const date = dealCreationDateByName?.get(normalized) ?? null
-    if (chooseDdfSourceByDealCreationDate(date) === 'new') newNames.push(name)
-    else legacyNames.push(name)
-  })
+
   const out = new Map<string, DailyDealFlowInfo>()
-  if (legacyNames.length > 0) {
-    const legacy = await doBulkFetchDailyDealFlowInfo(getExternalSupabaseClient(), legacyNames, carrier)
-    legacy.forEach((v, k) => out.set(k, v))
-  }
-  if (newNames.length > 0) {
-    const { client, table } = getDdfClient('new')
-    const fresh = await getDdfRecordsForCarrier(client, carrier, table)
-    const matched = matchDdfNamesToRecords(fresh, newNames)
-    matched.forEach((v, k) => out.set(k, v))
-  }
+  const { client, table } = getDdfClient('new')
+  const fresh = await getDdfRecordsForCarrier(client, carrier, table)
+  const matched = matchDdfNamesToRecords(fresh, insuredNames)
+  matched.forEach((v, k) => out.set(k, v))
   return out
 }
 
