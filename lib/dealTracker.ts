@@ -3650,12 +3650,24 @@ const NEW_DEAL_WINDOW_MS = 24 * 60 * 60 * 1000 // 24 hours
 export async function getDealTrackerEntries(filters?: {
   agency_carrier_id?: string
   carrier?: string
+  agency_name?: string
   policy_status?: string
+  ghl_stage?: string
+  sales_agent?: string
+  call_center?: string
+  search?: string
+  date_from?: string
+  date_to?: string
+  deal_value_min?: number
+  deal_value_max?: number
   limit?: number
   offset?: number
+  count?: 'exact'
 }) {
   const requestedLimit = filters?.limit ?? 1000
   const offset = filters?.offset ?? 0
+  const useExactCount = filters?.count === 'exact'
+  const searchTerm = String(filters?.search ?? '').trim()
 
   const buildQuery = () => {
     let q = supabase
@@ -3673,7 +3685,7 @@ export async function getDealTrackerEntries(filters?: {
             name
           )
         )
-      `)
+      `, useExactCount ? { count: 'exact' } : undefined)
       .order('created_at', { ascending: false })
 
     if (filters?.agency_carrier_id) {
@@ -3682,8 +3694,51 @@ export async function getDealTrackerEntries(filters?: {
     if (filters?.carrier) {
       q = q.eq('carrier', filters.carrier)
     }
+    if (filters?.agency_name) {
+      q = q.eq('agency_carriers.agencies.name', filters.agency_name)
+    }
     if (filters?.policy_status) {
       q = q.eq('policy_status', filters.policy_status)
+    }
+    if (filters?.ghl_stage) {
+      q = q.eq('ghl_stage', filters.ghl_stage)
+    }
+    if (filters?.sales_agent) {
+      q = q.eq('sales_agent', filters.sales_agent)
+    }
+    if (filters?.call_center) {
+      q = q.eq('call_center', filters.call_center)
+    }
+    if (filters?.date_from) {
+      q = q.gte('deal_creation_date', filters.date_from)
+    }
+    if (filters?.date_to) {
+      q = q.lte('deal_creation_date', filters.date_to)
+    }
+    if (typeof filters?.deal_value_min === 'number' && Number.isFinite(filters.deal_value_min)) {
+      q = q.gte('deal_value', filters.deal_value_min)
+    }
+    if (typeof filters?.deal_value_max === 'number' && Number.isFinite(filters.deal_value_max)) {
+      q = q.lte('deal_value', filters.deal_value_max)
+    }
+    if (searchTerm.length > 0) {
+      const safe = searchTerm
+        .replace(/[%*(),]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (safe.length > 0) {
+        q = q.or(
+          [
+            `name.ilike.*${safe}*`,
+            `ghl_name.ilike.*${safe}*`,
+            `policy_number.ilike.*${safe}*`,
+            `sales_agent.ilike.*${safe}*`,
+            `call_center.ilike.*${safe}*`,
+            `phone_number.ilike.*${safe}*`,
+            `writing_number.ilike.*${safe}*`,
+          ].join(',')
+        )
+      }
     }
     return q
   }
@@ -3713,11 +3768,14 @@ export async function getDealTrackerEntries(filters?: {
     query = query.range(offset, offset + (requestedLimit || 100) - 1)
   }
 
-  const { data, error } = await query
+  const { data, error, count } = await query
 
   if (error) {
     throw new Error(`Failed to fetch deal tracker entries: ${error.message}`)
   }
-
-  return (data || []).map(enrichStatus)
+  const rows = (data || []).map(enrichStatus)
+  if (filters?.count === 'exact') {
+    return { rows, count: count ?? 0 }
+  }
+  return rows
 }
