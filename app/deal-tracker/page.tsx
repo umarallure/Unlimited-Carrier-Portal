@@ -50,8 +50,10 @@ export default function DealTrackerPage() {
   const inlineEditInputNarrow = 'h-9 min-w-[82px] px-2 text-sm'
 
   const [entries, setEntries] = useState<any[]>([])
+  const [totalCount, setTotalCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
   const [carrierFilter, setCarrierFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [ghlStageFilter, setGhlStageFilter] = useState<string>('all')
@@ -91,12 +93,21 @@ export default function DealTrackerPage() {
   const importInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    fetchEntries()
-  }, [])
-
-  useEffect(() => {
     setCurrentPage(1) // Reset to page 1 when filters change
   }, [searchTerm, carrierFilter, statusFilter, ghlStageFilter, agencyFilter, agentFilter, callCenterFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax, policyStatusUpdatedFilter, dealValueUpdatedFilter, showMode])
+
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearchTerm(searchTerm), 300)
+    return () => clearTimeout(handle)
+  }, [searchTerm])
+
+  useEffect(() => {
+    fetchEntries()
+  }, [currentPage, pageSize, debouncedSearchTerm, carrierFilter, statusFilter, ghlStageFilter, agencyFilter, agentFilter, callCenterFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax])
+
+  useEffect(() => {
+    fetchFilterOptions()
+  }, [])
 
   const fetchFilterOptions = async () => {
     try {
@@ -138,10 +149,8 @@ export default function DealTrackerPage() {
       }))
       setAgencyCarrierOptions(options)
 
-      // 2) Use deal_tracker rows (paginated helper) to derive agents, call centers, statuses
-      const dealRows = await getDealTrackerEntries({
-        limit: 20000, // large batch so we see all distinct values in practice
-      })
+      // 2) Use a bounded server-side read to derive options without loading the full table.
+      const dealRows = await getDealTrackerEntries({ limit: 5000 })
 
       const uniqueAgents = Array.from(
         new Set(dealRows.map((e: any) => e.sales_agent).filter(Boolean))
@@ -176,16 +185,28 @@ export default function DealTrackerPage() {
   const fetchEntries = async () => {
     setLoading(true)
     try {
-      // Fetch all entries (we'll filter client-side for complex filters)
-      const data = await getDealTrackerEntries({
-        limit: 20000, // Fetch a large batch for filtering and filter options
+      const min = dealValueMin.trim() === '' ? undefined : Number.parseFloat(dealValueMin)
+      const max = dealValueMax.trim() === '' ? undefined : Number.parseFloat(dealValueMax)
+      const response = await getDealTrackerEntries({
+        limit: pageSize,
+        offset: (currentPage - 1) * pageSize,
+        count: 'exact',
+        search: debouncedSearchTerm.trim() || undefined,
+        carrier: carrierFilter !== 'all' ? carrierFilter : undefined,
+        agency_name: agencyFilter !== 'all' ? agencyFilter : undefined,
+        policy_status: statusFilter !== 'all' ? statusFilter : undefined,
+        ghl_stage: ghlStageFilter !== 'all' ? ghlStageFilter : undefined,
+        sales_agent: agentFilter !== 'all' ? agentFilter : undefined,
+        call_center: callCenterFilter !== 'all' ? callCenterFilter : undefined,
+        date_from: dateFromFilter || undefined,
+        date_to: dateToFilter || undefined,
+        deal_value_min: Number.isFinite(min as number) ? min : undefined,
+        deal_value_max: Number.isFinite(max as number) ? max : undefined,
       })
-
-      const rows = data || []
-      setEntries(rows)
-      // Build / refresh filter options whenever we refresh entries
-      // so new carriers/agencies/agents appear in the dropdowns.
-      fetchFilterOptions()
+      const rows = Array.isArray(response) ? response : response.rows
+      const count = Array.isArray(response) ? rows.length : response.count
+      setEntries(rows || [])
+      setTotalCount(count || 0)
     } catch (error) {
       console.error('Error fetching entries:', error)
     } finally {
@@ -279,43 +300,10 @@ export default function DealTrackerPage() {
       if (dealValueUpdatedFilter === 'not_updated' && updated) return false
       if (dealValueUpdatedFilter === 'changed' && !changed) return false
     }
-    if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase()
-      const matchesSearch = (
-        entry.name?.toLowerCase().includes(searchLower) ||
-        entry.policy_number?.toLowerCase().includes(searchLower) ||
-        entry.sales_agent?.toLowerCase().includes(searchLower) ||
-        entry.call_center?.toLowerCase().includes(searchLower) ||
-        entry.phone_number?.toLowerCase().includes(searchLower) ||
-        entry.writing_number?.toLowerCase().includes(searchLower)
-      )
-      if (!matchesSearch) return false
-    }
-    if (carrierFilter !== 'all' && entry.carrier !== carrierFilter) return false
-    if (agencyFilter !== 'all') {
-      const agencyName = entry.agency_carriers?.agencies?.name
-      if (agencyName !== agencyFilter) return false
-    }
-    if (statusFilter !== 'all' && entry.policy_status !== statusFilter) return false
-    if (ghlStageFilter !== 'all' && entry.ghl_stage !== ghlStageFilter) return false
-    if (agentFilter !== 'all' && entry.sales_agent !== agentFilter) return false
-    if (callCenterFilter !== 'all' && entry.call_center !== callCenterFilter) return false
-    const dateFrom = parseLocalDate(dateFromFilter)
-    const dateTo = parseLocalDate(dateToFilter)
-    const toEnd = dateTo ? (() => { const e = new Date(dateTo); e.setHours(23, 59, 59, 999); return e })() : null
-    if (!entryMatchesDateRange(entry, dateFrom, toEnd)) return false
-    if (dealValueMin) {
-      const minValue = parseFloat(dealValueMin)
-      if (isNaN(minValue) || !entry.deal_value || entry.deal_value < minValue) return false
-    }
-    if (dealValueMax) {
-      const maxValue = parseFloat(dealValueMax)
-      if (isNaN(maxValue) || !entry.deal_value || entry.deal_value > maxValue) return false
-    }
     return true
   })
 
-  const allTabCount = baseFilteredEntries.length
+  const allTabCount = totalCount
   const newTabCount = baseFilteredEntries.filter((e) => e.isNew).length
   const updatedTabCount = baseFilteredEntries.filter(hasUpdates).length
   const changedTabCount = baseFilteredEntries.filter(e => getChangedFieldsFromHistory(e).length > 0).length
@@ -330,15 +318,16 @@ export default function DealTrackerPage() {
           : baseFilteredEntries
 
   // Pagination
-  const totalPages = Math.ceil(filteredEntries.length / pageSize)
-  const startIndex = (currentPage - 1) * pageSize
-  const endIndex = startIndex + pageSize
-  const paginatedEntries = filteredEntries.slice(startIndex, endIndex)
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
+  const startIndex = totalCount === 0 ? 0 : (currentPage - 1) * pageSize
+  const endIndex = Math.min(startIndex + filteredEntries.length, totalCount)
+  const paginatedEntries = filteredEntries
 
   const exportExcel = () => {
     if (!filteredEntries.length) return
     const headers = [
       'Name',
+      'GHL Name',
       'Policy Number',
       'Carrier',
       'Policy Status',
@@ -371,6 +360,7 @@ export default function DealTrackerPage() {
             : 'unchanged'
       return [
         e.name ?? '',
+        e.ghl_name ?? '',
         e.policy_number ?? '',
         e.carrier ?? '',
         e.policy_status ?? '',
@@ -538,7 +528,7 @@ export default function DealTrackerPage() {
     setSavingInlineEdits(true)
     try {
       const fields = [
-        'name', 'policy_number', 'carrier', 'policy_status', 'ghl_stage', 'carrier_status', 'status',
+        'name', 'ghl_name', 'policy_number', 'carrier', 'policy_status', 'ghl_stage', 'carrier_status', 'status',
         'deal_value', 'cc_value', 'sales_agent', 'writing_number', 'call_center', 'phone_number',
         'deal_creation_date', 'effective_date',
       ]
@@ -556,6 +546,7 @@ export default function DealTrackerPage() {
           String(draft.cc_value ?? '').trim() === '' ? null : Number.parseFloat(String(draft.cc_value))
         const payload = {
           name: String(draft.name ?? '').trim() || null,
+          ghl_name: String(draft.ghl_name ?? '').trim() || null,
           policy_number: String(draft.policy_number ?? '').trim(),
           carrier: String(draft.carrier ?? '').trim(),
           policy_status: String(draft.policy_status ?? '').trim() || null,
@@ -687,14 +678,6 @@ export default function DealTrackerPage() {
     policyStatusUpdatedFilter !== 'all',
     dealValueUpdatedFilter !== 'all',
   ].filter(Boolean).length
-
-  if (loading) {
-    return (
-      <div className="flex min-h-[40vh] items-center justify-center py-16">
-        <Loader2 className="h-9 w-9 animate-spin text-orange-400" />
-      </div>
-    )
-  }
 
   return (
     <div className="admin-page space-y-6">
@@ -993,7 +976,7 @@ export default function DealTrackerPage() {
           {/* Results Count */}
           <div className="mt-4 flex items-center justify-between border-t border-border pt-4 text-sm text-muted-foreground dark:border-slate-800/80">
             <span>
-              Showing {filteredEntries.length === 0 ? 0 : startIndex + 1}–{Math.min(endIndex, filteredEntries.length)} of {filteredEntries.length} deals
+              Showing {totalCount === 0 ? 0 : startIndex + 1}–{endIndex} of {totalCount} deals
             </span>
             <div className="flex items-center gap-2">
               <span>Rows per page:</span>
@@ -1020,7 +1003,7 @@ export default function DealTrackerPage() {
             <div className="flex items-center gap-3">
               <CardTitle className={adminCardTitle}>
                 Deals{' '}
-                <span className="text-xs font-normal text-muted-foreground">({filteredEntries.length})</span>
+                <span className="text-xs font-normal text-muted-foreground">({totalCount})</span>
               </CardTitle>
               <Button
                 variant="outline"
@@ -1124,7 +1107,8 @@ export default function DealTrackerPage() {
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border hover:bg-transparent odd:bg-transparent even:bg-transparent dark:border-slate-800">
-                  <TableHead className={adminThPlain}>Name</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[220px]')}>Name</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[220px]')}>GHL Name</TableHead>
                   <TableHead className={adminThPlain}>Policy Number</TableHead>
                   <TableHead className={adminThPlain}>Carrier</TableHead>
                   <TableHead className={adminThPlain}>Policy Status</TableHead>
@@ -1149,13 +1133,13 @@ export default function DealTrackerPage() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={16} className="text-center py-8">
+                    <TableCell colSpan={17} className="text-center py-8">
                       <Loader2 className="w-8 h-8 animate-spin text-orange-400 mx-auto" />
                     </TableCell>
                   </TableRow>
                 ) : filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={16} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={17} className="py-8 text-center text-muted-foreground">
                       {hasActiveFilters ? 'No deals found matching your filters' : 'No deals found'}
                     </TableCell>
                   </TableRow>
@@ -1165,11 +1149,18 @@ export default function DealTrackerPage() {
                     const cellChanged = (field: string) => changedFields.includes(field)
                     return (
                     <TableRow key={entry.id} className={adminTableRowInteractive}>
-                      <TableCell className={cn(adminTdStrong, 'font-medium', cellChanged('name') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
+                      <TableCell className={cn(adminTdStrong, 'min-w-[220px] font-medium', cellChanged('name') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
                         {editMode ? (
                           <Input value={draftById[entry.id]?.name ?? ''} onChange={(e) => updateDraft(entry.id, 'name', e.target.value)} className={inlineEditInputWide} />
                         ) : (
                           entry.name || '-'
+                        )}
+                      </TableCell>
+                      <TableCell className={cn(adminTdMuted, 'min-w-[220px]', cellChanged('ghl_name') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
+                        {editMode ? (
+                          <Input value={draftById[entry.id]?.ghl_name ?? ''} onChange={(e) => updateDraft(entry.id, 'ghl_name', e.target.value)} className={inlineEditInputWide} />
+                        ) : (
+                          entry.ghl_name || '-'
                         )}
                       </TableCell>
                       <TableCell className={cn(adminTdMuted, 'font-mono text-sm')}>
@@ -1349,7 +1340,7 @@ export default function DealTrackerPage() {
           </div>
 
           {/* Pagination Controls */}
-          {filteredEntries.length > 0 && (
+          {totalCount > 0 && (
             <div className={cn('flex flex-col gap-3 border-t border-border px-4 py-4 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800/80', adminPaginationBar)}>
               <div className="text-sm text-muted-foreground">
                 Page {currentPage} of {totalPages}

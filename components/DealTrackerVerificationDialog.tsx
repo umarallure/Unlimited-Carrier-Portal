@@ -519,6 +519,9 @@ export function DealTrackerVerificationDialog({
                 <TableRow className="border-border hover:bg-transparent dark:border-slate-700">
                   <TableHead className="w-20 font-semibold text-foreground">Status</TableHead>
                   <TableHead className="min-w-[120px] font-semibold text-foreground">Name</TableHead>
+                  <TableHead className="min-w-[120px] font-semibold text-foreground" title="GHL lead name from Daily Deal Flow">
+                    GHL Name (DDF)
+                  </TableHead>
                   <TableHead className="w-28 font-semibold text-foreground">Policy #</TableHead>
                   <TableHead className="min-w-[100px] font-semibold text-foreground">Policy Status</TableHead>
                   <TableHead className="min-w-[110px] font-semibold text-foreground">GHL Stage</TableHead>
@@ -541,7 +544,7 @@ export function DealTrackerVerificationDialog({
               <TableBody>
                 {filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={17} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={18} className="py-8 text-center text-muted-foreground">
                       {filter === 'incomplete'
                         ? 'No incomplete GHL Stage rows — all rows have a valid stage.'
                         : 'No entries match the current filter. Switch to &quot;All&quot; to see all rows.'}
@@ -620,6 +623,14 @@ export function DealTrackerVerificationDialog({
                         <Input
                           value={entry.name ?? ''}
                           onChange={e => updateEntry(globalIndex, 'name', asNullableInput(e.target.value))}
+                          className={dialogTableInput}
+                          placeholder="-"
+                        />
+                      </TableCell>
+                      <TableCell className={cn('p-1', cellChanged('ghl_name') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
+                        <Input
+                          value={entry.ghl_name ?? ''}
+                          onChange={e => updateEntry(globalIndex, 'ghl_name', asNullableInput(e.target.value))}
                           className={dialogTableInput}
                           placeholder="-"
                         />
@@ -771,7 +782,7 @@ export function DealTrackerVerificationDialog({
                     </TableRow>
                     {changesExpanded && hasChanges && (
                       <TableRow className="border-border bg-muted/70 dark:border-slate-700 dark:bg-slate-950/80">
-                        <TableCell colSpan={18} className="border-t-0 px-4 py-3">
+                        <TableCell colSpan={19} className="border-t-0 px-4 py-3">
                           <div className="mb-2 text-xs font-medium text-muted-foreground">What changed (previous → current)</div>
                           <div className="flex flex-wrap gap-x-6 gap-y-1.5">
                             {(entry.changedFields ?? []).map(field => {
@@ -793,7 +804,7 @@ export function DealTrackerVerificationDialog({
                     )}
                     {isExpanded && (
                       <TableRow key={`${rowKey}-ddf`}>
-                        <TableCell colSpan={18} className="border-t border-border bg-muted/50 py-2 dark:border-slate-700 dark:bg-slate-950/60">
+                        <TableCell colSpan={19} className="border-t border-border bg-muted/50 py-2 dark:border-slate-700 dark:bg-slate-950/60">
                           {ddfState.loading && (
                             <div className="flex items-center gap-2 text-xs text-muted-foreground">
                               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
