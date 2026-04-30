@@ -38,12 +38,16 @@ const ACTIVE_STAGES = new Set([
   'ACTIVE PLACED - Paid as Advanced',
   'Active Placed - Paid as Earned',
   'ACTIVE - 3 Months +',
+  'ACTIVE - 6 months +',
+  'ACTIVE - 9 months',
+  'ACTIVE - Past Charge-Back Period',
 ])
 
 const ISSUED_STAGES = new Set([
   'Issued - Pending First Draft',
   'FDPF Pending Reason',
   'FDPF Insufficient Funds',
+  'FDPF Unauthorized Draft',
   'FDPF Incorrect Banking Info',
 ])
 
@@ -61,7 +65,10 @@ function stageRequiresPositiveDealValue(stage: string): boolean {
   return (
     t === 'active placed - paid as advanced' ||
     t === 'active placed - paid as earned' ||
-    t === 'active - 3 months +'
+    t === 'active - 3 months +' ||
+    t === 'active - 6 months +' ||
+    t === 'active - 9 months' ||
+    t === 'active - past charge-back period'
   )
 }
 
@@ -73,12 +80,14 @@ function stageRequiresPositiveDealValue(stage: string): boolean {
 const MANUAL_APPROVAL_STAGES = new Set([
   'Pending Manual Action',
   'FDPF Insufficient Funds',
+  'FDPF Unauthorized Draft',
   'FDPF Incorrect Banking Info',
 ])
 
 const MANUAL_STAGE_SAFE_PARENT: Record<string, string> = {
   'Pending Manual Action': 'Pending Approval',
   'FDPF Insufficient Funds': 'FDPF Pending Reason',
+  'FDPF Unauthorized Draft': 'FDPF Pending Reason',
   'FDPF Incorrect Banking Info': 'FDPF Pending Reason',
 }
 
@@ -92,15 +101,19 @@ export const GHL_STAGE_ORDER = [
   'FDPF Pending Reason',
   'FDPF Insufficient Funds',
   'FDPF Incorrect Banking Info',
+  "FDPF Unauthorized Draft",
   'Premium Paid - Commission Pending',
   'Active Placed - Paid as Advanced',
   'Active Placed - Paid as Earned',
   'ACTIVE - 3 Months +',
+  'ACTIVE - 6 months +',
+  'ACTIVE - 9 months',
+  'ACTIVE - Past Charge-Back Period',
   'Pending Lapse',
+  'Pending Lapse Pending Reason',
   'Pending Lapse Insufficient Funds',
   'Pending Lapse Incorrect Banking Info',
   'Pending Lapse Unauthorized Draft',
-  'Pending Lapse Pending Reason',
   'Chargeback Failed Payment',
   'Chargeback Cancellation',
 ] as const
@@ -133,6 +146,7 @@ export const GHL_STAGE_CATEGORIES: {
       'Issued - Pending First Draft',
       'FDPF Pending Reason',
       'FDPF Insufficient Funds',
+      'FDPF Unauthorized Draft',
       'FDPF Incorrect Banking Info',
     ],
   },
@@ -145,6 +159,9 @@ export const GHL_STAGE_CATEGORIES: {
       'Active Placed - Paid as Advanced',
       'Active Placed - Paid as Earned',
       'ACTIVE - 3 Months +',
+      'ACTIVE - 6 months +',
+      'ACTIVE - 9 months',
+      'ACTIVE - Past Charge-Back Period',
     ],
   },
   {
@@ -153,10 +170,10 @@ export const GHL_STAGE_CATEGORIES: {
     color: '#f97316',
     stages: [
       'Pending Lapse',
+      'Pending Lapse Pending Reason',
       'Pending Lapse Insufficient Funds',
       'Pending Lapse Incorrect Banking Info',
       'Pending Lapse Unauthorized Draft',
-      'Pending Lapse Pending Reason',
     ],
   },
   {
@@ -211,18 +228,12 @@ function addCalendarMonths(d: Date, n: number): Date {
   return result
 }
 
-/**
- * ACTIVE - 3 Months + only after the effective date plus three full calendar months
- * (same day-of-month anniversary). Using only (year/month) month-index difference
- * incorrectly fires on e.g. Apr 3 when effective is Jan 5 (3 month boundaries) even
- * though Apr 5 is the true 3-month mark.
- */
-function qualifiesForActiveThreeMonthsPlus(effDate: Date | null, today: Date): boolean {
+function qualifiesForMonthThreshold(effDate: Date | null, today: Date, months: number): boolean {
   if (!effDate || isNaN(effDate.getTime())) return false
   const anchor = startOfLocalDay(effDate)
-  const threeMonthMark = addCalendarMonths(anchor, 3)
+  const monthMark = addCalendarMonths(anchor, months)
   const now = startOfLocalDay(today)
-  return now >= threeMonthMark
+  return now >= monthMark
 }
 
 /** True when today is a strictly later calendar day than effective (FDPF starts the day after effective). */
@@ -349,8 +360,8 @@ export interface GhlStageResolutionContext {
    */
   effectiveDate: string | null
   /**
-   * Calendar anchor for ACTIVE - 3 Months + only: must be `deal_tracker.effective_date`.
-   * When omitted, falls back to `effectiveDate` (legacy). When null/empty, never auto-promote to 3M+.
+   * Calendar anchor for ACTIVE - 9 months only: must be `deal_tracker.effective_date`.
+   * When omitted, falls back to `effectiveDate` (legacy). When null/empty, never auto-promote to 9 months.
    */
   effectiveDateForThreeMonthRule?: string | null
   /**
@@ -404,6 +415,49 @@ function ghlStageOrderIndex(stage: string | null): number {
   return -1
 }
 
+function normalizeStageLabel(stage: string | null): string | null {
+  if (!stage) return stage
+  const s = stage.trim()
+  const lower = s.toLowerCase()
+  if (lower === 'active - 9 months +') return 'ACTIVE - 9 months'
+  if (lower === 'fdpf incorrect banking info') return 'FDPF Incorrect Banking Info'
+  if (lower === 'pending lapse incorrect banking info') return 'Pending Lapse Incorrect Banking Info'
+  return s
+}
+
+function stageProgressRank(stage: string | null): { family: string; rank: number } | null {
+  const normalized = normalizeStageLabel(stage)
+  if (!normalized) return null
+  switch (normalized) {
+    case 'Active Placed - Paid as Advanced':
+    case 'ACTIVE PLACED - Paid as Advanced':
+    case 'Active Placed - Paid as Earned':
+      return { family: 'active', rank: 1 }
+    case 'ACTIVE - 3 Months +':
+      return { family: 'active', rank: 2 }
+    case 'ACTIVE - 6 months +':
+      return { family: 'active', rank: 3 }
+    case 'ACTIVE - 9 months':
+      return { family: 'active', rank: 4 }
+    case 'ACTIVE - Past Charge-Back Period':
+      return { family: 'active', rank: 5 }
+    case 'FDPF Pending Reason':
+      return { family: 'fdpf', rank: 1 }
+    case 'FDPF Insufficient Funds':
+    case 'FDPF Incorrect Banking Info':
+    case 'FDPF Unauthorized Draft':
+      return { family: 'fdpf', rank: 2 }
+    case 'Pending Lapse Pending Reason':
+      return { family: 'pendingLapse', rank: 1 }
+    case 'Pending Lapse Insufficient Funds':
+    case 'Pending Lapse Incorrect Banking Info':
+    case 'Pending Lapse Unauthorized Draft':
+      return { family: 'pendingLapse', rank: 2 }
+    default:
+      return null
+  }
+}
+
 /** Outcomes that sit *before* "Issued" in `GHL_STAGE_ORDER` but are correct when the carrier portal says withdrawn/declined/not found. */
 function isCarrierOutcomeStageBeforeIssued(stage: string | null): boolean {
   if (!stage) return false
@@ -426,10 +480,23 @@ function applyNonRegressiveGhlClamp(
   candidate: string | null,
   ctx: GhlStageResolutionContext
 ): string | null {
+  existing = normalizeStageLabel(existing)
+  candidate = normalizeStageLabel(candidate)
   if (candidate == null) return existing ?? null
 
   const ex = ghlStageOrderIndex(existing)
   const ca = ghlStageOrderIndex(candidate)
+  const exProgress = stageProgressRank(existing)
+  const caProgress = stageProgressRank(candidate)
+
+  if (
+    exProgress &&
+    caProgress &&
+    exProgress.family === caProgress.family &&
+    caProgress.rank < exProgress.rank
+  ) {
+    return existing ?? candidate
+  }
 
   // Legacy / non-canonical label on deal_tracker: prefer a canonical mapped candidate when available.
   if (existing && ex < 0) {
@@ -483,9 +550,17 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   if (!carrierStatus) return null
   let possibleStages = lookupStagesForCarrierStatus(allMappings, carrierStatus)
   if (!possibleStages || possibleStages.length === 0) return null
+  possibleStages = Array.from(
+    new Set(
+      possibleStages
+        .map((s) => normalizeStageLabel(s))
+        .filter((s): s is string => Boolean(s))
+    )
+  )
   const sanitizeManualStage = (stage: string): string => {
-    if (!MANUAL_APPROVAL_STAGES.has(stage)) return stage
-    return MANUAL_STAGE_SAFE_PARENT[stage] ?? stage
+    const normalized = normalizeStageLabel(stage) ?? stage
+    if (!MANUAL_APPROVAL_STAGES.has(normalized)) return normalized
+    return MANUAL_STAGE_SAFE_PARENT[normalized] ?? normalized
   }
   const addStageIfMissing = (stage: string) => {
     if (!possibleStages) return
@@ -533,6 +608,9 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
       addStageIfMissing('Active Placed - Paid as Advanced')
       addStageIfMissing('Active Placed - Paid as Earned')
       addStageIfMissing('ACTIVE - 3 Months +')
+      addStageIfMissing('ACTIVE - 6 months +')
+      addStageIfMissing('ACTIVE - 9 months')
+      addStageIfMissing('ACTIVE - Past Charge-Back Period')
     } else {
       // DB may map a pre-payment carrier status only to Advanced — never use that without payment proof.
       if (!hasPositiveDealSignal && stageRequiresPositiveDealValue(only)) {
@@ -573,8 +651,9 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   const grace = CARRIER_GRACE_PERIODS[(carrierCode || '').toUpperCase()] ?? 31
 
   // If already in a manual stage, preserve it and do not overwrite.
-  if (existingGhlStage && MANUAL_APPROVAL_STAGES.has(existingGhlStage)) {
-    return existingGhlStage
+  const normalizedExistingGhlStage = normalizeStageLabel(existingGhlStage)
+  if (normalizedExistingGhlStage && MANUAL_APPROVAL_STAGES.has(normalizedExistingGhlStage)) {
+    return normalizedExistingGhlStage
   }
 
   const stageSet = new Set(possibleStages)
@@ -644,14 +723,18 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
     return sanitizeManualStage('Issued - Pending First Draft')
   }
 
-  // ── Rule 2: Active / Premium Paid / Advanced / Earned / 3M+ ────────
+  // ── Rule 2: Active / Premium Paid / Advanced / 3M+ / 6M+ / 9M ──────
   const hasAdvanced =
     stageSet.has('Active Placed - Paid as Advanced') ||
     stageSet.has('ACTIVE PLACED - Paid as Advanced')
   const hasEarned = stageSet.has('Active Placed - Paid as Earned')
-  const has3M = stageSet.has('ACTIVE - 3 Months +')
+  const hasThreeMonths = stageSet.has('ACTIVE - 3 Months +')
+  const hasSixMonths = stageSet.has('ACTIVE - 6 months +')
+  const hasNineMonths = stageSet.has('ACTIVE - 9 months')
+  const hasPastCbPeriod = stageSet.has('ACTIVE - Past Charge-Back Period')
   const hasPremPaid = stageSet.has('Premium Paid - Commission Pending')
-  const hasAnyActive = hasAdvanced || hasEarned || has3M || hasPremPaid
+  const hasAnyActive =
+    hasAdvanced || hasEarned || hasThreeMonths || hasSixMonths || hasNineMonths || hasPastCbPeriod || hasPremPaid
 
   if (hasAnyActive) {
     const alsoHasChargeback =
@@ -668,7 +751,13 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
     }
 
     if (dealValue != null && dealValue > 0) {
-      if (has3M && qualifiesForActiveThreeMonthsPlus(effDateForThreeMonth, today))
+      // Time-based active milestones are progressive; always pick the highest
+      // eligible milestone so older active policies do not stick on lower labels.
+      if (qualifiesForMonthThreshold(effDateForThreeMonth, today, 9))
+        return sanitizeManualStage('ACTIVE - 9 months')
+      if (qualifiesForMonthThreshold(effDateForThreeMonth, today, 6))
+        return sanitizeManualStage('ACTIVE - 6 months +')
+      if (qualifiesForMonthThreshold(effDateForThreeMonth, today, 3))
         return sanitizeManualStage('ACTIVE - 3 Months +')
 
       if (commissionType) {
@@ -774,7 +863,11 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   // ── Rule 9: FDPF sub-stages default to generic ────────────────────
   if (
     stageSet.has('FDPF Pending Reason') &&
-    (stageSet.has('FDPF Insufficient Funds') || stageSet.has('FDPF Incorrect Banking Info'))
+    (
+      stageSet.has('FDPF Insufficient Funds') ||
+      stageSet.has('FDPF Unauthorized Draft') ||
+      stageSet.has('FDPF Incorrect Banking Info')
+    )
   ) {
     if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
     return sanitizeManualStage('FDPF Pending Reason')
@@ -812,6 +905,7 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
   if (
     fallback === 'FDPF Pending Reason' ||
     fallback === 'FDPF Insufficient Funds' ||
+    fallback === 'FDPF Unauthorized Draft' ||
     fallback === 'FDPF Incorrect Banking Info'
   ) {
     if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
