@@ -18,6 +18,7 @@ import {
   carrierStatusUnchanged,
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
+  calculateCcValue,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -146,7 +147,7 @@ export async function processAhlFilesForDealTracker(
       const parsed = Number.isNaN(raw as number) ? null : (raw as number)
       if (parsed != null && parsed > 0) {
         dealValue = parsed
-        ccValue = parsed / 2
+        ccValue = calculateCcValue(parsed, existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null))
       } else if (existing) {
         dealValue =
           existing.deal_value != null
@@ -159,7 +160,7 @@ export async function processAhlFilesForDealTracker(
             ? typeof existing.cc_value === 'string'
               ? parseFloat(existing.cc_value)
               : existing.cc_value
-            : dealValue != null ? dealValue / 2 : null
+            : dealValue != null ? calculateCcValue(dealValue, existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null)) : null
         if (Number.isNaN(dealValue as number)) dealValue = null
         if (Number.isNaN(ccValue as number)) ccValue = null
       }
@@ -173,7 +174,7 @@ export async function processAhlFilesForDealTracker(
           ? typeof existing.cc_value === 'string'
             ? parseFloat(existing.cc_value)
             : existing.cc_value
-          : dealValue != null ? dealValue / 2 : null
+          : dealValue != null ? calculateCcValue(dealValue, existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null)) : null
       if (Number.isNaN(dealValue as number)) dealValue = null
       if (Number.isNaN(ccValue as number)) ccValue = null
     }
@@ -410,8 +411,10 @@ export async function processAhlCommissionsForDealTracker(
     } else {
       dealValue = null
     }
-    const ccValue: number | null =
-      dealValue != null && dealValue !== undefined ? dealValue / 2 : null
+    const ccValue: number | null = calculateCcValue(
+      dealValue,
+      existing?.deal_creation_date ?? policiesMap.get(policyNumber)?.apprecddate ?? policiesMap.get(policyNumber)?.issuedate ?? null
+    )
 
     const effectiveChargeBack = chargeBack ?? existing?.charge_back ?? null
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, effectiveChargeBack)

@@ -13,6 +13,7 @@ import {
   carrierStatusUnchanged,
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
+  calculateCcValue,
 } from './dealTracker'
 import { resolveGhlStage } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
@@ -153,7 +154,12 @@ export async function processSentinelFilesForDealTracker(
           ? typeof existing.cc_value === 'string'
             ? parseFloat(existing.cc_value)
             : existing.cc_value
-          : dealValue / 2
+          : calculateCcValue(
+              dealValue,
+              (existing?.deal_creation_date as string | null | undefined) ||
+                (policy.issue_date as string | undefined) ||
+                null
+            )
         : null
 
     const dealCreationDateFromPolicy = (policy.issue_date as string | undefined) || null
@@ -426,7 +432,12 @@ export async function processSentinelCommissionsForDealTracker(
     }
 
     let ccValue: number | null =
-      dealValue != null && !Number.isNaN(dealValue) ? dealValue / 2 : null
+      dealValue != null && !Number.isNaN(dealValue)
+        ? calculateCcValue(
+            dealValue,
+            (existing?.deal_creation_date as string | null | undefined) || null
+          )
+        : null
 
     if (Number.isNaN(ccValue as number)) ccValue = null
 

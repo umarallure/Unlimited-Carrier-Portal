@@ -13,6 +13,7 @@ import {
   carrierStatusUnchanged,
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
+  calculateCcValue,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -265,7 +266,15 @@ export async function processMohFilesForDealTracker(
       }
     }
 
-    const ccValue = dealValue != null ? dealValue / 2 : null
+    const ccValue = calculateCcValue(
+      dealValue,
+      existing?.deal_creation_date ??
+        (policy.application_received_dte as string | undefined) ??
+        (commission?.activity_date as string | undefined) ??
+        (commission?.issue_date as string | undefined) ??
+        (policy.policy_issue_dte as string | undefined) ??
+        null
+    )
 
     // Deal date: CARRIER_RECEIVED (application_received_dte) is the deal date for MOH
     const dealCreationDate =
@@ -583,7 +592,15 @@ export async function processMohCommissionsForDealTracker(
       }
     }
 
-    const ccValue = dealValue != null ? dealValue / 2 : null
+    const ccValue = calculateCcValue(
+      dealValue,
+      existing?.deal_creation_date ??
+        (policy?.application_received_dte as string | undefined) ??
+        (comm?.activity_date as string | undefined) ??
+        (comm?.issue_date as string | undefined) ??
+        (policy?.policy_issue_dte as string | undefined) ??
+        null
+    )
 
     let callCenter = existing?.call_center ?? null
     let phoneNumber = existing?.phone_number ?? null

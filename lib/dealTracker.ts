@@ -6,7 +6,7 @@
 import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
-import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
+import { effectiveDateForThreeMonthRuleFromPreview, extractYmdFromDbValue } from './calendarDate'
 import { getDdfClient } from './ddfSource'
 
 export { mergeEffectiveDate } from './calendarDate'
@@ -122,6 +122,29 @@ export function isInvalidGhlStageForSave(v: unknown): boolean {
 export function ensureGhlStageForPreviewSave(stage: string | null | undefined): string {
   if (!isInvalidGhlStageForSave(stage)) return String(stage).trim()
   return 'Issued - Pending First Draft'
+}
+
+const LEGACY_CC_VALUE_CUTOFF_DATE = '2025-09-01'
+
+function parseYmdPrefix(value: string | null | undefined): string | null {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const ymd = extractYmdFromDbValue(raw)
+  if (ymd) return ymd
+  const d = new Date(raw.includes('T') ? raw : `${raw}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return null
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+export function calculateCcValue(
+  dealValue: number | null | undefined,
+  dealCreationDate: string | null | undefined
+): number | null {
+  if (dealValue == null || Number.isNaN(Number(dealValue))) return null
+  const base = Number(dealValue) / 2
+  const ymd = parseYmdPrefix(dealCreationDate)
+  if (ymd && ymd < LEGACY_CC_VALUE_CUTOFF_DATE) return base - 40
+  return base
 }
 
 /**
@@ -1551,8 +1574,10 @@ export async function processAetnaCommissionsForDealTracker(
     } else {
       dealValue = null
     }
-    const ccValue: number | null =
-      dealValue !== null && dealValue !== undefined ? dealValue / 2 : null
+    const policyForCc = policiesMap.get(policyNumber)
+    const dealCreationDateForCc =
+      existing?.deal_creation_date ?? policyForCc?.apprecddate ?? policyForCc?.issuedate ?? null
+    const ccValue: number | null = calculateCcValue(dealValue, dealCreationDateForCc)
 
     console.log(`[Deal Tracker] Processing commission for policy ${policyNumber}:`, {
       existing: !!existing,
@@ -1917,7 +1942,7 @@ export async function processAetnaFilesForDealTracker(
             ? parseFloat(existing.cc_value)
             : existing.cc_value
           : dealValue != null
-            ? dealValue / 2
+            ? calculateCcValue(dealValue, existing?.deal_creation_date ?? (policy.apprecddate || policy.issuedate || null))
             : null
       chargeBackForEntry =
         existing.charge_back != null
@@ -2174,7 +2199,7 @@ export async function processAmamFilesForDealTracker(
             ? parseFloat(existing.cc_value)
             : existing.cc_value
           : dealValue != null
-            ? dealValue / 2
+            ? calculateCcValue(dealValue, existing?.deal_creation_date ?? (policy.recvdate || policy.policydate || policy.app_date || null))
             : null
       chargeBackPreserved =
         existing.charge_back != null
@@ -2391,7 +2416,9 @@ export async function processAmamFilesForDealTrackerFromRows(
       effectiveDateFromDdf,
     )
     const preserveDealValue = existing?.deal_value != null ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value) : null
-    const preserveCcValue = existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : (preserveDealValue != null ? preserveDealValue / 2 : null)
+    const preserveCcValue = existing?.cc_value != null
+      ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value)
+      : (preserveDealValue != null ? calculateCcValue(preserveDealValue, dealCreationDate) : null)
     const preserveChargeBack =
       existing?.charge_back != null
         ? typeof existing.charge_back === 'string'
@@ -2681,7 +2708,14 @@ export async function processAmamCommissionsForDealTracker(
       }
     }
 
-    const ccValue = dealValue != null ? dealValue / 2 : null
+    const ccValue = calculateCcValue(
+      dealValue,
+      existing?.deal_creation_date ??
+        policiesMap.get(policyNumber)?.recvdate_raw ??
+        policiesMap.get(policyNumber)?.policydate_raw ??
+        policiesMap.get(policyNumber)?.app_date_raw ??
+        null
+    )
 
     if (existing) {
       let callCenter = existing.call_center
@@ -3020,7 +3054,14 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       }
     }
 
-    const ccValue = dealValue != null ? dealValue / 2 : null
+    const ccValue = calculateCcValue(
+      dealValue,
+      existing?.deal_creation_date ??
+        policiesMap.get(policyNumber)?.recvdate_raw ??
+        policiesMap.get(policyNumber)?.policydate_raw ??
+        policiesMap.get(policyNumber)?.app_date_raw ??
+        null
+    )
 
     if (existing) {
       let callCenter = existing.call_center

@@ -13,6 +13,7 @@ import {
   carrierStatusUnchanged,
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
+  calculateCcValue,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -149,7 +150,17 @@ export async function processCorebridgeFilesForDealTracker(
     const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
     let dealValue: number | null = existing?.deal_value != null ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value) : null
-    let ccValue: number | null = dealValue != null ? (existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : dealValue / 2) : null
+    let ccValue: number | null = dealValue != null
+      ? (existing?.cc_value != null
+          ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value)
+          : calculateCcValue(
+              dealValue,
+              existing?.deal_creation_date ??
+                (policy.issue_date as string | undefined) ??
+                (policy.submitted_date as string | undefined) ??
+                null
+            ))
+      : null
 
     // Preserve existing deal creation date; only set from policy for new rows.
     const dealCreationDate =
@@ -422,7 +433,12 @@ export async function processCorebridgeCommissionsForDealTracker(
     }
 
     let ccValue: number | null =
-      dealValue != null && !Number.isNaN(dealValue) ? dealValue / 2 : null
+      dealValue != null && !Number.isNaN(dealValue)
+        ? calculateCcValue(
+            dealValue,
+            existing?.deal_creation_date ?? null
+          )
+        : null
 
     if (Number.isNaN(ccValue as number)) ccValue = null
 

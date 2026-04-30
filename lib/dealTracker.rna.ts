@@ -12,6 +12,7 @@ import {
   financialsUnchanged,
   carrierStatusUnchanged,
   resolvePolicyStatusFromCarrierMapping,
+  calculateCcValue,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview, mergeEffectiveDate } from './calendarDate'
@@ -223,8 +224,6 @@ export async function processRNAFilesForDealTracker(
     } else if (existing && existing.deal_value != null) {
       dealValue = typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value
     }
-    const ccValue = dealValue != null ? dealValue / 2 : null
-
     // Deal date: keep deal_tracker value if set; else RNA policy application_entry_date, then fallbacks.
     const dealCreationDate = mergeEffectiveDate(
       existing?.deal_creation_date,
@@ -233,6 +232,7 @@ export async function processRNAFilesForDealTracker(
       commission?.issue_date,
       policy.certificate_activation_date,
     )
+    const ccValue = calculateCcValue(dealValue, dealCreationDate)
 
     const effectiveDate = mergeEffectiveDateWithPendingRoll(
       originalStatus,
@@ -515,11 +515,11 @@ let dailyDealFlowMap = new Map<
     let ccValue: number | null = null
     if (dealValue != null) {
       if (totalAmount != null && totalAmount !== 0) {
-        ccValue = dealValue / 2
+        ccValue = calculateCcValue(dealValue, existing?.deal_creation_date ?? policy?.application_entry_date ?? comm.issue_date ?? policy?.certificate_activation_date ?? null)
       } else if (existing && existing.cc_value != null) {
         ccValue = typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value
       } else {
-        ccValue = dealValue / 2
+        ccValue = calculateCcValue(dealValue, existing?.deal_creation_date ?? policy?.application_entry_date ?? comm.issue_date ?? policy?.certificate_activation_date ?? null)
       }
     }
 

@@ -12,6 +12,7 @@ import {
   carrierStatusUnchanged,
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
+  calculateCcValue,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -148,7 +149,11 @@ export async function processLibertyFilesForDealTracker(
     const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
     let dealValue: number | null = existing?.deal_value != null ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value) : null
-    let ccValue: number | null = dealValue != null ? (existing?.cc_value != null ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value) : dealValue / 2) : null
+    let ccValue: number | null = dealValue != null
+      ? (existing?.cc_value != null
+          ? (typeof existing.cc_value === 'string' ? parseFloat(existing.cc_value) : existing.cc_value)
+          : calculateCcValue(dealValue, existing?.deal_creation_date ?? (policy.issued as string | undefined) ?? (policy.submitted as string | undefined) ?? null))
+      : null
 
     const dealCreationDate =
       (policy.issued as string | undefined) || (policy.submitted as string | undefined) || null

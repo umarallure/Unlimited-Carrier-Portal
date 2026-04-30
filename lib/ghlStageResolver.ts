@@ -690,31 +690,34 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
 
   // "Act Past Due" handling (hard guard):
   // NEVER classify Act Past Due as Active Placed/Paid as Advanced.
-  // within 31 calendar days from effective date -> Pending Lapse bucket
-  // after 31 calendar days -> FDPF Pending Reason (issued-not-paid bucket)
+  // within 31 calendar days from effective date -> FDPF Pending Reason (issued-not-paid bucket)
+  // after 31 calendar days -> Pending Lapse Pending Reason (lapse bucket)
   // if effective date is missing, default to Pending Lapse bucket when possible.
   if (isActPastDueStatus) {
-    const pendingLapseStage = stageSet.has('Pending Lapse Pending Reason')
+    const pendingLapsePendingReasonStage = stageSet.has('Pending Lapse Pending Reason')
       ? 'Pending Lapse Pending Reason'
       : (stageSet.has('Pending Lapse') ? 'Pending Lapse' : null)
     const fdpfStage = stageSet.has('FDPF Pending Reason') ? 'FDPF Pending Reason' : null
 
     if (!effDate) {
-      if (pendingLapseStage) return sanitizeManualStage(pendingLapseStage)
       if (fdpfStage && fdpfPendingReasonAllowed) return sanitizeManualStage(fdpfStage)
+      if (pendingLapsePendingReasonStage) return sanitizeManualStage(pendingLapsePendingReasonStage)
+      if (fdpfStage) return sanitizeManualStage(fdpfStage)
       return selectPreFdpfStage()
     }
 
     const cutoff = startOfLocalDay(effDate)
     cutoff.setDate(cutoff.getDate() + 31)
     const todayDay = startOfLocalDay(today)
-    if (todayDay <= cutoff) {
-      if (pendingLapseStage) return sanitizeManualStage(pendingLapseStage)
-      return sanitizeManualStage('Pending Lapse')
+    if (todayDay > cutoff) {
+      if (pendingLapsePendingReasonStage) return sanitizeManualStage(pendingLapsePendingReasonStage)
+      return sanitizeManualStage('Pending Lapse Pending Reason')
     }
-    if (!fdpfPendingReasonAllowed) return selectPreFdpfStage()
-    if (fdpfStage) return sanitizeManualStage(fdpfStage)
-    return sanitizeManualStage('FDPF Pending Reason')
+
+    if (fdpfStage && fdpfPendingReasonAllowed) return sanitizeManualStage(fdpfStage)
+    if (fdpfPendingReasonAllowed) return sanitizeManualStage('FDPF Pending Reason')
+    if (pendingLapsePendingReasonStage) return sanitizeManualStage(pendingLapsePendingReasonStage)
+    return selectPreFdpfStage()
   }
 
   // ── Rule 1: Issued - Pending First Draft vs FDPF Pending Reason ────
