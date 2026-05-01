@@ -3690,12 +3690,14 @@ const NEW_DEAL_WINDOW_MS = 24 * 60 * 60 * 1000 // 24 hours
  */
 export async function getDealTrackerEntries(filters?: {
   agency_carrier_id?: string
-  carrier?: string
-  agency_name?: string
-  policy_status?: string
-  ghl_stage?: string
-  sales_agent?: string
-  call_center?: string
+  carrier?: string | string[]
+  agency_name?: string | string[]
+  policy_status?: string | string[]
+  ghl_stage?: string | string[]
+  carrier_status?: string | string[]
+  deal_status?: string | string[]
+  sales_agent?: string | string[]
+  call_center?: string | string[]
   search?: string
   date_from?: string
   date_to?: string
@@ -3729,26 +3731,76 @@ export async function getDealTrackerEntries(filters?: {
       `, useExactCount ? { count: 'exact' } : undefined)
       .order('created_at', { ascending: false })
 
+    const asValues = (input?: string | string[]) => {
+      if (Array.isArray(input)) return input.map((v) => String(v).trim()).filter(Boolean)
+      if (typeof input === 'string') {
+        const trimmed = input.trim()
+        if (!trimmed) return []
+        return [trimmed]
+      }
+      return []
+    }
+    const toPostgrestQuoted = (value: string) =>
+      `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+
     if (filters?.agency_carrier_id) {
       q = q.eq('agency_carrier_id', filters.agency_carrier_id)
     }
-    if (filters?.carrier) {
-      q = q.eq('carrier', filters.carrier)
+    const carrierValues = asValues(filters?.carrier)
+    if (carrierValues.length === 1) {
+      q = q.eq('carrier', carrierValues[0])
+    } else if (carrierValues.length > 1) {
+      q = q.in('carrier', carrierValues)
     }
-    if (filters?.agency_name) {
-      q = q.eq('agency_carriers.agencies.name', filters.agency_name)
+    const agencyNameValues = asValues(filters?.agency_name)
+    if (agencyNameValues.length === 1) {
+      q = q.eq('agency_carriers.agencies.name', agencyNameValues[0])
+    } else if (agencyNameValues.length > 1) {
+      q = q.in('agency_carriers.agencies.name', agencyNameValues)
     }
-    if (filters?.policy_status) {
-      q = q.eq('policy_status', filters.policy_status)
+    const policyStatusValues = asValues(filters?.policy_status)
+    if (policyStatusValues.length === 1) {
+      q = q.eq('policy_status', policyStatusValues[0])
+    } else if (policyStatusValues.length > 1) {
+      q = q.in('policy_status', policyStatusValues)
     }
-    if (filters?.ghl_stage) {
-      q = q.eq('ghl_stage', filters.ghl_stage)
+    const ghlStageValues = asValues(filters?.ghl_stage)
+    if (ghlStageValues.length === 1) {
+      q = q.eq('ghl_stage', ghlStageValues[0])
+    } else if (ghlStageValues.length > 1) {
+      q = q.in('ghl_stage', ghlStageValues)
     }
-    if (filters?.sales_agent) {
-      q = q.eq('sales_agent', filters.sales_agent)
+    const carrierStatusValues = asValues(filters?.carrier_status)
+    if (carrierStatusValues.length === 1) {
+      q = q.eq('carrier_status', carrierStatusValues[0])
+    } else if (carrierStatusValues.length > 1) {
+      q = q.in('carrier_status', carrierStatusValues)
     }
-    if (filters?.call_center) {
-      q = q.eq('call_center', filters.call_center)
+    const dealStatusValues = asValues(filters?.deal_status)
+    if (dealStatusValues.length === 1) {
+      q = q.eq('status', dealStatusValues[0])
+    } else if (dealStatusValues.length > 1) {
+      q = q.in('status', dealStatusValues)
+    }
+    const salesAgentValues = asValues(filters?.sales_agent)
+    if (salesAgentValues.length === 1) {
+      q = q.eq('sales_agent', salesAgentValues[0])
+    } else if (salesAgentValues.length > 1) {
+      q = q.or(
+        salesAgentValues
+          .map((v) => `sales_agent.eq.${toPostgrestQuoted(v)}`)
+          .join(',')
+      )
+    }
+    const callCenterValues = asValues(filters?.call_center)
+    if (callCenterValues.length === 1) {
+      q = q.eq('call_center', callCenterValues[0])
+    } else if (callCenterValues.length > 1) {
+      q = q.or(
+        callCenterValues
+          .map((v) => `call_center.eq.${toPostgrestQuoted(v)}`)
+          .join(',')
+      )
     }
     if (filters?.date_from) {
       q = q.gte('deal_creation_date', filters.date_from)
@@ -3773,6 +3825,11 @@ export async function getDealTrackerEntries(filters?: {
             `name.ilike.*${safe}*`,
             `ghl_name.ilike.*${safe}*`,
             `policy_number.ilike.*${safe}*`,
+            `carrier.ilike.*${safe}*`,
+            `policy_status.ilike.*${safe}*`,
+            `ghl_stage.ilike.*${safe}*`,
+            `carrier_status.ilike.*${safe}*`,
+            `status.ilike.*${safe}*`,
             `sales_agent.ilike.*${safe}*`,
             `call_center.ilike.*${safe}*`,
             `phone_number.ilike.*${safe}*`,

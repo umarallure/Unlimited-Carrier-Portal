@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { DealTrackerPolicyDialog, type AgencyCarrierOption, type DealTrackerPolicyForm } from '@/components/DealTrackerPolicyDialog'
 import Link from 'next/link'
-import { Loader2, Search, RefreshCw, Calendar, History, TrendingUp, Plus } from 'lucide-react'
+import { Loader2, Search, RefreshCw, Calendar, History, TrendingUp, Plus, ChevronDown, Check, X } from 'lucide-react'
 import {
   CollapsibleFilterSection,
   FilterBarHeader,
@@ -45,6 +45,53 @@ import {
 } from '@/lib/adminFieldClasses'
 
 export default function DealTrackerPage() {
+  const HARDCODED_AGENCY_AGENT_MAP: Record<string, string[]> = {
+    'Unlimited Insurance': [
+      'Benjamin Wunder',
+      'WUNDER, BENJAMIN',
+      'WUNDER/ BENJAMIN M',
+      'Claudia Tradardi',
+      'TRADARDI NAPOLETANO, CLAUDIA',
+      'TRADARDI NAPOLETANO/ CLAU',
+      'TRADARDI/ CLAUDIA',
+      'Erica Hicks',
+      'HICKS/ ERICA L',
+      'Lydia Sutton',
+      'SUTTON, LYDIA ROSE',
+      'SUTTON/ LYDIA R',
+    ],
+    'Heritage Insurance': [
+      '1227642',
+      'Abdul Ibrahim',
+      'ABDUL IBRAHIM',
+      'IBRAHIM, ABDUL',
+      'IBRAHIM/ ABDUL',
+      'Isaac Reed',
+      'ISAAC REED',
+      'REED/ ISAAC J',
+      'Trinity Queen',
+      'TRINITY QUEEN',
+      'QUEEN/ TRINITY',
+    ],
+    'Safe Harbor Insurance': [
+      'Andrea Munoz Bonilla',
+      'Aubrey Nichols',
+      'NICHOLS/ AUBREY',
+      'Brandon Flinchum',
+      'BRANDON FLINCHUM',
+      'FLINCHUM, BRANDON',
+      'FLINCHUM/ BRANDON',
+      'BROCK/ NOAH',
+      'Noah Brock',
+      'NOAH BROCK',
+      'COLEMAN, AIDAN',
+      'COLEMAN/ AIDAN',
+      'Maria Sanchez',
+      'SANCHEZ SANTIAGO/ MARIA',
+    ],
+  }
+  const HARDCODED_AGENCY_OPTIONS = Object.keys(HARDCODED_AGENCY_AGENT_MAP)
+
   const inlineEditInput = 'h-9 min-w-[100px] px-2 text-sm'
   const inlineEditInputWide = 'h-9 min-w-[140px] px-2 text-sm'
   const inlineEditInputNarrow = 'h-9 min-w-[82px] px-2 text-sm'
@@ -60,6 +107,8 @@ export default function DealTrackerPage() {
   const [agencyFilter, setAgencyFilter] = useState<string>('all')
   const [agentFilter, setAgentFilter] = useState<string>('all')
   const [callCenterFilter, setCallCenterFilter] = useState<string>('all')
+  const [carrierStatusFilter, setCarrierStatusFilter] = useState<string>('all')
+  const [dealStatusFilter, setDealStatusFilter] = useState<string>('all')
   const [dateFromFilter, setDateFromFilter] = useState<string>('')
   const [dateToFilter, setDateToFilter] = useState<string>('')
   const [dealValueMin, setDealValueMin] = useState<string>('')
@@ -82,7 +131,10 @@ export default function DealTrackerPage() {
   const [savingPolicy, setSavingPolicy] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [savingInlineEdits, setSavingInlineEdits] = useState(false)
+  const [exportingExcel, setExportingExcel] = useState(false)
   const [draftById, setDraftById] = useState<Record<string, any>>({})
+  const [openMultiFilter, setOpenMultiFilter] = useState<string | null>(null)
+  const [multiFilterSearch, setMultiFilterSearch] = useState<Record<string, string>>({})
   
   // Pagination
   const [currentPage, setCurrentPage] = useState(1)
@@ -94,7 +146,7 @@ export default function DealTrackerPage() {
 
   useEffect(() => {
     setCurrentPage(1) // Reset to page 1 when filters change
-  }, [searchTerm, carrierFilter, statusFilter, ghlStageFilter, agencyFilter, agentFilter, callCenterFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax, policyStatusUpdatedFilter, dealValueUpdatedFilter, showMode])
+  }, [searchTerm, carrierFilter, statusFilter, ghlStageFilter, agencyFilter, agentFilter, callCenterFilter, carrierStatusFilter, dealStatusFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax, policyStatusUpdatedFilter, dealValueUpdatedFilter, showMode])
 
   useEffect(() => {
     const handle = setTimeout(() => setDebouncedSearchTerm(searchTerm), 300)
@@ -103,19 +155,86 @@ export default function DealTrackerPage() {
 
   useEffect(() => {
     fetchEntries()
-  }, [currentPage, pageSize, debouncedSearchTerm, carrierFilter, statusFilter, ghlStageFilter, agencyFilter, agentFilter, callCenterFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax])
+  }, [currentPage, pageSize, debouncedSearchTerm, carrierFilter, statusFilter, ghlStageFilter, agencyFilter, agentFilter, callCenterFilter, carrierStatusFilter, dealStatusFilter, dateFromFilter, dateToFilter, dealValueMin, dealValueMax])
+
+  const splitMultiFilter = (value: string): string[] => {
+    if (!value || value === 'all') return []
+    return value
+      .split('||')
+      .map((v) => v.trim())
+      .filter(Boolean)
+  }
+
+  const toServerFilter = (value: string): string | string[] | undefined => {
+    const values = splitMultiFilter(value)
+    if (values.length === 0) return undefined
+    return values.length === 1 ? values[0] : values
+  }
+
+  const updateMultiFilter = (
+    setter: (value: string | ((prev: string) => string)) => void,
+    selected: string[]
+  ) => {
+    const next = selected.map((v) => v.trim()).filter(Boolean)
+    setter(next.length > 0 ? next.join('||') : 'all')
+  }
+
+  const currentServerFilters = () => {
+    const min = dealValueMin.trim() === '' ? undefined : Number.parseFloat(dealValueMin)
+    const max = dealValueMax.trim() === '' ? undefined : Number.parseFloat(dealValueMax)
+    const selectedAgencies = splitMultiFilter(agencyFilter)
+    const explicitAgents = splitMultiFilter(agentFilter)
+    const agencyMappedAgents = Array.from(
+      new Set(selectedAgencies.flatMap((agency) => HARDCODED_AGENCY_AGENT_MAP[agency] || []))
+    )
+    let finalSalesAgentFilter: string | string[] | undefined
+    if (agencyMappedAgents.length > 0 && explicitAgents.length > 0) {
+      const normalizedAgencyAgents = new Set(agencyMappedAgents.map((a) => a.toUpperCase().trim()))
+      const intersection = explicitAgents.filter((a) => normalizedAgencyAgents.has(a.toUpperCase().trim()))
+      finalSalesAgentFilter = intersection.length > 0 ? (intersection.length === 1 ? intersection[0] : intersection) : '__none__'
+    } else if (agencyMappedAgents.length > 0) {
+      finalSalesAgentFilter = agencyMappedAgents
+    } else if (explicitAgents.length > 0) {
+      finalSalesAgentFilter = explicitAgents.length === 1 ? explicitAgents[0] : explicitAgents
+    }
+
+    return {
+      search: debouncedSearchTerm.trim() || undefined,
+      carrier: toServerFilter(carrierFilter),
+      agency_name: undefined, // Agency filter is hardcoded via sales_agent mapping for now.
+      policy_status: toServerFilter(statusFilter),
+      ghl_stage: toServerFilter(ghlStageFilter),
+      sales_agent: finalSalesAgentFilter,
+      call_center: toServerFilter(callCenterFilter),
+      carrier_status: toServerFilter(carrierStatusFilter),
+      deal_status: toServerFilter(dealStatusFilter),
+      date_from: dateFromFilter || undefined,
+      date_to: dateToFilter || undefined,
+      deal_value_min: Number.isFinite(min as number) ? min : undefined,
+      deal_value_max: Number.isFinite(max as number) ? max : undefined,
+    }
+  }
 
   useEffect(() => {
     fetchFilterOptions()
   }, [])
 
+  useEffect(() => {
+    if (!openMultiFilter) return
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null
+      if (!target?.closest('[data-multifilter-root="true"]')) {
+        setOpenMultiFilter(null)
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [openMultiFilter])
+
   const fetchFilterOptions = async () => {
     try {
-      // 1) Get all carriers and agencies from their master tables
-      const [{ data: carrierRows }, { data: agencyRows }] = await Promise.all([
-        supabase.from('carriers').select('name').order('name'),
-        supabase.from('agencies').select('name').order('name'),
-      ])
+      // 1) Get carriers from master table; agencies are hardcoded for now.
+      const { data: carrierRows } = await supabase.from('carriers').select('name').order('name')
 
       if (carrierRows) {
         const uniqueCarriers = Array.from(
@@ -124,12 +243,7 @@ export default function DealTrackerPage() {
         setCarriers(uniqueCarriers as string[])
       }
 
-      if (agencyRows) {
-        const uniqueAgencies = Array.from(
-          new Set((agencyRows as any[]).map((a) => a.name).filter(Boolean))
-        ).sort()
-        setAgencies(uniqueAgencies as string[])
-      }
+      setAgencies(HARDCODED_AGENCY_OPTIONS)
 
       const { data: agencyCarrierRows } = await supabase
         .from('agency_carriers')
@@ -185,23 +299,11 @@ export default function DealTrackerPage() {
   const fetchEntries = async () => {
     setLoading(true)
     try {
-      const min = dealValueMin.trim() === '' ? undefined : Number.parseFloat(dealValueMin)
-      const max = dealValueMax.trim() === '' ? undefined : Number.parseFloat(dealValueMax)
       const response = await getDealTrackerEntries({
+        ...currentServerFilters(),
         limit: pageSize,
         offset: (currentPage - 1) * pageSize,
         count: 'exact',
-        search: debouncedSearchTerm.trim() || undefined,
-        carrier: carrierFilter !== 'all' ? carrierFilter : undefined,
-        agency_name: agencyFilter !== 'all' ? agencyFilter : undefined,
-        policy_status: statusFilter !== 'all' ? statusFilter : undefined,
-        ghl_stage: ghlStageFilter !== 'all' ? ghlStageFilter : undefined,
-        sales_agent: agentFilter !== 'all' ? agentFilter : undefined,
-        call_center: callCenterFilter !== 'all' ? callCenterFilter : undefined,
-        date_from: dateFromFilter || undefined,
-        date_to: dateToFilter || undefined,
-        deal_value_min: Number.isFinite(min as number) ? min : undefined,
-        deal_value_max: Number.isFinite(max as number) ? max : undefined,
       })
       const rows = Array.isArray(response) ? response : response.rows
       const count = Array.isArray(response) ? rows.length : response.count
@@ -323,8 +425,47 @@ export default function DealTrackerPage() {
   const endIndex = Math.min(startIndex + filteredEntries.length, totalCount)
   const paginatedEntries = filteredEntries
 
-  const exportExcel = () => {
-    if (!filteredEntries.length) return
+  const exportExcel = async () => {
+    setExportingExcel(true)
+    try {
+      const allFilteredFromDb = await getDealTrackerEntries({
+        ...currentServerFilters(),
+        limit: 100000,
+      })
+      const allRows = Array.isArray(allFilteredFromDb) ? allFilteredFromDb : allFilteredFromDb.rows
+
+      const baseFilteredForExport = (allRows || []).filter((entry: any) => {
+        if (policyStatusUpdatedFilter !== 'all') {
+          const updated = hasUpdates(entry)
+          const changed = fieldChangedAcrossHistory(entry, 'policy_status', normStr)
+          if (policyStatusUpdatedFilter === 'updated' && !updated) return false
+          if (policyStatusUpdatedFilter === 'not_updated' && updated) return false
+          if (policyStatusUpdatedFilter === 'changed' && !changed) return false
+        }
+        if (dealValueUpdatedFilter !== 'all') {
+          const updated = hasUpdates(entry)
+          const changed = fieldChangedAcrossHistory(entry, 'deal_value', normNum)
+          if (dealValueUpdatedFilter === 'updated' && !updated) return false
+          if (dealValueUpdatedFilter === 'not_updated' && updated) return false
+          if (dealValueUpdatedFilter === 'changed' && !changed) return false
+        }
+        return true
+      })
+
+      const exportEntries =
+        showMode === 'new'
+          ? baseFilteredForExport.filter((e: any) => e.isNew)
+          : showMode === 'updated'
+            ? baseFilteredForExport.filter((e: any) => hasUpdates(e))
+            : showMode === 'changed'
+              ? baseFilteredForExport.filter((e: any) => getChangedFieldsFromHistory(e).length > 0)
+              : baseFilteredForExport
+
+      if (!exportEntries.length) {
+        alert('No rows match current filters to export.')
+        return
+      }
+
     const headers = [
       'Name',
       'GHL Name',
@@ -348,7 +489,7 @@ export default function DealTrackerPage() {
       'Row ID',
       'Agency Carrier ID',
     ]
-    const rows = filteredEntries.map((e: any) => {
+    const rows = exportEntries.map((e: any) => {
       const hasHistory = hasUpdates(e)
       const changed = getChangedFieldsFromHistory(e).length > 0
       const changeType = e.isNew
@@ -393,6 +534,11 @@ export default function DealTrackerPage() {
     XLSX.utils.book_append_sheet(wb, ws, 'Deal Tracker')
     const today = new Date().toISOString().slice(0, 10)
     XLSX.writeFile(wb, `deal-tracker-${showMode}-${today}.xlsx`)
+    } catch (error: any) {
+      alert(error?.message || 'Failed to export Excel.')
+    } finally {
+      setExportingExcel(false)
+    }
   }
 
   const handleImportClick = () => {
@@ -486,6 +632,8 @@ export default function DealTrackerPage() {
     setAgencyFilter('all')
     setAgentFilter('all')
     setCallCenterFilter('all')
+    setCarrierStatusFilter('all')
+    setDealStatusFilter('all')
     setDateFromFilter('')
     setDateToFilter('')
     setDealValueMin('')
@@ -584,6 +732,176 @@ export default function DealTrackerPage() {
     return options.includes(v) ? options : [v, ...options]
   }
 
+  const renderMultiSelect = (
+    keyName: string,
+    label: string,
+    value: string,
+    options: string[],
+    setter: (value: string | ((prev: string) => string)) => void
+  ) => {
+    const selected = splitMultiFilter(value)
+    const isOpen = openMultiFilter === keyName
+    const search = multiFilterSearch[keyName] || ''
+    const visibleOptions = options.filter((opt) => opt.toLowerCase().includes(search.toLowerCase()))
+    const toggle = (option: string) => {
+      const next = selected.includes(option)
+        ? selected.filter((v) => v !== option)
+        : [...selected, option]
+      updateMultiFilter(setter, next)
+    }
+    const selectedLabel =
+      selected.length === 0
+        ? `All ${label}`
+        : selected.length === 1
+          ? selected[0]
+          : `${selected.length} selected`
+
+    return (
+      <div className="relative space-y-1.5" data-multifilter-root="true">
+        <label className="block text-xs font-medium text-muted-foreground">{label}</label>
+        <button
+          type="button"
+          onClick={() => setOpenMultiFilter(isOpen ? null : keyName)}
+          className={cn(
+            adminSelectTrigger,
+            'group flex h-10 w-full items-center gap-2 rounded-md border px-3 text-left text-sm transition-colors',
+            isOpen
+              ? 'border-orange-500/60 ring-2 ring-orange-500/15'
+              : 'hover:border-border/80'
+          )}
+        >
+          <span
+            className={cn(
+              'flex-1 truncate text-[13px]',
+              selected.length === 0 && 'text-muted-foreground'
+            )}
+          >
+            {selectedLabel}
+          </span>
+          {selected.length > 0 ? (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label="Clear selection"
+              onClick={(e) => {
+                e.stopPropagation()
+                setter('all')
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setter('all')
+                }
+              }}
+              className="rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </span>
+          ) : null}
+          <ChevronDown
+            className={cn(
+              'h-4 w-4 shrink-0 text-muted-foreground transition-transform',
+              isOpen && 'rotate-180'
+            )}
+          />
+        </button>
+
+        {isOpen ? (
+          <div
+            className={cn(
+              'absolute left-0 top-[calc(100%+6px)] z-50 w-full min-w-[260px] overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl shadow-black/20 dark:border-slate-700 dark:bg-slate-900'
+            )}
+          >
+            <div className="sticky top-0 z-10 border-b border-border/60 bg-popover/95 p-2 backdrop-blur dark:bg-slate-900/95">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  autoFocus
+                  value={search}
+                  onChange={(e) =>
+                    setMultiFilterSearch((prev) => ({ ...prev, [keyName]: e.target.value }))
+                  }
+                  placeholder={`Search ${label.toLowerCase()}…`}
+                  className={cn(adminInput, 'h-8 pl-7 text-xs sm:h-8')}
+                />
+              </div>
+              <div className="mt-2 flex items-center justify-between text-[11px]">
+                <button
+                  type="button"
+                  className="font-medium text-orange-400 hover:text-orange-300"
+                  onClick={() =>
+                    updateMultiFilter(setter, search ? visibleOptions : options)
+                  }
+                >
+                  {search ? 'Select shown' : 'Select all'}
+                </button>
+                <button
+                  type="button"
+                  className="font-medium text-muted-foreground hover:text-foreground"
+                  onClick={() => setter('all')}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-64 overflow-auto p-1">
+              {visibleOptions.map((opt) => {
+                const active = selected.includes(opt)
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => toggle(opt)}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors',
+                      active
+                        ? 'bg-orange-500/12 text-foreground'
+                        : 'text-foreground/85 hover:bg-muted/70'
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors',
+                        active
+                          ? 'border-orange-500 bg-orange-500 text-white'
+                          : 'border-border bg-background text-transparent'
+                      )}
+                    >
+                      <Check className="h-3 w-3" />
+                    </span>
+                    <span className="flex-1 truncate">{opt}</span>
+                  </button>
+                )
+              })}
+              {visibleOptions.length === 0 ? (
+                <div className="px-2 py-8 text-center text-xs text-muted-foreground">
+                  No matches
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-border/60 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground dark:bg-slate-950/40">
+              <span>
+                {selected.length === 0
+                  ? 'No selection'
+                  : `${selected.length} of ${options.length} selected`}
+              </span>
+              <button
+                type="button"
+                className="font-medium text-foreground hover:text-orange-400"
+                onClick={() => setOpenMultiFilter(null)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
   const openCreatePolicyDialog = () => {
     setPolicyDialogMode('create')
     setPolicyDraft({})
@@ -649,7 +967,7 @@ export default function DealTrackerPage() {
   }
 
   const hasActiveFilters = searchTerm || carrierFilter !== 'all' || statusFilter !== 'all' || ghlStageFilter !== 'all' ||
-    agencyFilter !== 'all' || agentFilter !== 'all' || callCenterFilter !== 'all' || dateFromFilter || dateToFilter || 
+    agencyFilter !== 'all' || agentFilter !== 'all' || callCenterFilter !== 'all' || carrierStatusFilter !== 'all' || dealStatusFilter !== 'all' || dateFromFilter || dateToFilter || 
     dealValueMin || dealValueMax || policyStatusUpdatedFilter !== 'all' || dealValueUpdatedFilter !== 'all' || showMode !== 'all'
 
   const filterActiveCount = [
@@ -660,6 +978,8 @@ export default function DealTrackerPage() {
     agencyFilter !== 'all',
     agentFilter !== 'all',
     callCenterFilter !== 'all',
+    carrierStatusFilter !== 'all',
+    dealStatusFilter !== 'all',
     dateFromFilter,
     dateToFilter,
     dealValueMin,
@@ -673,6 +993,8 @@ export default function DealTrackerPage() {
     agencyFilter !== 'all',
     agentFilter !== 'all',
     callCenterFilter !== 'all',
+    carrierStatusFilter !== 'all',
+    dealStatusFilter !== 'all',
     dealValueMin,
     dealValueMax,
     policyStatusUpdatedFilter !== 'all',
@@ -697,7 +1019,7 @@ export default function DealTrackerPage() {
             onClearAll={hasActiveFilters ? clearFilters : undefined}
           />
         </CardHeader>
-        <CardContent className="space-y-5 pt-5">
+        <CardContent className="space-y-5 overflow-visible pt-5">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="relative lg:col-span-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 transform text-muted-foreground" />
@@ -708,45 +1030,9 @@ export default function DealTrackerPage() {
                 className={cn(adminInput, 'pl-10')}
               />
             </div>
-            <Select value={carrierFilter} onValueChange={setCarrierFilter}>
-              <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
-                <SelectValue placeholder="All Carriers" />
-              </SelectTrigger>
-              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                <SelectItem value="all" className={adminSelectItem}>All Carriers</SelectItem>
-                {carriers.map(carrier => (
-                  <SelectItem key={carrier} value={carrier} className={adminSelectItem}>
-                    {carrier}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
-                <SelectValue placeholder="All Statuses" />
-              </SelectTrigger>
-              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                <SelectItem value="all" className={adminSelectItem}>All Statuses</SelectItem>
-                {statuses.map(status => (
-                  <SelectItem key={status} value={status} className={adminSelectItem}>
-                    {status}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={ghlStageFilter} onValueChange={setGhlStageFilter}>
-              <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
-                <SelectValue placeholder="All GHL Stages" />
-              </SelectTrigger>
-              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                <SelectItem value="all" className={adminSelectItem}>All GHL Stages</SelectItem>
-                {ghlStages.map(stage => (
-                  <SelectItem key={stage} value={stage} className={adminSelectItem}>
-                    {stage}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {renderMultiSelect('carrier', 'Carrier', carrierFilter, carriers, setCarrierFilter)}
+            {renderMultiSelect('policyStatus', 'Policy status', statusFilter, statuses, setStatusFilter)}
+            {renderMultiSelect('ghlStage', 'GHL stage', ghlStageFilter, ghlStages, setGhlStageFilter)}
             <Button onClick={fetchEntries} variant="outline" className={adminOutlineBtn}>
               <RefreshCw className="w-4 h-4 mr-2" />
               Refresh data
@@ -879,45 +1165,13 @@ export default function DealTrackerPage() {
             defaultOpen={advancedFilterCount > 0}
           >
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <Select value={agencyFilter} onValueChange={setAgencyFilter}>
-                <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
-                  <SelectValue placeholder="All Agencies" />
-                </SelectTrigger>
-                <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                  <SelectItem value="all" className={adminSelectItem}>All Agencies</SelectItem>
-                  {agencies.map(agency => (
-                    <SelectItem key={agency} value={agency} className={adminSelectItem}>
-                      {agency}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select value={agentFilter} onValueChange={setAgentFilter}>
-                <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
-                  <SelectValue placeholder="All Agents" />
-                </SelectTrigger>
-                <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                  <SelectItem value="all" className={adminSelectItem}>All Agents</SelectItem>
-                  {agents.map(agent => (
-                    <SelectItem key={agent} value={agent} className={adminSelectItem}>
-                      {agent}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select value={callCenterFilter} onValueChange={setCallCenterFilter}>
-                <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
-                  <SelectValue placeholder="All Call Centers" />
-                </SelectTrigger>
-                <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                  <SelectItem value="all" className={adminSelectItem}>All Call Centers</SelectItem>
-                  {callCenters.map(cc => (
-                    <SelectItem key={cc} value={cc} className={adminSelectItem}>
-                      {cc}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {renderMultiSelect('agency', 'Agency', agencyFilter, agencies, setAgencyFilter)}
+              {renderMultiSelect('agent', 'Agent', agentFilter, agents, setAgentFilter)}
+              {renderMultiSelect('callCenter', 'Call Center', callCenterFilter, callCenters, setCallCenterFilter)}
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {renderMultiSelect('carrierStatus', 'Carrier status (raw)', carrierStatusFilter, carrierStatuses, setCarrierStatusFilter)}
+              {renderMultiSelect('dealStatus', 'Deal status', dealStatusFilter, dealStatuses, setDealStatusFilter)}
             </div>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
@@ -1009,9 +1263,10 @@ export default function DealTrackerPage() {
                 variant="outline"
                 size="sm"
                 onClick={exportExcel}
+                disabled={exportingExcel}
                 className={adminOutlineBtn}
               >
-                Export Excel
+                {exportingExcel ? 'Exporting...' : 'Export Excel'}
               </Button>
               <input
                 ref={importInputRef}
