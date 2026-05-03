@@ -30,6 +30,11 @@ const EXCLUDE_KEYS = [
     'source_commission_id',
     'created_at',
     'updated_at',
+    // Attribution columns — surfaced separately in the per-card header, not in the field grid
+    'last_changed_by_file_id',
+    'last_changed_by_file_name',
+    'last_changed_by_user_id',
+    'last_changed_by_user_email',
 ]
 
 // Keys that matter most to business users and should be emphasized in diffs.
@@ -116,6 +121,31 @@ function toFlat(obj: any): Record<string, string> {
         Object.entries(obj)
             .filter(([k, v]) => !EXCLUDE_KEYS.includes(k) && v != null && typeof v !== 'object')
             .map(([k, v]) => [k, String(v)])
+    )
+}
+
+function attributionFrom(source: any): { fileName: string | null; userEmail: string | null } | null {
+    if (!source || typeof source !== 'object') return null
+    const fileName = source.last_changed_by_file_name ? String(source.last_changed_by_file_name) : null
+    const userEmail = source.last_changed_by_user_email ? String(source.last_changed_by_user_email) : null
+    if (!fileName && !userEmail) return null
+    return { fileName, userEmail }
+}
+
+function AttributionLine({ source, label }: { source: any; label: string }) {
+    const attr = attributionFrom(source)
+    if (!attr) return null
+    return (
+        <p className="text-xs text-muted-foreground">
+            <span className="font-medium text-foreground/80">{label}: </span>
+            {attr.fileName ? <span className="font-mono">{attr.fileName}</span> : <span className="italic">manual change</span>}
+            {attr.userEmail && (
+                <>
+                    <span> · by </span>
+                    <span className="font-medium">{attr.userEmail}</span>
+                </>
+            )}
+        </p>
     )
 }
 
@@ -304,6 +334,7 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                                         As of {new Date(record.updated_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
                                     </span>
                                 )}
+                                <AttributionLine source={record} label="Triggered by" />
                             </div>
                             <div className="space-y-3 p-4">
                               <div className="flex items-center justify-between gap-3">
@@ -363,6 +394,9 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                         const d = diff(thisFlat, nextFlat)
                         const changedKeys = new Set<string>()
                         ;[...d.changed, ...d.added, ...d.removed].forEach(([key]) => changedKeys.add(key))
+                        // The file/user that REPLACED this snapshot lives on the next-newer entry
+                        // (or the current row when idx === 0).
+                        const triggerSource = idx === 0 ? record : historyReversed[idx - 1]?.snapshot
                         return (
                             <div key={idx} className="relative flex gap-4">
                                 <div className="absolute -left-6 top-6 h-4 w-4 shrink-0 rounded-full border-2 border-background bg-muted-foreground/40 dark:border-slate-900 dark:bg-slate-600 md:-left-8" aria-hidden />
@@ -375,6 +409,7 @@ export default function RecordHistoryPage({ searchParams }: { searchParams: Prom
                                             {entry.at ? new Date(entry.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '–'}
                                             {idx === 0 && ' (replaced by current version above)'}
                                         </span>
+                                        <AttributionLine source={triggerSource} label="Replaced by" />
                                     </div>
                                     <div className="p-4 space-y-3">
                                       {idx === 0 && (

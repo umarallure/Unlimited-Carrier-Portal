@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { createClient } from '@/lib/supabase/server'
 
 export async function POST(request: NextRequest) {
   try {
@@ -16,7 +13,9 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const supabase = createClient(supabaseUrl, supabaseKey)
+    const supabase = await createClient()
+
+    const { data: { user } } = await supabase.auth.getUser()
 
     const { data: existing, error: fetchError } = await supabase
       .from('deal_tracker')
@@ -36,6 +35,10 @@ export async function POST(request: NextRequest) {
       .update({
         ghl_stage: newStage,
         updated_at: new Date().toISOString(),
+        last_changed_by_file_id: null,
+        last_changed_by_file_name: null,
+        last_changed_by_user_id: user?.id ?? null,
+        last_changed_by_user_email: user?.email ?? null,
       })
       .eq('id', dealId)
 

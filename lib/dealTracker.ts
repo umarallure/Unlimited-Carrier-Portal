@@ -8,6 +8,7 @@ import { createClient } from '@supabase/supabase-js'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview, extractYmdFromDbValue } from './calendarDate'
 import { getDdfClient } from './ddfSource'
+import { buildDealTrackerAttribution } from './dealTrackerAttribution'
 
 export { mergeEffectiveDate } from './calendarDate'
 export { mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
@@ -3300,7 +3301,7 @@ export function statusFromDealValueAndChargeback(
  */
 export async function saveDealTrackerEntries(
   entries: DealTrackerEntry[] | DealTrackerPreviewEntry[],
-  options?: { onProgress?: (msg: string) => void }
+  options?: { onProgress?: (msg: string) => void; triggerFileId?: string | null }
 ): Promise<{ inserted: number; updated: number; failed: number }> {
   if (!entries || entries.length === 0) {
     return { inserted: 0, updated: 0, failed: 0 }
@@ -3580,6 +3581,9 @@ export async function saveDealTrackerEntries(
       }
     })
   }
+
+  const attribution = await buildDealTrackerAttribution(options?.triggerFileId ?? null)
+  cleanEntries = cleanEntries.map(e => ({ ...e, ...attribution }))
 
   const BATCH_SIZE = 500
   let saved = 0

@@ -18,6 +18,7 @@ export function useDealTrackerUpload() {
 
   const verificationEntriesRef = useRef<DealTrackerPreviewEntry[]>([])
   const pendingRowsRef = useRef<PendingRowsPayload | null>(null)
+  const triggerFileIdRef = useRef<string | null>(null)
   useEffect(() => {
     verificationEntriesRef.current = verificationEntries
   }, [verificationEntries])
@@ -107,6 +108,7 @@ export function useDealTrackerUpload() {
     }
 
     setPendingRows(pendingRowsPayload ?? null)
+    triggerFileIdRef.current = fileId
     setProcessing(true)
     const rowCount = pendingRowsPayload?.rows?.length ?? 0
     if (rowCount > 0) {
@@ -182,6 +184,7 @@ export function useDealTrackerUpload() {
       const result = await saveDealTrackerAfterConfirmation(toSave, {
         pendingRows: pendingRowsRef.current ?? undefined,
         onProgress,
+        triggerFileId: triggerFileIdRef.current,
       })
 
       if (!result.success) {
@@ -191,6 +194,7 @@ export function useDealTrackerUpload() {
       setVerificationEntries([])
       setShowVerification(false)
       setPendingRows(null)
+      triggerFileIdRef.current = null
       setSaveProgressLogs([])
     } catch (error) {
       console.error('Error saving deal tracker entries:', error)
@@ -221,6 +225,7 @@ export function useDealTrackerUpload() {
       const result = await saveDealTrackerAfterConfirmation(toSave, {
         dealTrackerOnly: true,
         onProgress,
+        triggerFileId: triggerFileIdRef.current,
       })
 
       if (!result.success) {
@@ -253,6 +258,7 @@ export function useDealTrackerUpload() {
     setVerificationEntries([])
     setShowVerification(false)
     setPendingRows(null)
+    triggerFileIdRef.current = null
     setPreviewLoadingMessage(null)
   }
 

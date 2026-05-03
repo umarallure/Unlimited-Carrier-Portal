@@ -228,6 +228,8 @@ export interface SaveDealTrackerAfterConfirmationOptions {
    * Skips inserting deferred commission/policy rows and skips commission_tracker sync — those run on full confirm after Commission Report Save.
    */
   dealTrackerOnly?: boolean
+  /** File that triggered this save; stamped onto every deal_tracker row for version_history attribution. */
+  triggerFileId?: string | null
 }
 
 async function syncEditedEntriesToCommissionTracker(
@@ -289,9 +291,11 @@ export async function saveDealTrackerAfterConfirmation(
       }
     }
 
+    const triggerFileId = options?.triggerFileId ?? options?.pendingRows?.fileId ?? null
+
     if (options?.dealTrackerOnly) {
       try {
-        const result = await saveDealTrackerEntries(entries, { onProgress })
+        const result = await saveDealTrackerEntries(entries, { onProgress, triggerFileId })
         return {
           success: true,
           ...result,
@@ -381,7 +385,7 @@ export async function saveDealTrackerAfterConfirmation(
         })
       }
     }
-    const result = await saveDealTrackerEntries(entriesToSave, { onProgress })
+    const result = await saveDealTrackerEntries(entriesToSave, { onProgress, triggerFileId })
     const pendingTarget = options?.pendingRows?.targetTable ?? ''
     const isCommissionPendingFlow = pendingTarget.endsWith('_commissions')
     // Commission uploads: commission_tracker must be written only by Commission Report Save.
