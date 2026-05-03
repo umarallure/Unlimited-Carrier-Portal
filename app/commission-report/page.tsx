@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { buildDealTrackerAttribution } from '@/lib/dealTrackerAttribution'
 import * as XLSX from 'xlsx'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@/components/ui/table'
@@ -570,16 +571,18 @@ export default function CommissionReportPage() {
 
     setSavingPolicy(true)
     try {
+      const attribution = await buildDealTrackerAttribution(null)
+      const stamped = { ...payload, ...attribution }
       if (policyDialogMode === 'edit' && form.id) {
         const { error } = await supabase
           .from('deal_tracker')
-          .update(payload)
+          .update(stamped)
           .eq('id', form.id)
         if (error) throw error
       } else {
         const { error } = await supabase
           .from('deal_tracker')
-          .insert({ ...payload, created_at: now })
+          .insert({ ...stamped, created_at: now })
         if (error) throw error
       }
       setPolicyDialogOpen(false)

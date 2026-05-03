@@ -5,6 +5,7 @@ import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 import { getDealTrackerEntries, getChangedFieldsFromHistory } from '@/lib/dealTracker'
+import { buildDealTrackerAttribution } from '@/lib/dealTrackerAttribution'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -560,6 +561,8 @@ export default function DealTrackerPage() {
         return
       }
 
+      const attribution = await buildDealTrackerAttribution(null)
+
       for (const row of rows) {
         const id = (row['Row ID'] || '').trim()
         const payload: Record<string, unknown> = {}
@@ -594,6 +597,7 @@ export default function DealTrackerPage() {
         payload.effective_date = str(row['Effective Date'])
         payload.last_updated = new Date().toISOString()
         payload.updated_at = payload.last_updated
+        Object.assign(payload, attribution)
 
         if (id) {
           const { error } = await supabase.from('deal_tracker').update(payload).eq('id', id)
@@ -686,6 +690,8 @@ export default function DealTrackerPage() {
         return fields.some((f) => String(draft[f] ?? '') !== String(row[f] ?? ''))
       })
 
+      const attribution = await buildDealTrackerAttribution(null)
+
       for (const row of changedRows) {
         const draft = draftById[row.id]
         const dealValue =
@@ -711,6 +717,7 @@ export default function DealTrackerPage() {
           effective_date: String(draft.effective_date ?? '').trim() || null,
           updated_at: new Date().toISOString(),
           last_updated: new Date().toISOString(),
+          ...attribution,
         }
         const { error } = await supabase.from('deal_tracker').update(payload).eq('id', row.id)
         if (error) throw error
@@ -945,16 +952,18 @@ export default function DealTrackerPage() {
 
     setSavingPolicy(true)
     try {
+      const attribution = await buildDealTrackerAttribution(null)
+      const stamped = { ...payload, ...attribution }
       if (policyDialogMode === 'edit' && form.id) {
         const { error } = await supabase
           .from('deal_tracker')
-          .update(payload)
+          .update(stamped)
           .eq('id', form.id)
         if (error) throw error
       } else {
         const { error } = await supabase
           .from('deal_tracker')
-          .insert({ ...payload, created_at: now })
+          .insert({ ...stamped, created_at: now })
         if (error) throw error
       }
       setPolicyDialogOpen(false)

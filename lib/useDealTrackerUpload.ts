@@ -18,6 +18,7 @@ export function useDealTrackerUpload() {
 
   const verificationEntriesRef = useRef<DealTrackerPreviewEntry[]>([])
   const pendingRowsRef = useRef<PendingRowsPayload | null>(null)
+  const triggerFileIdRef = useRef<string | null>(null)
   useEffect(() => {
     verificationEntriesRef.current = verificationEntries
   }, [verificationEntries])
@@ -107,6 +108,7 @@ export function useDealTrackerUpload() {
     }
 
     setPendingRows(pendingRowsPayload ?? null)
+    triggerFileIdRef.current = fileId
     setProcessing(true)
     const rowCount = pendingRowsPayload?.rows?.length ?? 0
     if (rowCount > 0) {
@@ -182,6 +184,7 @@ export function useDealTrackerUpload() {
       const result = await saveDealTrackerAfterConfirmation(toSave, {
         pendingRows: pendingRowsRef.current ?? undefined,
         onProgress,
+        triggerFileId: triggerFileIdRef.current,
       })
 
       if (!result.success) {
@@ -191,6 +194,7 @@ export function useDealTrackerUpload() {
       setVerificationEntries([])
       setShowVerification(false)
       setPendingRows(null)
+      triggerFileIdRef.current = null
       setSaveProgressLogs([])
     } catch (error) {
       console.error('Error saving deal tracker entries:', error)
@@ -203,6 +207,15 @@ export function useDealTrackerUpload() {
   /**
    * Save deal_tracker rows only (Next → Commission Report). Does not insert deferred commission rows
    * or sync commission_tracker; full confirmAndSave runs after Commission Report Save.
+   *
+   * For commission flows we deliberately strip deal_value / cc_value / charge_back and the
+   * source_commission_* link from the *saved* payload — those values originate from in-memory
+   * commission rows that have not been written to amam_commissions yet. If the user abandons
+   * the Commission Report dialog (or chooses Save deal tracker only), deal_tracker would
+   * otherwise carry a financial number with no matching commission_tracker entry.
+   *
+   * The unstripped entries stay in verificationEntriesRef so the eventual confirmAndSave
+   * (after Commission Report Save) re-applies the real financials and links source_commission_id.
    */
   const confirmDealTrackerOnly = useCallback(async (entriesToSave?: DealTrackerPreviewEntry[]): Promise<void> => {
     const toSave = entriesToSave ?? verificationEntriesRef.current
@@ -212,15 +225,28 @@ export function useDealTrackerUpload() {
     verificationEntriesRef.current = toSave
     setVerificationEntries(toSave)
 
+    const isCommissionFlow = pendingRowsRef.current?.targetTable?.endsWith('_commissions') === true
+    const entriesForDb = isCommissionFlow
+      ? toSave.map((e) => ({
+          ...e,
+          deal_value: null,
+          cc_value: null,
+          charge_back: null,
+          source_commission_table: null,
+          source_commission_id: null,
+        }))
+      : toSave
+
     setProcessing(true)
     setSaveProgressLogs([])
     const onProgress = (msg: string) => {
       setSaveProgressLogs(prev => [...prev, msg])
     }
     try {
-      const result = await saveDealTrackerAfterConfirmation(toSave, {
+      const result = await saveDealTrackerAfterConfirmation(entriesForDb, {
         dealTrackerOnly: true,
         onProgress,
+        triggerFileId: triggerFileIdRef.current,
       })
 
       if (!result.success) {
@@ -253,6 +279,7 @@ export function useDealTrackerUpload() {
     setVerificationEntries([])
     setShowVerification(false)
     setPendingRows(null)
+    triggerFileIdRef.current = null
     setPreviewLoadingMessage(null)
   }
 

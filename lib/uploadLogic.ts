@@ -841,6 +841,7 @@ export async function executeUpload(
     uploadDateYmd && /^\d{4}-\d{2}-\d{2}$/.test(uploadDateYmd)
       ? new Date(`${uploadDateYmd}T12:00:00`).toISOString()
       : undefined
+  const { data: { user: uploader } } = await supabase.auth.getUser()
   const { data: fileRow, error: fileError } = await supabase
     .from('files')
     .insert({
@@ -849,6 +850,8 @@ export async function executeUpload(
       original_filename: file.name,
       storage_path: filePath,
       source_format: sourceFormat,
+      uploaded_by_user_id: uploader?.id ?? null,
+      uploaded_by_email: uploader?.email ?? null,
       ...(createdAtOverride ? { created_at: createdAtOverride } : {}),
     })
     .select()
