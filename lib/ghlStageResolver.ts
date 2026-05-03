@@ -73,9 +73,10 @@ function stageRequiresPositiveDealValue(stage: string): boolean {
 }
 
 /**
- * Stages that require manual auditing/approval.
- * During auto-mapping we must never overwrite an existing manual stage,
- * and we must not auto-set a record into these manual stages.
+ * Stages auto-mapping must never *target*: when the resolver picks one of these,
+ * sanitize back to the safe parent (e.g. FDPF Insufficient Funds → FDPF Pending Reason).
+ * This does NOT prevent updates *away* from these stages — that protection is
+ * scoped to auditor-only stages via EXISTING_STAGES_NEVER_AUTO_OVERWRITE below.
  */
 const MANUAL_APPROVAL_STAGES = new Set([
   'Pending Manual Action',
@@ -90,6 +91,16 @@ const MANUAL_STAGE_SAFE_PARENT: Record<string, string> = {
   'FDPF Unauthorized Draft': 'FDPF Pending Reason',
   'FDPF Incorrect Banking Info': 'FDPF Pending Reason',
 }
+
+/**
+ * Existing stages auto-mapping must never overwrite — auditor-only.
+ * FDPF / Pending Lapse sub-reasons and Active milestones are NOT in this set:
+ * within-family regression is blocked by applyNonRegressiveGhlClamp + stageProgressRank,
+ * but a real cross-family change (e.g. carrier reports Active again) flows through.
+ */
+const EXISTING_STAGES_NEVER_AUTO_OVERWRITE = new Set([
+  'Pending Manual Action',
+])
 
 export const GHL_STAGE_ORDER = [
   'Pending Approval',
@@ -429,6 +440,8 @@ function stageProgressRank(stage: string | null): { family: string; rank: number
   const normalized = normalizeStageLabel(stage)
   if (!normalized) return null
   switch (normalized) {
+    case 'Premium Paid - Commission Pending':
+      return { family: 'active', rank: 0 }
     case 'Active Placed - Paid as Advanced':
     case 'ACTIVE PLACED - Paid as Advanced':
     case 'Active Placed - Paid as Earned':
@@ -447,6 +460,8 @@ function stageProgressRank(stage: string | null): { family: string; rank: number
     case 'FDPF Incorrect Banking Info':
     case 'FDPF Unauthorized Draft':
       return { family: 'fdpf', rank: 2 }
+    case 'Pending Lapse':
+      return { family: 'pendingLapse', rank: 0 }
     case 'Pending Lapse Pending Reason':
       return { family: 'pendingLapse', rank: 1 }
     case 'Pending Lapse Insufficient Funds':
@@ -458,27 +473,24 @@ function stageProgressRank(stage: string | null): { family: string; rank: number
   }
 }
 
-/** Outcomes that sit *before* "Issued" in `GHL_STAGE_ORDER` but are correct when the carrier portal says withdrawn/declined/not found. */
-function isCarrierOutcomeStageBeforeIssued(stage: string | null): boolean {
-  if (!stage) return false
-  const t = stage.trim().toLowerCase()
-  return (
-    t === 'application withdrawn' ||
-    t === 'declined underwriting' ||
-    t === 'cannot be found in carrier'
-  )
-}
-
 /**
- * Commission-only (or partial) runs can temporarily lack deal_value > 0, which used to make
- * `resolveGhlStage` pick an earlier funnel stage (e.g. Issued) even when deal_tracker already
- * had a later stage (e.g. Active). Never regress along `GHL_STAGE_ORDER` unless financial or
- * cancellation/chargeback signals justify it.
+ * Within-family regression guard.
+ *
+ * Blocks moves that step *backward* inside the same stage family — but allows
+ * any cross-family transition because it represents a real change reported by the carrier:
+ *   - Active milestones never roll back (9M → 6M, 6M → 3M, 3M → Advanced, Advanced → Premium Paid).
+ *   - FDPF sub-reasons never collapse to FDPF Pending Reason (we already have the specific reason).
+ *   - Pending Lapse sub-reasons never collapse to Pending Lapse / Pending Lapse Pending Reason.
+ *
+ * Cross-family changes (FDPF reason → Active, Pending Lapse → Active, Active → Pending Lapse,
+ * anything → Chargeback / Withdrawn / Declined, etc.) flow through unchanged: the new mapping
+ * is the source of truth. Auditor-only stages are short-circuited earlier in resolveGhlStageRaw
+ * via EXISTING_STAGES_NEVER_AUTO_OVERWRITE.
  */
 function applyNonRegressiveGhlClamp(
   existing: string | null,
   candidate: string | null,
-  ctx: GhlStageResolutionContext
+  _ctx: GhlStageResolutionContext
 ): string | null {
   existing = normalizeStageLabel(existing)
   candidate = normalizeStageLabel(candidate)
@@ -505,28 +517,7 @@ function applyNonRegressiveGhlClamp(
   }
   if (ca < 0) return existing ?? candidate
 
-  // Withdrawn / declined / not found are earlier in the array than Issued but are not "bad" regressions —
-  // they must win when carrier_status + DB mapping say so (e.g. deal_value still 0).
-  if (isCarrierOutcomeStageBeforeIssued(candidate)) return candidate
-
-  if (ca >= ex) return candidate
-
-  const chargeBackNum =
-    ctx.chargeBack != null && !Number.isNaN(Number(ctx.chargeBack)) ? Number(ctx.chargeBack) : null
-  if (chargeBackNum != null && chargeBackNum < 0) return candidate
-  if (ctx.dealValue != null && ctx.dealValue < 0) return candidate
-
-  const statusLower = (ctx.carrierStatus || '').toLowerCase()
-  const looksLikeInitiatedCancellation =
-    statusLower.includes('terminat') ||
-    statusLower.includes('cancel') ||
-    statusLower.includes('surrender') ||
-    statusLower.includes('free look')
-  if (looksLikeInitiatedCancellation) return candidate
-
-  if (candidate === 'Chargeback Failed Payment' || candidate === 'Chargeback Cancellation') return candidate
-
-  return existing ?? candidate
+  return candidate
 }
 
 export function resolveGhlStage(ctx: GhlStageResolutionContext): string | null {
@@ -650,9 +641,12 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
       : effDate
   const grace = CARRIER_GRACE_PERIODS[(carrierCode || '').toUpperCase()] ?? 31
 
-  // If already in a manual stage, preserve it and do not overwrite.
+  // Auditor-only stages: never overwrite by auto-mapping.
+  // FDPF / Pending Lapse sub-reasons + Active milestones are NOT short-circuited here —
+  // they're protected only against within-family regression by applyNonRegressiveGhlClamp,
+  // so a real cross-family change (e.g. carrier flips back to Active) still flows through.
   const normalizedExistingGhlStage = normalizeStageLabel(existingGhlStage)
-  if (normalizedExistingGhlStage && MANUAL_APPROVAL_STAGES.has(normalizedExistingGhlStage)) {
+  if (normalizedExistingGhlStage && EXISTING_STAGES_NEVER_AUTO_OVERWRITE.has(normalizedExistingGhlStage)) {
     return normalizedExistingGhlStage
   }
 
