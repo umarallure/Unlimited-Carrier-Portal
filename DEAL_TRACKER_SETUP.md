@@ -9,7 +9,7 @@ The Deal Tracker system creates a standardized view of all deals from different 
 2. Fetching additional information from the `daily_deal_flow` table in an external Supabase database
 3. Providing a verification interface for human review before saving
 
-## Prerequisites
+## Prerequisitesh
 
 1. Run the database migration: `supabase_deal_tracker.sql`
 2. Set up external Supabase credentials for `daily_deal_flow` access
