@@ -373,6 +373,112 @@ function dbRowToDisplay(
   }
 }
 
+/**
+ * Group commission rows by (policy_number, date) and collapse each group into a single row
+ * whose advance / charge_back are the sum of all source lines that share that policy AND
+ * statement/paid date. Other fields take the first non-empty value across the group.
+ *
+ * Why per (policy, date) and not per policy alone: a policy can receive several commission
+ * payments over time (initial advance, renewal, adjustment) on different statement dates.
+ * Each date is its own transaction in commission_tracker — collapsing across dates would
+ * lose the period information. Multiple lines on the SAME date for the same policy (split
+ * across products / commission categories in one statement run) still merge into one row.
+ *
+ * Source-row ids are dropped on merged rows so the deferred-write save path
+ * (delete-then-insert by file_id) handles them as fresh.
+ */
+export function mergeCommissionRowsByPolicy(rows: CommissionDisplayRow[]): CommissionDisplayRow[] {
+  const normalizeDateKey = (raw: string | undefined | null): string => {
+    if (!raw) return ''
+    const s = String(raw).trim()
+    if (!s) return ''
+    const ymd = s.match(/^(\d{4}-\d{2}-\d{2})/)
+    if (ymd) return ymd[1]
+    const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})/)
+    if (us) {
+      const yyyy = us[3].length === 2 ? '20' + us[3] : us[3]
+      const mm = String(parseInt(us[1], 10)).padStart(2, '0')
+      const dd = String(parseInt(us[2], 10)).padStart(2, '0')
+      return `${yyyy}-${mm}-${dd}`
+    }
+    return s.slice(0, 10)
+  }
+
+  const groups = new Map<string, CommissionDisplayRow[]>()
+  const order: string[] = []
+  for (const row of rows) {
+    const policy = String(row.policy_number ?? '').trim()
+    const dateKey = normalizeDateKey(row.date)
+    // Rows with no policy or no date stay un-merged (give each one a unique key) so we
+    // never silently fold them into another policy's group.
+    const groupable = !!policy && !!dateKey
+    const key = groupable
+      ? `${policy}__${dateKey}`
+      : `__solo_${order.length}`
+    if (!groups.has(key)) {
+      groups.set(key, [])
+      order.push(key)
+    }
+    groups.get(key)!.push(row)
+  }
+
+  const sumStr = (values: string[]): string => {
+    let total = 0
+    let any = false
+    for (const v of values) {
+      if (v == null || String(v).trim() === '') continue
+      const n = parseFloat(String(v).replace(/,/g, ''))
+      if (Number.isNaN(n)) continue
+      total += n
+      any = true
+    }
+    if (!any) return ''
+    return Number.isInteger(total) ? String(total) : total.toFixed(2)
+  }
+
+  const firstNonEmpty = (values: (string | undefined | null)[]): string => {
+    for (const v of values) {
+      if (v != null && String(v).trim() !== '') return String(v)
+    }
+    return ''
+  }
+
+  return order.map((key) => {
+    const group = groups.get(key)!
+    if (group.length === 1) return group[0]
+    const advances: string[] = []
+    const chargebacks: string[] = []
+    for (const r of group) {
+      if (r.advance && r.advance.trim()) advances.push(r.advance)
+      if (r.charge_back && r.charge_back.trim()) chargebacks.push(r.charge_back)
+    }
+    let mergedAdvance = sumStr(advances)
+    let mergedChargeBack = sumStr(chargebacks)
+    // If the net advance turns negative (e.g. one row is +100 and another is -150 entered as
+    // positive in the advance column), flip it to charge_back to match the file-import convention.
+    const advNum = mergedAdvance ? parseFloat(mergedAdvance) : NaN
+    if (!Number.isNaN(advNum) && advNum < 0) {
+      mergedChargeBack = sumStr([mergedChargeBack, String(advNum)])
+      mergedAdvance = ''
+    }
+    const base = group[0]
+    return {
+      // Drop id on merged rows so save uses the deferred path (delete + insert) and keeps
+      // the carrier-specific table in sync with the merged view.
+      id: undefined,
+      name: firstNonEmpty(group.map(r => r.name)),
+      date: firstNonEmpty(group.map(r => r.date)),
+      policy_number: base.policy_number,
+      carrier: base.carrier,
+      sales_agent: firstNonEmpty(group.map(r => r.sales_agent)),
+      commission_rate: firstNonEmpty(group.map(r => r.commission_rate)),
+      advance: mergedAdvance,
+      charge_back: mergedChargeBack,
+      _raw: base._raw,
+    }
+  })
+}
+
 function displayToDbRow(
   display: CommissionDisplayRow,
   carrierCode: string,
@@ -634,7 +740,7 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
           const rows = pending.map((r) =>
             dbRowToDisplay(r as Record<string, any>, carrierCode, dealTrackerMap)
           )
-          setCommissionRows(rows)
+          setCommissionRows(mergeCommissionRowsByPolicy(rows))
           return
         }
 
@@ -656,7 +762,7 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         const rows = commissionData.map((r: Record<string, any>) =>
           dbRowToDisplay(r, carrierCode, dealTrackerMap)
         )
-        setCommissionRows(rows)
+        setCommissionRows(mergeCommissionRowsByPolicy(rows))
       } finally {
         setLoading(false)
       }

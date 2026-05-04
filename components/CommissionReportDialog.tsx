@@ -19,6 +19,7 @@ import {
   findTrackerCommissionDuplicates,
   isCommissionRowIncomplete,
   validateCommissionRowsForSave,
+  mergeCommissionRowsByPolicy,
   type CommissionDisplayRow,
   type CommissionDuplicateIssue,
 } from '@/lib/useCommissionReportUpload'
@@ -105,9 +106,13 @@ export function CommissionReportDialog({
   useEffect(() => {
     if (open && rows.length > 0) {
       const copied = rows.map((r) => ({ ...r }))
-      setEditableRows(copied)
       const fromFile = copied.find((r) => r.date && String(r.date).trim())?.date?.trim() ?? ''
       const ymd = normalizeToYmd(fromFile) || todayYmd()
+      // Apply the resolved statement date to every row up front, then merge by policy so the
+      // dialog opens already showing one row per policy for this file. The Save payload mirrors
+      // the merge, so commission_tracker is consistent with what the user reviews.
+      const unified = mergeCommissionRowsByPolicy(copied.map((r) => ({ ...r, date: ymd })))
+      setEditableRows(unified)
       setHeaderStatementDate(ymd)
     } else if (open && rows.length === 0 && !loading) {
       setEditableRows([])
@@ -128,13 +133,17 @@ export function CommissionReportDialog({
 
   const buildSavePayload = useCallback((): CommissionDisplayRow[] => {
     const ymd = headerStatementDate.trim() || todayYmd()
-    return editableRows.map((r) => ({ ...r, date: ymd }))
+    // Stamp the dialog's chosen statement date on every row, then collapse rows that
+    // share a policy so commission_tracker ends up with exactly one entry per policy
+    // for this file at the chosen date.
+    const dated = editableRows.map((r) => ({ ...r, date: ymd }))
+    return mergeCommissionRowsByPolicy(dated)
   }, [editableRows, headerStatementDate])
 
   const applyStatementDateToAllRows = (ymd: string) => {
     const d = (ymd || '').trim() || todayYmd()
     setHeaderStatementDate(d)
-    setEditableRows((prev) => prev.map((r) => ({ ...r, date: d })))
+    setEditableRows((prev) => mergeCommissionRowsByPolicy(prev.map((r) => ({ ...r, date: d }))))
   }
 
   const updateRow = (index: number, field: keyof CommissionDisplayRow, value: string) => {

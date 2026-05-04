@@ -14,6 +14,7 @@ import {
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
   calculateCcValue,
+  resolveCommissionPreviewDealValue,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -394,21 +395,11 @@ export async function processTransamericaCommissionsForDealTracker(
     const positiveAmount = commissionPositiveMap.get(policyNumber)
     const chargeBack: number | null = commissionChargebackMap.get(policyNumber) ?? null
 
-    let dealValue: number | null
-    if (positiveAmount != null && positiveAmount > 0) {
-      dealValue = positiveAmount
-    } else if (existing && existing.deal_value != null) {
-      dealValue =
-        typeof existing.deal_value === 'number'
-          ? existing.deal_value
-          : parseFloat(String(existing.deal_value))
-    } else {
-      dealValue = null
-    }
-
-    const ccValue: number | null = calculateCcValue(
-      dealValue,
-      existing?.deal_creation_date ?? policy?.issue_date ?? commission.issue_date ?? null
+    const { dealValue, ccValue } = resolveCommissionPreviewDealValue(
+      existing?.deal_value,
+      existing?.cc_value,
+      positiveAmount,
+      existing?.deal_creation_date ?? policy?.issue_date ?? commission.issue_date ?? null,
     )
 
     const effectiveChargeBack = chargeBack ?? existing?.charge_back ?? null

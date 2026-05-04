@@ -291,29 +291,6 @@ export default function InvoicingPage() {
     }
   }
 
-  const clearDraftLocally = async () => {
-    if (selectedCallCenter === 'ALL') {
-      alert('Please select one call center to clear its draft.')
-      return
-    }
-    if (!dateFrom || !dateTo) {
-      alert('Select invoice date range first to clear server draft.')
-      return
-    }
-    try {
-      await clearInvoiceDraftSnapshot({
-        startDate: dateFrom,
-        endDate: dateTo,
-        callCenterFilter: selectedCallCenter,
-      })
-      setDraftSavedAt(null)
-      alert('Saved draft cleared.')
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Failed to clear draft.'
-      alert(message)
-    }
-  }
-
   const markPaid = async () => {
     if (!visibleDraft || visibleDraft.groups.length === 0) return
     const missingPdfCenters = visibleDraft.groups
@@ -1123,9 +1100,6 @@ export default function InvoicingPage() {
             </Button>
             <Button size="sm" variant="outline" onClick={() => void loadDraftLocally()} disabled={selectedCallCenter === 'ALL'}>
               Load Draft
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => void clearDraftLocally()} disabled={selectedCallCenter === 'ALL'}>
-              Clear Draft
             </Button>
             <Button
               size="sm"
