@@ -349,8 +349,12 @@ function dbRowToDisplay(
           ? 'AHL'
           : carrierCode === 'SENTINEL'
             ? 'Sentinel'
-          : 'Aetna'
-  const effectiveCarrierLabel = carrierCode === 'COREBRIDGE' ? 'Corebridge' : carrierLabel
+            : carrierCode === 'AFLAC'
+              ? 'Aflac'
+              : carrierCode === 'COREBRIDGE'
+                ? 'Corebridge'
+                : 'Aetna'
+  const effectiveCarrierLabel = carrierLabel
   return {
     id: row.id,
     name: String(name ?? ''),
