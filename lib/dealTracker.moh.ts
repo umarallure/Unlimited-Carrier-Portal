@@ -14,6 +14,8 @@ import {
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
   calculateCcValue,
+  resolveCommissionPreviewDealValue,
+  pickAgentNamePreservingExisting,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -343,7 +345,10 @@ export async function processMohFilesForDealTracker(
       notes: (commission?.comments != null && String(commission.comments).trim() !== '') ? commission.comments : (existing?.notes ?? null),
       status: (existing && financialsUnchanged(existing, dealValue, chargeBack)) ? (existing.status ?? (derivedStatus ?? statusFromDealValue(dealValue))) : (derivedStatus ?? statusFromDealValue(dealValue)),
       last_updated: new Date().toISOString(),
-      sales_agent: commission?.paid_producer ?? policy.wrt_agt_nme ?? null,
+      sales_agent: pickAgentNamePreservingExisting(
+        [commission?.paid_producer, policy.wrt_agt_nme],
+        existing?.sales_agent,
+      ),
       writing_number: commission?.prod_num ?? policy.wrt_agt_prod_num ?? null,
       commission_type: commission?.activity_type ?? null,
       effective_date: effectiveDate,
@@ -592,7 +597,28 @@ export async function processMohCommissionsForDealTracker(
       }
     }
 
-    const ccValue = calculateCcValue(
+    // Once a positive deal_value is on deal_tracker, lock it. New positive commissions for
+    // this policy are recorded in commission_tracker only.
+    const mohCcFallbackDate =
+      existing?.deal_creation_date ??
+        (policy?.application_received_dte as string | undefined) ??
+        (comm?.activity_date as string | undefined) ??
+        (comm?.issue_date as string | undefined) ??
+        (policy?.policy_issue_dte as string | undefined) ??
+        null
+    const positivePreview = resolveCommissionPreviewDealValue(
+      existing?.deal_value,
+      existing?.cc_value,
+      dealValue != null && dealValue > 0 ? dealValue : null,
+      mohCcFallbackDate,
+    )
+    if (positivePreview.preserved) {
+      dealValue = positivePreview.dealValue
+    }
+
+    const ccValue = positivePreview.preserved
+      ? positivePreview.ccValue
+      : calculateCcValue(
       dealValue,
       existing?.deal_creation_date ??
         (policy?.application_received_dte as string | undefined) ??

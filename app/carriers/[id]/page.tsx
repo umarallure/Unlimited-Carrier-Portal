@@ -472,7 +472,7 @@ export default function CarrierDetailPage() {
                 fileType={lastUploadContext?.fileType}
                 onNext={
                     lastUploadContext?.fileType === 'Commission' &&
-                    ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL', 'SENTINEL'].includes(
+                    ['AETNA', 'AMAM', 'MOH', 'COREBRIDGE', 'AFLAC', 'AHL', 'SENTINEL', 'TRANSAMERICA'].includes(
                         (lastUploadContext?.carrierCode || '').toUpperCase()
                     )
                         ? async (entries) => {

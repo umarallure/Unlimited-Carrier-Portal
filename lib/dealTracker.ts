@@ -149,6 +149,99 @@ export function calculateCcValue(
 }
 
 /**
+ * Heuristic: does the value look like an agent code/number rather than a proper name?
+ * Treats "12345", "MLSR162589", "ABC-123" etc. as agent codes. A real human name has
+ * either a space (first/last) or a comma (last, first). All-digits or contiguous
+ * alphanumeric tokens with at least one digit are flagged as codes.
+ */
+export function looksLikeAgentCodeNotName(value: unknown): boolean {
+  if (value == null) return false
+  const s = String(value).trim()
+  if (!s) return false
+  if (/\s/.test(s) || s.includes(',')) return false
+  if (/^\d+$/.test(s)) return true
+  // No space, no comma — needs at least one digit to be considered a code
+  // (otherwise a single-word name like "Madonna" would be wrongly flagged).
+  if (/\d/.test(s)) return true
+  return false
+}
+
+/**
+ * Pick the first candidate that looks like a real person's name, falling back to the
+ * existing deal_tracker value when every candidate looks like an agent code/number.
+ * Used by carrier policy/commission processors to avoid replacing a stored name (e.g.
+ * "John Smith") with a code (e.g. "MLSR162589") that some carrier files put in the
+ * agent-name column.
+ */
+export function pickAgentNamePreservingExisting(
+  candidates: Array<unknown>,
+  existing: unknown
+): string | null {
+  for (const c of candidates) {
+    if (c == null) continue
+    const s = String(c).trim()
+    if (!s) continue
+    if (!looksLikeAgentCodeNotName(s)) return s
+  }
+  // Every candidate was empty or looks like a code — keep the existing name if it's a real name.
+  const ex = existing != null ? String(existing).trim() : ''
+  if (ex && !looksLikeAgentCodeNotName(ex)) return ex
+  // Last resort: return the first non-empty candidate so we don't drop info entirely.
+  for (const c of candidates) {
+    if (c == null) continue
+    const s = String(c).trim()
+    if (s) return s
+  }
+  return ex || null
+}
+
+/**
+ * Commission preview helper: once deal_tracker has a positive deal_value, that becomes the
+ * locked "earned" amount. Subsequent commission uploads do NOT overwrite deal_value or
+ * cc_value — those transactions live in commission_tracker / the carrier-specific
+ * *_commissions table only. When existing is missing / zero / negative, use the file-summed
+ * positiveAmount as the new deal_value.
+ *
+ * Mirrors the guard in saveDealTrackerEntries so the verification dialog displays the exact
+ * numbers that will be persisted.
+ */
+export function resolveCommissionPreviewDealValue(
+  existingDealValue: unknown,
+  existingCcValue: unknown,
+  positiveAmount: number | null | undefined,
+  ccFallbackDate: string | null | undefined,
+): { dealValue: number | null; ccValue: number | null; preserved: boolean } {
+  const toNum = (v: unknown): number | null => {
+    if (v == null) return null
+    const n = typeof v === 'number' ? v : parseFloat(String(v))
+    return Number.isNaN(n) || !Number.isFinite(n) ? null : n
+  }
+  const existingDv = toNum(existingDealValue)
+  const existingCc = toNum(existingCcValue)
+  const existingPositive = existingDv != null && existingDv > 0
+
+  if (existingPositive) {
+    return {
+      dealValue: existingDv,
+      ccValue: existingCc ?? calculateCcValue(existingDv, ccFallbackDate),
+      preserved: true,
+    }
+  }
+
+  let dealValue: number | null
+  if (positiveAmount != null && positiveAmount > 0) {
+    dealValue = positiveAmount
+  } else {
+    dealValue = existingDv
+  }
+  return {
+    dealValue,
+    ccValue: existingCc ?? calculateCcValue(dealValue, ccFallbackDate),
+    preserved: false,
+  }
+}
+
+/**
  * Compare old and new row and return field names whose values changed (for highlighting in verification dialog).
  */
 export function getChangedFields(
@@ -1563,22 +1656,15 @@ export async function processAetnaCommissionsForDealTracker(
     // - charge_back: sum of NEGATIVE commissions (can be null if none).
     const positiveAmount = commissionPositiveMap.get(policyNumber)
     const chargeBack: number | null = commissionChargebackMap.get(policyNumber) ?? null
-    let dealValue: number | null
-    if (positiveAmount != null && positiveAmount > 0) {
-      dealValue = positiveAmount
-    } else if (existing && existing.deal_value != null) {
-      // No positive commissions in this batch – preserve prior deal_value
-      dealValue =
-        typeof existing.deal_value === 'number'
-          ? existing.deal_value
-          : parseFloat(String(existing.deal_value))
-    } else {
-      dealValue = null
-    }
     const policyForCc = policiesMap.get(policyNumber)
     const dealCreationDateForCc =
       existing?.deal_creation_date ?? policyForCc?.apprecddate ?? policyForCc?.issuedate ?? null
-    const ccValue: number | null = calculateCcValue(dealValue, dealCreationDateForCc)
+    const { dealValue, ccValue } = resolveCommissionPreviewDealValue(
+      existing?.deal_value,
+      existing?.cc_value,
+      positiveAmount,
+      dealCreationDateForCc,
+    )
 
     console.log(`[Deal Tracker] Processing commission for policy ${policyNumber}:`, {
       existing: !!existing,
@@ -2709,14 +2795,32 @@ export async function processAmamCommissionsForDealTracker(
       }
     }
 
-    const ccValue = calculateCcValue(
-      dealValue,
+    // Once a positive deal_value is on deal_tracker, lock it. A new positive commission for
+    // this policy is recorded in commission_tracker only.
+    const positivePreview = resolveCommissionPreviewDealValue(
+      existing?.deal_value,
+      existing?.cc_value,
+      dealValue != null && dealValue > 0 ? dealValue : null,
       existing?.deal_creation_date ??
         policiesMap.get(policyNumber)?.recvdate_raw ??
         policiesMap.get(policyNumber)?.policydate_raw ??
         policiesMap.get(policyNumber)?.app_date_raw ??
-        null
+        null,
     )
+    if (positivePreview.preserved) {
+      dealValue = positivePreview.dealValue
+    }
+
+    const ccValue = positivePreview.preserved
+      ? positivePreview.ccValue
+      : calculateCcValue(
+          dealValue,
+          existing?.deal_creation_date ??
+            policiesMap.get(policyNumber)?.recvdate_raw ??
+            policiesMap.get(policyNumber)?.policydate_raw ??
+            policiesMap.get(policyNumber)?.app_date_raw ??
+            null
+        )
 
     if (existing) {
       let callCenter = existing.call_center
@@ -3055,14 +3159,32 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       }
     }
 
-    const ccValue = calculateCcValue(
-      dealValue,
+    // Once a positive deal_value is on deal_tracker, lock it. A new positive commission for
+    // this policy is recorded in commission_tracker only.
+    const positivePreview = resolveCommissionPreviewDealValue(
+      existing?.deal_value,
+      existing?.cc_value,
+      dealValue != null && dealValue > 0 ? dealValue : null,
       existing?.deal_creation_date ??
         policiesMap.get(policyNumber)?.recvdate_raw ??
         policiesMap.get(policyNumber)?.policydate_raw ??
         policiesMap.get(policyNumber)?.app_date_raw ??
-        null
+        null,
     )
+    if (positivePreview.preserved) {
+      dealValue = positivePreview.dealValue
+    }
+
+    const ccValue = positivePreview.preserved
+      ? positivePreview.ccValue
+      : calculateCcValue(
+          dealValue,
+          existing?.deal_creation_date ??
+            policiesMap.get(policyNumber)?.recvdate_raw ??
+            policiesMap.get(policyNumber)?.policydate_raw ??
+            policiesMap.get(policyNumber)?.app_date_raw ??
+            null
+        )
 
     if (existing) {
       let callCenter = existing.call_center
@@ -3431,16 +3553,21 @@ export async function saveDealTrackerEntries(
     const cb = e.charge_back != null ? (typeof e.charge_back === 'number' ? e.charge_back : parseFloat(String(e.charge_back))) : null
     const isCommissionFlow = !!(e.source_commission_table || e.source_commission_id)
 
-    // Commission save: if deal_tracker already has a non-zero advance and the incoming batch suggests a different deal_value, keep DB deal_value + cc_value; carrier line amounts remain in *_commissions / commission_tracker.
+    // Business rule: once deal_tracker has a positive deal_value for a policy, subsequent
+    // commission uploads do NOT rewrite deal_value / cc_value — those represent the original
+    // earned amount and stay locked. Renewal / adjustment lines are recorded in
+    // commission_tracker (and the carrier-specific *_commissions table).
+    // charge_back and status DO flow through so a new chargeback against a previously-paid
+    // policy is still reflected on deal_tracker.
     if (isCommissionFlow && prev) {
       const pDv = prev.deal_value
-      const prevNonZero = pDv != null && Number.isFinite(pDv) && Math.abs(pDv) > 0
-      if (prevNonZero && !sameNum(pDv, dv)) {
-        dv = prev.deal_value
-        if (prev.cc_value != null && Number.isFinite(prev.cc_value)) {
-          ccv = prev.cc_value
-        } else if (dv != null && Number.isFinite(dv)) {
-          ccv = dv / 2
+      const prevPositive = pDv != null && Number.isFinite(pDv) && pDv > 0
+      if (prevPositive) {
+        return {
+          ...e,
+          deal_value: prev.deal_value,
+          cc_value: prev.cc_value,
+          status: statusFromDealValueAndChargeback(prev.deal_value, cb),
         }
       }
     }

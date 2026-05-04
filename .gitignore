@@ -43,6 +43,10 @@ next-env.d.ts
 # SQL migrations and schema scripts (run locally / in Supabase only, do not push)
 *.sql
 
+# Carrier data files used for local testing — never commit production / customer data.
+*.xls
+*.xlsx
+
 # Local DB introspection and one-off scripts (not part of app)
 schema_introspect.py
 *_headers.txt

@@ -2,7 +2,6 @@
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
-import { buildDealTrackerAttribution } from '@/lib/dealTrackerAttribution'
 import * as XLSX from 'xlsx'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@/components/ui/table'
@@ -11,7 +10,8 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Calendar, Loader2, Search } from 'lucide-react'
 import { Plus } from 'lucide-react'
-import { DealTrackerPolicyDialog, type AgencyCarrierOption, type DealTrackerPolicyForm } from '@/components/DealTrackerPolicyDialog'
+import { type AgencyCarrierOption } from '@/components/DealTrackerPolicyDialog'
+import { CommissionTransactionDialog, type CommissionTransactionForm } from '@/components/CommissionTransactionDialog'
 import {
   ActiveFilterChips,
   FilterBarHeader,
@@ -120,10 +120,10 @@ export default function CommissionReportPage() {
   const [pageSize, setPageSize] = useState(50)
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
   const [agencyCarrierOptions, setAgencyCarrierOptions] = useState<AgencyCarrierOption[]>([])
-  const [policyDialogOpen, setPolicyDialogOpen] = useState(false)
-  const [policyDialogMode, setPolicyDialogMode] = useState<'create' | 'edit'>('create')
-  const [policyDraft, setPolicyDraft] = useState<Partial<DealTrackerPolicyForm>>({})
-  const [savingPolicy, setSavingPolicy] = useState(false)
+  const [commissionDialogOpen, setCommissionDialogOpen] = useState(false)
+  const [commissionDialogMode, setCommissionDialogMode] = useState<'create' | 'edit'>('create')
+  const [commissionDraft, setCommissionDraft] = useState<Partial<CommissionTransactionForm>>({})
+  const [savingCommission, setSavingCommission] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [savingInlineEdits, setSavingInlineEdits] = useState(false)
   const [draftByTransactionId, setDraftByTransactionId] = useState<Record<string, any>>({})
@@ -463,10 +463,10 @@ export default function CommissionReportPage() {
     setDateTo('')
   }
 
-  const openCreatePolicyDialog = () => {
-    setPolicyDialogMode('create')
-    setPolicyDraft({})
-    setPolicyDialogOpen(true)
+  const openCreateCommissionDialog = () => {
+    setCommissionDialogMode('create')
+    setCommissionDraft({})
+    setCommissionDialogOpen(true)
   }
 
   const startInlineEdit = () => {
@@ -534,63 +534,58 @@ export default function CommissionReportPage() {
     }
   }
 
-  const handleSavePolicy = async (form: DealTrackerPolicyForm) => {
+  const handleSaveCommission = async (form: CommissionTransactionForm) => {
     const selected = agencyCarrierOptions.find((o) => o.id === form.agency_carrier_id)
     if (!selected) {
       alert('Please select a valid agency + carrier.')
       return
     }
 
-    const now = new Date().toISOString()
-    const dealValue =
-      form.deal_value.trim() === '' ? null : Number.parseFloat(form.deal_value)
-    if (form.deal_value.trim() !== '' && Number.isNaN(dealValue)) {
-      alert('Deal value must be a valid number.')
-      return
+    const parseNum = (v: string) => {
+      const t = v.trim()
+      if (t === '') return null
+      const n = Number.parseFloat(t)
+      return Number.isNaN(n) ? null : n
     }
 
+    const now = new Date().toISOString()
     const payload = {
       agency_carrier_id: form.agency_carrier_id,
-      carrier: selected.carrierName,
       carrier_id: selected.carrierId,
+      carrier: selected.carrierName,
       policy_number: form.policy_number.trim(),
       name: form.name.trim() || null,
-      policy_status: form.policy_status.trim() || null,
-      deal_value: dealValue,
       sales_agent: form.sales_agent.trim() || null,
-      writing_number: form.writing_number.trim() || null,
-      call_center: form.call_center.trim() || null,
-      phone_number: form.phone_number.trim() || null,
-      deal_creation_date: form.deal_creation_date || null,
-      effective_date: form.effective_date || null,
-      ghl_stage: form.ghl_stage.trim() || null,
-      notes: form.notes.trim() || null,
-      last_updated: now,
+      date: form.date,
+      commission_rate: parseNum(form.commission_rate),
+      advance_amount: parseNum(form.advance_amount),
+      charge_back_amount: parseNum(form.charge_back_amount),
+      source_table: 'manual',
+      source_row_id: null,
+      source_file_id: null,
       updated_at: now,
     }
 
-    setSavingPolicy(true)
+    setSavingCommission(true)
     try {
-      const attribution = await buildDealTrackerAttribution(null)
-      const stamped = { ...payload, ...attribution }
-      if (policyDialogMode === 'edit' && form.id) {
+      if (commissionDialogMode === 'edit' && form.id) {
         const { error } = await supabase
-          .from('deal_tracker')
-          .update(stamped)
+          .from('commission_tracker')
+          .update(payload)
           .eq('id', form.id)
         if (error) throw error
       } else {
         const { error } = await supabase
-          .from('deal_tracker')
-          .insert({ ...stamped, created_at: now })
+          .from('commission_tracker')
+          .insert({ ...payload, created_at: now })
         if (error) throw error
       }
-      setPolicyDialogOpen(false)
+      setCommissionDialogOpen(false)
       await fetchAllCommissionRows()
     } catch (error: any) {
-      alert(error?.message || 'Failed to save policy.')
+      alert(error?.message || 'Failed to save commission.')
     } finally {
-      setSavingPolicy(false)
+      setSavingCommission(false)
     }
   }
 
@@ -710,9 +705,9 @@ export default function CommissionReportPage() {
             <Button variant="outline" size="sm" onClick={exportExcel} className={adminOutlineBtn}>
               Export Excel
             </Button>
-            <Button variant="outline" size="sm" onClick={openCreatePolicyDialog} className={adminOutlineBtn}>
+            <Button variant="outline" size="sm" onClick={openCreateCommissionDialog} className={adminOutlineBtn}>
               <Plus className="mr-1 h-4 w-4" />
-              Add policy
+              Add commission
             </Button>
             {!editMode ? (
               <Button variant="outline" size="sm" onClick={startInlineEdit} className={adminOutlineBtn}>
@@ -1008,15 +1003,15 @@ export default function CommissionReportPage() {
           </div>
         </div>
       )}
-      {policyDialogOpen && (
-        <DealTrackerPolicyDialog
-          open={policyDialogOpen}
-          onOpenChange={setPolicyDialogOpen}
-          saving={savingPolicy}
-          mode={policyDialogMode}
-          initialValue={policyDraft}
+      {commissionDialogOpen && (
+        <CommissionTransactionDialog
+          open={commissionDialogOpen}
+          onOpenChange={setCommissionDialogOpen}
+          saving={savingCommission}
+          mode={commissionDialogMode}
+          initialValue={commissionDraft}
           agencyCarrierOptions={agencyCarrierOptions}
-          onSave={handleSavePolicy}
+          onSave={handleSaveCommission}
         />
       )}
     </div>

@@ -120,6 +120,18 @@ function dateRawForSourceRow(sourceTable: string, row: any): unknown {
     )
   }
 
+  if (sourceTable === 'transamerica_commissions') {
+    return (
+      row['statement_date'] ??
+      row['paid_date'] ??
+      row['commissionpaiddate'] ??
+      row['issue_date'] ??
+      row['Date'] ??
+      row['date'] ??
+      null
+    )
+  }
+
   return (
     row['statement_date'] ??
     row['commissionpaiddate'] ??
@@ -141,7 +153,8 @@ function buildCommissionRowsFromSource(
     | 'aetna_commissions'
     | 'aflac_commissions'
     | 'ahl_commissions'
-    | 'moh_commissions',
+    | 'moh_commissions'
+    | 'transamerica_commissions',
   rawRows: any[],
   agencyCarrierId: string,
   carrierId: string | null,
@@ -172,6 +185,7 @@ function buildCommissionRowsFromSource(
       row['AGENT'] ??
       row['writingagentname'] ??
       row['writingagent'] ??
+      row['writing_agent_name'] ?? // Transamerica
       row['paid_producer'] ??
       null
 
@@ -189,7 +203,7 @@ function buildCommissionRowsFromSource(
       row['rate'] ??
       row['com_rate'] ?? // AMAM
       row['rate_pct'] ?? // Aetna
-      row['comm_pct'] ?? // MOH
+      row['comm_pct'] ?? // MOH / Transamerica
       null
 
     let advance =
@@ -202,6 +216,7 @@ function buildCommissionRowsFromSource(
         sourceTable === 'ahl_commissions'
       ) ? row['commissionamount'] : null) ??
       (sourceTable === 'moh_commissions' ? row['comm_amt'] : null) ??
+      (sourceTable === 'transamerica_commissions' ? row['comm_amount'] : null) ??
       null
 
     let chargeBack: number | null = null
@@ -257,8 +272,9 @@ export async function syncCommissionTrackerForAgencyCarrier(
   const isAhl = upperCode === 'AHL'
   const isMoh = upperCode === 'MOH'
   const isSentinel = upperCode === 'SENTINEL'
+  const isTransamerica = upperCode === 'TRANSAMERICA'
 
-  if (!isAetna && !isAmam && !isAflac && !isCorebridge && !isAhl && !isMoh && !isSentinel) {
+  if (!isAetna && !isAmam && !isAflac && !isCorebridge && !isAhl && !isMoh && !isSentinel && !isTransamerica) {
     return
   }
 
@@ -493,7 +509,9 @@ export async function syncCommissionTrackerForAgencyCarrier(
         ? 'ahl_commissions'
         : isMoh
           ? 'moh_commissions'
-          : 'amam_commissions'
+          : isTransamerica
+            ? 'transamerica_commissions'
+            : 'amam_commissions'
 
   // Load commissions for this agency_carrier (optionally only the just-saved file).
   let sourceQuery = supabase

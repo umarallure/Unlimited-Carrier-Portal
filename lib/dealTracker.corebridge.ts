@@ -14,6 +14,7 @@ import {
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
   calculateCcValue,
+  resolveCommissionPreviewDealValue,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -402,17 +403,13 @@ export async function processCorebridgeCommissionsForDealTracker(
     const positiveAmount = pos > 0 ? pos : null
     const batchChargeBack = neg < 0 ? neg : null
 
-    let dealValue: number | null
-    if (positiveAmount != null && positiveAmount > 0) {
-      dealValue = positiveAmount
-    } else if (existing && existing.deal_value != null) {
-      dealValue =
-        typeof existing.deal_value === 'number'
-          ? existing.deal_value
-          : parseFloat(String(existing.deal_value))
-    } else {
-      dealValue = null
-    }
+    const { dealValue: resolvedDv, ccValue: resolvedCc } = resolveCommissionPreviewDealValue(
+      existing?.deal_value,
+      (existing as any)?.cc_value,
+      positiveAmount,
+      existing?.deal_creation_date ?? null,
+    )
+    const dealValue: number | null = resolvedDv
 
     const existingCbRaw =
       existing && (existing as any).charge_back != null
@@ -432,14 +429,7 @@ export async function processCorebridgeCommissionsForDealTracker(
       effectiveChargeBack = existingCbRaw
     }
 
-    let ccValue: number | null =
-      dealValue != null && !Number.isNaN(dealValue)
-        ? calculateCcValue(
-            dealValue,
-            existing?.deal_creation_date ?? null
-          )
-        : null
-
+    let ccValue: number | null = resolvedCc
     if (Number.isNaN(ccValue as number)) ccValue = null
 
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, effectiveChargeBack)

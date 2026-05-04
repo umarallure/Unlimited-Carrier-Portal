@@ -15,7 +15,7 @@ The Deal Tracker system creates a standardized view of all deals from different 
 2. Set up external Supabase credentials for `daily_deal_flow` access
 3. Load carrier status mappings from CSV
 
-## Step 1: Run Database Migration
+## Step 1: Run Database Migrationdd
 
 Execute the SQL migration file to create the necessary tables:
 

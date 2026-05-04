@@ -1668,6 +1668,26 @@ async function fetchDailyDealFlowFinancialByNameCarrier(
   if (!normalizedName || !normalizedCarrier) {
     return { productType: null, monthlyPremium: null, faceAmount: null }
   }
+  // The new-DDF Supabase project uses a service role key (RLS bypass). Service role keys
+  // are server-only — Next.js never ships them to the browser. Since the invoicing page is
+  // a client component, route the lookup through an API endpoint when we're in the browser.
+  if (typeof window !== 'undefined') {
+    const res = await fetch('/api/invoicing/ddf-financial', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ insuredName, carrier, dealCreationDate: dealCreationDate ?? null }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data?.error || `DDF financial lookup failed: ${res.status}`)
+    }
+    const data = await res.json()
+    return {
+      productType: data?.productType ?? null,
+      monthlyPremium: data?.monthlyPremium ?? null,
+      faceAmount: data?.faceAmount ?? null,
+    }
+  }
   const source = chooseDdfSourceByDealCreationDate(dealCreationDate ?? null)
   const { client: sourceClient, table } = source === 'new' ? getDdfClient('new') : { client: getExternalSupabaseClient(), table: 'daily_deal_flow' }
   const { first, last } = extractNamePartsForMatch(normalizedName)
