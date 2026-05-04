@@ -20,6 +20,7 @@ const DEFER_COMMISSION_ROWS_TO_DIALOG = new Set([
   'AHL',
   'COREBRIDGE',
   'SENTINEL',
+  'TRANSAMERICA',
 ])
 
 /**
@@ -378,6 +379,67 @@ export function buildAflacCommissionRows(records: ParsedRecord[], agencyCarrierI
       transaction_type: null,
       source_file: fileName,
       source_format: 'AFLAC_COMMISSION',
+    }
+  })
+}
+
+/**
+ * Normalize US-style "M/D/YY" / "MM/DD/YYYY" date strings to YYYY-MM-DD so PostgreSQL DATE
+ * columns parse them unambiguously (avoids 2-digit year being read as 1925 etc.).
+ * Used for Transamerica commission XLS where dates render as "5/14/25".
+ */
+function parseUsShortDate(value: any): string | null {
+  if (value == null) return null
+  const s = String(value).trim()
+  if (!s) return null
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/)
+  if (m) {
+    const yyyy = m[3].length === 2 ? '20' + m[3] : m[3]
+    const mm = String(parseInt(m[1], 10)).padStart(2, '0')
+    const dd = String(parseInt(m[2], 10)).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd}`
+  }
+  return s
+}
+
+export function buildTransamericaCommissionRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
+  return records.map((r, idx) => {
+    const d = r.data
+    const paidDate = parseUsShortDate(d['Paid Date'])
+    return {
+      agency_carrier_id: agencyCarrierId,
+      file_id: fileId,
+      row_number: idx + 1,
+      commission_agent_name: d['Commission Agent Name'] ?? null,
+      commission_agent_number: d['Commission Agent Number'] ?? null,
+      commission_agent_status: d['Commission Agent Status'] ?? null,
+      commission_agent_contracted_date: parseUsShortDate(d['Commission Agent Contracted Date']),
+      commission_agent_terminated_date: parseUsShortDate(d['Commission Agent Terminated Date']),
+      company: d['Company'] ?? null,
+      statement_date: parseUsShortDate(d['Statement Date']),
+      writing_agent_name: d['Writing Agent Name'] ?? null,
+      writing_agent_number: d['Writing Agent Number'] ?? null,
+      source: d['Source'] ?? null,
+      policy_number: normalizePolicyNumber(d['Policy Number'] ?? r.policyNumber),
+      initial_prem_indicator: d['Initial Prem Indicator'] ?? null,
+      insured_name: d['Insured Name'] ?? null,
+      plan_code: d['Plan Code'] ?? null,
+      product_type: d['Product Type'] ?? null,
+      issue_date: parseUsShortDate(d['Issue Date']),
+      paid_date: paidDate,
+      commissionpaiddate: paidDate,
+      billing_frequency: d['Billing Frequency'] ?? null,
+      comm_type: d['Comm type'] ?? d['Comm Type'] ?? null,
+      amount_invested: parseNumber(d['Amount Invested']),
+      comm_premium_or_gross_comm: parseNumber(d['Comm Premium or Gross Comm']),
+      psop: parseNumber(d['PSOP']),
+      split_pct: parseNumber(d['Split%']),
+      comm_pct: parseNumber(d['Comm%']),
+      comm_amount: parseNumber(d['Comm Amount']),
+      earned_adv_pct: parseNumber(d['Earned Adv %']),
+      earned_adv_amount: parseNumber(d['Earned Adv Amount']),
+      source_file: fileName,
+      source_format: 'TRANSAMERICA_COMMISSION',
     }
   })
 }
@@ -824,9 +886,6 @@ export async function executeUpload(
 ): Promise<ExecuteUploadSuccess | { success: false; error: string }> {
   const { agencyCarrierId, agencyName, carrierName, carrierCode, file, fileType, uploadDateYmd } = params
 
-  if (carrierCode === 'TRANSAMERICA' && fileType === 'Commission') {
-    return { success: false, error: 'Transamerica commission files are not yet supported. Upload policy files only.' }
-  }
 
   const sanitizedFilename = file.name.replace(/[^a-zA-Z0-9.-]/g, '_')
   const filePath = `${agencyName}/${carrierName}/${fileType}/${sanitizedFilename}`
@@ -967,6 +1026,7 @@ export async function executeUpload(
   else if (carrierCode === 'AETNA' && fileType === 'Policy') rows = buildAetnaPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'AETNA' && fileType === 'Commission') rows = buildAetnaCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'TRANSAMERICA' && fileType === 'Policy') rows = buildTransamericaPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'TRANSAMERICA' && fileType === 'Commission') rows = buildTransamericaCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'MOH' && fileType === 'Policy') rows = buildMohPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'MOH' && fileType === 'Commission') rows = buildMohCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
   else if (carrierCode === 'COREBRIDGE' && fileType === 'Policy') rows = buildCorebridgePolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)

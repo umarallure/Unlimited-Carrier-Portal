@@ -328,7 +328,9 @@ function dbRowToDisplay(
       ? (row.payable_commission ?? row.applied_to_advance ?? row['Advance'])
       : carrierCode === 'COREBRIDGE'
         ? (row.commission_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
-        : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
+        : carrierCode === 'TRANSAMERICA'
+          ? (row.comm_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
+          : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
   let advance = rawAdvanceVal != null && rawAdvanceVal !== '' ? String(rawAdvanceVal) : ''
   let chargeBack = ''
 
@@ -353,7 +355,9 @@ function dbRowToDisplay(
               ? 'Aflac'
               : carrierCode === 'COREBRIDGE'
                 ? 'Corebridge'
-                : 'Aetna'
+                : carrierCode === 'TRANSAMERICA'
+                  ? 'Transamerica'
+                  : 'Aetna'
   const effectiveCarrierLabel = carrierLabel
   return {
     id: row.id,
@@ -453,6 +457,22 @@ function displayToDbRow(
     if (!Number.isNaN(advNum) && advNum > 0) base.commission_amount = advNum
     else if (!Number.isNaN(cbNum) && cbNum < 0) base.commission_amount = cbNum
     if (display.date) base.statement_date = display.date
+  } else if (carrierCode === 'TRANSAMERICA') {
+    base.insured_name = name
+    base.writing_agent_name = salesAgent
+    if (display.commission_rate != null && display.commission_rate !== '') {
+      const rateNum = parseFloat(String(display.commission_rate).replace(/,/g, ''))
+      if (!Number.isNaN(rateNum)) base.comm_pct = rateNum
+    }
+    const advNum = display.advance ? parseFloat(String(display.advance).replace(/,/g, '')) : NaN
+    const cbNum = display.charge_back ? parseFloat(String(display.charge_back).replace(/,/g, '')) : NaN
+    if (!Number.isNaN(advNum) && advNum > 0) base.comm_amount = advNum
+    else if (!Number.isNaN(cbNum) && cbNum < 0) base.comm_amount = cbNum
+    if (display.date) {
+      base.statement_date = display.date
+      base.paid_date = display.date
+      base.commissionpaiddate = display.date
+    }
   } else {
     base.insured_name = name
     base.writingagent = salesAgent
@@ -486,6 +506,7 @@ function commissionTableForCarrier(carrierCode: string): string | null {
   if (c === 'AETNA') return 'aetna_commissions'
   if (c === 'SENTINEL') return 'sentinel_commissions'
   if (c === 'AHL') return 'ahl_commissions'
+  if (c === 'TRANSAMERICA') return 'transamerica_commissions'
   return null
 }
 
@@ -588,7 +609,8 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         carrierCode !== 'COREBRIDGE' &&
         carrierCode !== 'AFLAC' &&
         carrierCode !== 'SENTINEL' &&
-        carrierCode !== 'AHL'
+        carrierCode !== 'AHL' &&
+        carrierCode !== 'TRANSAMERICA'
       )
         return
       deleteCommissionRowsOnAbandonRef.current = openOpts?.deleteOnAbandon !== false

@@ -22,7 +22,7 @@ import {
   processRNAFilesForDealTracker,
   processRNACommissionsForDealTracker,
 } from './dealTracker.rna'
-import { processTransamericaFilesForDealTracker } from './dealTracker.transamerica'
+import { processTransamericaFilesForDealTracker, processTransamericaCommissionsForDealTracker } from './dealTracker.transamerica'
 import { processLibertyFilesForDealTracker } from './dealTracker.liberty'
 import { processCorebridgeCommissionsForDealTracker, processCorebridgeFilesForDealTracker } from './dealTracker.corebridge'
 import { processSentinelFilesForDealTracker, processSentinelCommissionsForDealTracker } from './dealTracker.sentinel'
@@ -144,8 +144,14 @@ export async function processDealTrackerAfterUpload(
       if (fileType === 'Policy') {
         console.log('[Deal Tracker] Processing Transamerica policy file for deal tracker...')
         previewEntries = await processTransamericaFilesForDealTracker(agencyCarrierId, fileId)
+      } else if (fileType === 'Commission') {
+        console.log('[Deal Tracker] Processing Transamerica commission file for deal tracker...')
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processTransamericaCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processTransamericaCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
       }
-      // Transamerica commission upload is not supported yet
     } else if (isLiberty) {
       if (fileType === 'Policy') {
         console.log('[Deal Tracker] Processing Liberty policy file for deal tracker...')
