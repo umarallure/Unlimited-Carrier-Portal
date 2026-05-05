@@ -572,6 +572,7 @@ async function batchFetchCommissionFacts(
 ): Promise<CommissionFacts> {
   const latestSignalsByPolicy = new Map<string, LatestCommissionSignal>()
   const latestChargebackGrossByPolicy = new Map<string, number>()
+  const latestChargebackDateByPolicy = new Map<string, string>()
   const policiesWithAnyChargebackCommission = new Set<string>()
   const policiesWithAnyPositiveCommission = new Set<string>()
   if (!policyNumbers.length || !agencyCarrierIds.length) {
@@ -598,6 +599,7 @@ async function batchFetchCommissionFacts(
       policy_number: string
       advance_amount: number | null
       charge_back_amount: number | null
+      date: string
     }>) {
       const key = buildPolicyKey(row.agency_carrier_id, row.policy_number)
       const advance = roundMoney(toNumber(row.advance_amount))
@@ -617,8 +619,25 @@ async function batchFetchCommissionFacts(
       if (cur.latestSaleGross == null && advance > 0) cur.latestSaleGross = advance
       if (cur.latestChargebackGross == null && cbGross < 0) cur.latestChargebackGross = cbGross
       latestSignalsByPolicy.set(key, cur)
-      if (!latestChargebackGrossByPolicy.has(key) && cbGross < 0) latestChargebackGrossByPolicy.set(key, cbGross)
+      if (cbGross < 0) {
+        const txDate = String(row.date || '')
+        const latestDate = latestChargebackDateByPolicy.get(key)
+        if (!latestDate) {
+          latestChargebackDateByPolicy.set(key, txDate)
+          latestChargebackGrossByPolicy.set(key, cbGross)
+        } else if (txDate === latestDate) {
+          const current = latestChargebackGrossByPolicy.get(key) ?? 0
+          latestChargebackGrossByPolicy.set(key, roundMoney(current + cbGross))
+        }
+      }
     }
+  }
+  // Ensure signal's "latest chargeback gross" matches same-day aggregated amount.
+  for (const [key, gross] of latestChargebackGrossByPolicy.entries()) {
+    const current = latestSignalsByPolicy.get(key)
+    if (!current) continue
+    current.latestChargebackGross = gross
+    latestSignalsByPolicy.set(key, current)
   }
   return {
     latestSignalsByPolicy,
