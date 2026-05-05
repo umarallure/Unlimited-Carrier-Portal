@@ -68,36 +68,46 @@ const CUSTOMER_PIPELINE_STAGES = new Set(
 const INVOICE_EXCLUDED_CARRIER_CODES = new Set(['CICA', 'GTL'])
 const TECHVATED_DRAFT_CUTOFF_YMD = '2025-07-01'
 
+function callCenterKey(value: string | null | undefined): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+}
+
+const CANONICAL_CALL_CENTER_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
+  { canonical: 'Ascendra Elite', aliases: ['Ascendra Elite', 'Ascendra', 'Ascendra BPO'] },
+  { canonical: 'Broker bpo', aliases: ['Broker bpo', 'Broker Leads BPO', 'Broker Leads'] },
+  { canonical: 'Crossnotch', aliases: ['Crossnotch', 'CrossNotch', 'CrossNotch BPO', 'CrossNoth', 'CrossNoth BPO'] },
+  { canonical: 'Crownconnect', aliases: ['Crownconnect', 'Crown Connect BPO'] },
+  { canonical: 'Downtown', aliases: ['Downtown', 'Downtown BPO', 'DownTown BPO'] },
+  { canonical: 'Everest bpo', aliases: ['Everest bpo', 'Everest BPO'] },
+  { canonical: 'Exito', aliases: ['Exito', 'Exito BPO'] },
+  { canonical: 'Leads bpo', aliases: ['Leads bpo', 'Leads BPO', 'Leads'] },
+  { canonical: 'Jsons bpo', aliases: ['Jsons bpo', 'Jsons BPO', 'Jsons'] },
+  { canonical: 'Nanotech', aliases: ['Nanotech', 'NanoTech', 'NanoTech BPO'] },
+  { canonical: 'Nexpoint', aliases: ['Nexpoint', 'NextPoint', 'NextPoint BPO', 'NexPoint BPO'] },
+  { canonical: 'NexGen Bpo', aliases: ['NexGen Bpo', 'NexGen BPO'] },
+  { canonical: 'Reedemar', aliases: ['Reedemar', 'Reidemar'] },
+  { canonical: 'Techvated', aliases: ['Techvated', 'TechVated Marketing'] },
+  { canonical: 'Zupax Marketing', aliases: ['Zupax Marketing', 'The Zupax Marketing', 'Zupax BPO', 'The Zupax BPO'] },
+  { canonical: 'Unified System', aliases: ['Unified System', 'Unified Systems', 'Unified Systems BPO'] },
+  { canonical: 'Win bpo', aliases: ['Win bpo', 'Win BPO', 'WinBPO', 'Win'] },
+  { canonical: 'Alternative', aliases: ['Alternative', 'Alternative BPO'] },
+  { canonical: 'INB', aliases: ['INB', 'INB BPO'] },
+]
+
+const CALL_CENTER_ALIAS_TO_CANONICAL = new Map<string, string>(
+  CANONICAL_CALL_CENTER_ALIASES.flatMap((entry) =>
+    entry.aliases.map((alias) => [callCenterKey(alias), entry.canonical] as const),
+  ),
+)
+
 export function normalizeCallCenterName(callCenter: string | null | undefined): string {
   const raw = String(callCenter ?? '').trim()
   if (!raw) return 'Unassigned'
-  const compact = raw.replace(/\s+/g, ' ').toLowerCase()
-  if (
-    compact === 'seller' ||
-    compact === 'sellerz' ||
-    compact === 'sellerzbpo' ||
-    compact === 'sellerz bpo' ||
-    compact === 'seller z bpo'
-  ) return 'Jason BPO'
-  if (compact === 'jasonbpo' || compact === 'jason bpo') return 'Jason BPO'
-  if (compact === 'argon comm') return 'Argon Comm BPO'
-  if (compact === 'argon comm bpo') return 'Argon Comm BPO'
-  if (compact === 'ark tech') return 'ArkTech BPO'
-  if (compact === 'arktech bpo') return 'ArkTech BPO'
-  if (compact === 'corebiz' || compact === 'corebiz bpo') return 'CoreBiz BPO'
-  if (compact === 'crossnotch') return 'CrossNotch BPO'
-  if (compact === 'crossnotch bpo') return 'CrossNotch BPO'
-  if (compact === 'downtown') return 'DownTown BPO'
-  if (compact === 'downtown bpo') return 'DownTown BPO'
-  if (compact === 'plexi') return 'Plexi BPO'
-  if (compact === 'plexi bpo') return 'Plexi BPO'
-  if (compact === 'pro soliutions bpo') return 'Pro Solutions BPO'
-  if (compact === 'internal') return 'Internal BPO'
-  if (compact === 'inrernal bpo') return 'Internal BPO'
-  if (compact === 'zupax marketing') return 'Zupax Marketing'
-  if (compact === 'the zupax marketing') return 'Zupax Marketing'
-  if (compact === 'zupax bpo') return 'Zupax Marketing'
-  if (compact === 'the zupax bpo') return 'Zupax Marketing'
+  const key = callCenterKey(raw)
+  const canonical = CALL_CENTER_ALIAS_TO_CANONICAL.get(key)
+  if (canonical) return canonical
   return raw
 }
 
@@ -105,70 +115,12 @@ function callCenterFilterCandidates(filterCallCenter: string | null | undefined)
   const normalized = normalizeCallCenterName(filterCallCenter)
   if (!normalized) return []
   const out = new Set<string>([normalized, String(filterCallCenter ?? '').trim()])
-  if (normalized === 'Jason BPO') {
-    out.add('Seller')
-    out.add('SellerZ')
-    out.add('SELLERZ')
-    out.add('SellerzBpo')
-    out.add('Sellerz BPO')
-    out.add('SellerZ BPO')
-    out.add('SellerZBPO')
-    out.add('sellerzbpo')
-    out.add('sellerz bpo')
-    out.add('sellerz')
-    out.add('Jason BPO')
-    out.add('jasonbpo')
-    out.add('jason bpo')
-  }
-  if (normalized === 'DownTown BPO') {
-    out.add('DownTown BPO')
-    out.add('Downtown BPO')
-    out.add('downtown bpo')
-    out.add('Downtown')
-    out.add('downtown')
-  }
-  if (normalized === 'ArkTech BPO') {
-    out.add('Ark Tech')
-    out.add('ArkTech BPO')
-    out.add('ark tech')
-    out.add('arktech bpo')
-  }
-  if (normalized === 'CoreBiz BPO') {
-    out.add('Corebiz')
-    out.add('Corebiz BPO')
-    out.add('CoreBiz BPO')
-    out.add('corebiz')
-    out.add('corebiz bpo')
-  }
-  if (normalized === 'Plexi BPO') {
-    out.add('Plexi')
-    out.add('Plexi BPO')
-    out.add('plexi')
-    out.add('plexi bpo')
-  }
-  if (normalized === 'Pro Solutions BPO') {
-    out.add('Pro Solutions BPO')
-    out.add('Pro Soliutions BPO')
-    out.add('pro solutions bpo')
-    out.add('pro soliutions bpo')
-  }
-  if (normalized === 'Internal BPO') {
-    out.add('Internal')
-    out.add('Internal BPO')
-    out.add('Inrernal BPO')
-    out.add('internal')
-    out.add('internal bpo')
-    out.add('inrernal bpo')
-  }
-  if (normalized === 'Zupax Marketing') {
-    out.add('Zupax Marketing')
-    out.add('The Zupax Marketing')
-    out.add('Zupax BPO')
-    out.add('The Zupax BPO')
-    out.add('zupax marketing')
-    out.add('the zupax marketing')
-    out.add('zupax bpo')
-    out.add('the zupax bpo')
+  const aliasDef = CANONICAL_CALL_CENTER_ALIASES.find((entry) => entry.canonical === normalized)
+  if (aliasDef) {
+    for (const alias of aliasDef.aliases) {
+      if (!alias) continue
+      out.add(alias)
+    }
   }
   return Array.from(out).map((v) => v.trim()).filter(Boolean)
 }
