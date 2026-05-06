@@ -19,6 +19,7 @@ import {
   loadInvoiceDraftSnapshot,
   clearInvoiceDraftSnapshot,
   normalizeCallCenterName,
+  PRESET_ALL_CALL_CENTERS_FILTER,
   type InvoiceDraftSnapshot,
   type BpoInvoiceLine,
   type InvoicingStatus,
@@ -1015,7 +1016,11 @@ export default function InvoicingPage() {
               </Button>
             </div>
             <Button
-              onClick={() => void generateInvoice(selectedCallCenter === 'ALL' ? null : selectedCallCenter)}
+              onClick={() =>
+                void generateInvoice(
+                  selectedCallCenter === 'ALL' ? PRESET_ALL_CALL_CENTERS_FILTER : selectedCallCenter,
+                )
+              }
               disabled={loading}
               className="bg-orange-500 text-black hover:bg-orange-400"
             >
