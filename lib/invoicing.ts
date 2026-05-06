@@ -67,6 +67,7 @@ const CUSTOMER_PIPELINE_STAGES = new Set(
 
 const INVOICE_EXCLUDED_CARRIER_CODES = new Set(['CICA', 'GTL'])
 const TECHVATED_DRAFT_CUTOFF_YMD = '2025-07-01'
+export const PRESET_ALL_CALL_CENTERS_FILTER = '__PRESET_ALL_CALL_CENTERS__'
 
 function callCenterKey(value: string | null | undefined): string {
   return String(value ?? '')
@@ -129,6 +130,12 @@ const CALL_CENTER_ALIAS_TO_CANONICAL = new Map<string, string>(
   ),
 )
 
+const ALL_CANONICAL_CALL_CENTERS = new Set(CANONICAL_CALL_CENTER_ALIASES.map((entry) => entry.canonical))
+
+function isPresetAllCallCentersFilter(value: string | null | undefined): boolean {
+  return String(value ?? '').trim() === PRESET_ALL_CALL_CENTERS_FILTER
+}
+
 export function normalizeCallCenterName(callCenter: string | null | undefined): string {
   const raw = String(callCenter ?? '').trim()
   if (!raw) return 'Unassigned'
@@ -139,6 +146,17 @@ export function normalizeCallCenterName(callCenter: string | null | undefined): 
 }
 
 function callCenterFilterCandidates(filterCallCenter: string | null | undefined): string[] {
+  if (isPresetAllCallCentersFilter(filterCallCenter)) {
+    const out = new Set<string>()
+    for (const entry of CANONICAL_CALL_CENTER_ALIASES) {
+      out.add(entry.canonical)
+      for (const alias of entry.aliases) {
+        if (!alias) continue
+        out.add(alias)
+      }
+    }
+    return Array.from(out).map((v) => v.trim()).filter(Boolean)
+  }
   const normalized = normalizeCallCenterName(filterCallCenter)
   if (!normalized) return []
   const out = new Set<string>([normalized, String(filterCallCenter ?? '').trim()])
@@ -154,6 +172,9 @@ function callCenterFilterCandidates(filterCallCenter: string | null | undefined)
 
 function matchesCallCenterFilter(callCenter: string | null | undefined, filterCallCenter: string | null | undefined): boolean {
   if (!filterCallCenter) return true
+  if (isPresetAllCallCentersFilter(filterCallCenter)) {
+    return ALL_CANONICAL_CALL_CENTERS.has(normalizeCallCenterName(callCenter))
+  }
   return normalizeCallCenterName(callCenter) === normalizeCallCenterName(filterCallCenter)
 }
 
