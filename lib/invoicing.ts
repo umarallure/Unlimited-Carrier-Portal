@@ -2359,6 +2359,17 @@ export async function buildBpoInvoiceLines(
   return { startDate, endDate, rangeLabel, groups }
 }
 
+function leadValueForStatusHistory(
+  policy: InvoicePolicyDraft,
+  leadValueByPolicyKey: Record<string, number> | undefined,
+): number {
+  const fromLines = leadValueByPolicyKey?.[policy.policyKey]
+  if (fromLines !== undefined && Number.isFinite(fromLines)) {
+    return roundMoney(fromLines)
+  }
+  return roundMoney(policy.grossNet * BPO_INVOICE_LEAD_VALUE_SHARE)
+}
+
 export async function markInvoiceBatchPaid(input: {
   startDate: string
   endDate: string
@@ -2366,6 +2377,8 @@ export async function markInvoiceBatchPaid(input: {
   overridesByPolicyKey: Record<string, number>
   previousChargebackByCallCenter: Record<string, number>
   paidByEmail?: string | null
+  /** Totals from BPO invoice lines (after UI edits). Keys are `policyKey`. Falls back to 50% of policy gross when omitted. */
+  leadValueByPolicyKey?: Record<string, number>
 }): Promise<{ batchId: string }> {
   const weekOfRangeLabel = formatInvoiceRangeLabel(input.startDate, input.endDate)
   const allPolicies = input.groups.flatMap((group) => group.policies)
@@ -2449,6 +2462,7 @@ export async function markInvoiceBatchPaid(input: {
         invoicing_status: policy.latestInvoicingStatus,
         effective_date: input.endDate,
         week_of: weekOfRangeLabel,
+        lead_value: leadValueForStatusHistory(policy, input.leadValueByPolicyKey),
       })
     }
   }
