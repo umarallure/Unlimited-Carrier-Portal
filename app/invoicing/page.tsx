@@ -4,7 +4,9 @@ import { useState } from 'react'
 import { Calendar, Loader2, Shield } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/PageHeader'
@@ -17,7 +19,6 @@ import {
   markInvoiceBatchPaid,
   saveInvoiceDraftSnapshot,
   loadInvoiceDraftSnapshot,
-  clearInvoiceDraftSnapshot,
   normalizeCallCenterName,
   PRESET_ALL_CALL_CENTERS_FILTER,
   type InvoiceDraftSnapshot,
@@ -94,6 +95,8 @@ export default function InvoicingPage() {
   const [showWeekScript, setShowWeekScript] = useState(false)
   const [weekScriptRowsFromDrafts, setWeekScriptRowsFromDrafts] = useState<Array<{ callCenter: string; payment: number }>>([])
   const [weekScriptLoading, setWeekScriptLoading] = useState(false)
+  /** When false, To is always start + 13 days (14-day slab). When true, To is editable. */
+  const [customEndDate, setCustomEndDate] = useState(false)
 
   const balanceDueForBpo = (callCenter: string, subtotal: number): number => {
     const raw = previousChargebackByCallCenter[callCenter] ?? '0'
@@ -123,10 +126,17 @@ export default function InvoicingPage() {
   }
 
   const shiftSlab = (direction: -1 | 1) => {
-    if (!dateFrom) return
+    if (customEndDate || !dateFrom) return
     const nextFrom = addDays(dateFrom, direction * INVOICE_SLAB_DAYS)
     if (!nextFrom) return
     applySlabFrom(nextFrom)
+  }
+
+  const setCustomEndDateMode = (enabled: boolean) => {
+    setCustomEndDate(enabled)
+    if (!enabled && dateFrom) {
+      applySlabFrom(dateFrom)
+    }
   }
 
   const generateInvoice = async (callCenterFilter?: string | null) => {
@@ -259,6 +269,17 @@ export default function InvoicingPage() {
         previousChargebacks[center] = Number.isNaN(parsed) ? 0 : parsed
       }
 
+      const leadValueByPolicyKey: Record<string, number> = {}
+      if (visibleBpoDetail) {
+        for (const g of visibleBpoDetail.groups) {
+          for (const line of [...g.salesLines, ...g.chargebackLines]) {
+            const key = resolvePolicyKey(g.callCenter, line.policyNumber)
+            if (!key) continue
+            leadValueByPolicyKey[key] = round2((leadValueByPolicyKey[key] ?? 0) + line.leadValue)
+          }
+        }
+      }
+
       const { batchId } = await markInvoiceBatchPaid({
         startDate: visibleDraft.startDate,
         endDate: visibleDraft.endDate,
@@ -266,24 +287,10 @@ export default function InvoicingPage() {
         overridesByPolicyKey: {},
         previousChargebackByCallCenter: previousChargebacks,
         paidByEmail: data.user?.email || null,
+        leadValueByPolicyKey,
       })
       alert(`Invoice batch marked as paid. Batch ID: ${batchId}`)
-      setDraft(null)
-      setBpoDetail(null)
-      setPreviousChargebackByCallCenter({})
-      setExcludedPolicyKeys({})
-      setExcludedLineIds({})
-      setLineEdits({})
-      try {
-        await clearInvoiceDraftSnapshot({
-          startDate: visibleDraft.startDate,
-          endDate: visibleDraft.endDate,
-          callCenterFilter: selectedCallCenter === 'ALL' ? null : selectedCallCenter,
-        })
-      } catch (draftClearError) {
-        console.warn('Failed to clear saved draft after mark paid:', draftClearError)
-      }
-      setDraftSavedAt(null)
+      // Keep draft and saved snapshot on screen so users can review or re-export; do not clear.
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to mark invoice as paid.'
       alert(message)
@@ -308,6 +315,15 @@ export default function InvoicingPage() {
       const previousChargebacks: Record<string, number> = {
         [callCenter]: Number.isNaN(parsed) ? 0 : parsed,
       }
+      const leadValueByPolicyKey: Record<string, number> = {}
+      const bpoGroup = visibleBpoDetail?.groups.find((g) => g.callCenter === callCenter)
+      if (bpoGroup) {
+        for (const line of [...bpoGroup.salesLines, ...bpoGroup.chargebackLines]) {
+          const key = resolvePolicyKey(callCenter, line.policyNumber)
+          if (!key) continue
+          leadValueByPolicyKey[key] = round2((leadValueByPolicyKey[key] ?? 0) + line.leadValue)
+        }
+      }
       const { batchId } = await markInvoiceBatchPaid({
         startDate: visibleDraft.startDate,
         endDate: visibleDraft.endDate,
@@ -315,31 +331,10 @@ export default function InvoicingPage() {
         overridesByPolicyKey: {},
         previousChargebackByCallCenter: previousChargebacks,
         paidByEmail: data.user?.email || null,
+        leadValueByPolicyKey,
       })
       alert(`${callCenter} marked as paid. Batch ID: ${batchId}`)
-      setDraft((prev) => {
-        if (!prev) return prev
-        return { ...prev, groups: prev.groups.filter((g) => g.callCenter !== callCenter) }
-      })
-      setBpoDetail((prev) => {
-        if (!prev) return prev
-        return { ...prev, groups: prev.groups.filter((g) => g.callCenter !== callCenter) }
-      })
-      setPdfExportedByCenter((prev) => {
-        const next = { ...prev }
-        delete next[callCenter]
-        return next
-      })
-      try {
-        await clearInvoiceDraftSnapshot({
-          startDate: visibleDraft.startDate,
-          endDate: visibleDraft.endDate,
-          callCenterFilter: selectedCallCenter === 'ALL' ? null : selectedCallCenter,
-        })
-      } catch (draftClearError) {
-        console.warn('Failed to clear saved draft after center mark paid:', draftClearError)
-      }
-      setDraftSavedAt(null)
+      // Keep draft and saved snapshot; do not remove groups or clear server draft.
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : `Failed to mark ${callCenter} as paid.`
       alert(message)
@@ -992,26 +987,63 @@ export default function InvoicingPage() {
           <CardTitle>Invoice range</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3 rounded-md border border-slate-200 bg-slate-50/80 px-3 py-2 dark:border-slate-700 dark:bg-slate-900/40">
+            <Checkbox
+              id="invoicing-custom-end"
+              checked={customEndDate}
+              onCheckedChange={(checked) => setCustomEndDateMode(Boolean(checked))}
+            />
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <Label htmlFor="invoicing-custom-end" className="cursor-pointer text-sm font-medium">
+                Custom end date
+              </Label>
+              <span className="text-xs text-muted-foreground">
+                {customEndDate
+                  ? 'Choose any end date on or after the start date. Slab shortcuts are disabled.'
+                  : 'End date is fixed at 14 days from the start date; use Prev / Next Slab to move the window.'}
+              </span>
+            </div>
+          </div>
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">From</span>
               <div className="flex items-center gap-2">
                 <Calendar className="h-4 w-4 shrink-0 text-orange-500" />
-                <Input type="date" value={dateFrom} onChange={(e) => applySlabFrom(e.target.value)} className="h-9 w-[180px]" />
+                <Input
+                  type="date"
+                  value={dateFrom}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (customEndDate) {
+                      setDateFrom(v)
+                    } else {
+                      applySlabFrom(v)
+                    }
+                  }}
+                  className="h-9 w-[180px]"
+                />
               </div>
             </div>
             <div className="flex flex-col gap-1">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">To</span>
               <div className="flex items-center gap-2">
                 <Calendar className="h-4 w-4 shrink-0 text-orange-500" />
-                <Input type="date" value={dateTo} readOnly className="h-9 w-[180px] opacity-80" />
+                <Input
+                  type="date"
+                  value={dateTo}
+                  readOnly={!customEndDate}
+                  onChange={(e) => {
+                    if (customEndDate) setDateTo(e.target.value)
+                  }}
+                  className={cn('h-9 w-[180px]', !customEndDate && 'opacity-80')}
+                />
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Button type="button" variant="outline" onClick={() => shiftSlab(-1)} disabled={!dateFrom}>
+              <Button type="button" variant="outline" onClick={() => shiftSlab(-1)} disabled={customEndDate || !dateFrom}>
                 Prev Slab
               </Button>
-              <Button type="button" variant="outline" onClick={() => shiftSlab(1)} disabled={!dateFrom}>
+              <Button type="button" variant="outline" onClick={() => shiftSlab(1)} disabled={customEndDate || !dateFrom}>
                 Next Slab
               </Button>
             </div>

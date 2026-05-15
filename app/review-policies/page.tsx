@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { ClipboardCheck, Loader2, RefreshCw } from 'lucide-react'
+import { Check, ChevronDown, ClipboardCheck, Loader2, Pencil, RefreshCw, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   adminCardHeaderBar,
@@ -42,6 +42,11 @@ type ReviewDealRow = {
   notes: string | null
   updated_at: string | null
   last_updated: string | null
+  sales_agent: string | null
+  writing_number: string | null
+  call_center: string | null
+  policy_type: string | null
+  phone_number: string | null
 }
 
 type ReviewNoteRow = {
@@ -104,6 +109,14 @@ function stageActionOptions(stage: string | null): string[] {
   return []
 }
 
+function splitMultiFilter(value: string): string[] {
+  if (!value || value === 'all') return []
+  return value
+    .split('||')
+    .map((v) => v.trim())
+    .filter(Boolean)
+}
+
 export default function ReviewPoliciesPage() {
   const [rows, setRows] = useState<ReviewDealRow[]>([])
   const [notesByPolicyId, setNotesByPolicyId] = useState<Record<string, ReviewNoteRow[]>>({})
@@ -119,6 +132,37 @@ export default function ReviewPoliciesPage() {
   const [editingById, setEditingById] = useState<Record<string, boolean>>({})
   const [importing, setImporting] = useState(false)
   const importInputRef = useRef<HTMLInputElement>(null)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
+  const [carrierFilter, setCarrierFilter] = useState<string>('all')
+  const [agentFilter, setAgentFilter] = useState<string>('all')
+  const [openMultiFilter, setOpenMultiFilter] = useState<string | null>(null)
+  const [multiFilterSearch, setMultiFilterSearch] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearchTerm(searchTerm), 300)
+    return () => clearTimeout(handle)
+  }, [searchTerm])
+
+  useEffect(() => {
+    if (!openMultiFilter) return
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null
+      if (!target?.closest('[data-multifilter-root="true"]')) {
+        setOpenMultiFilter(null)
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [openMultiFilter])
+
+  const updateMultiFilter = (
+    setter: (value: string | ((prev: string) => string)) => void,
+    selected: string[]
+  ) => {
+    const next = selected.map((v) => v.trim()).filter(Boolean)
+    setter(next.length > 0 ? next.join('||') : 'all')
+  }
 
   const stageCounts = useMemo(() => {
     const out: Record<string, number> = {}
@@ -128,10 +172,68 @@ export default function ReviewPoliciesPage() {
     }
     return out
   }, [rows])
-  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize))
-  const pageStart = rows.length === 0 ? 0 : (currentPage - 1) * pageSize
-  const pageEndExclusive = Math.min(pageStart + pageSize, rows.length)
-  const paginatedRows = rows.slice(pageStart, pageEndExclusive)
+  const carrierOptions = useMemo(
+    () =>
+      Array.from(new Set(rows.map((r) => r.carrier).filter((c): c is string => Boolean(c)))).sort(
+        (a, b) => a.localeCompare(b)
+      ),
+    [rows]
+  )
+  const agentOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(rows.map((r) => r.sales_agent).filter((a): a is string => Boolean(a)))
+      ).sort((a, b) => a.localeCompare(b)),
+    [rows]
+  )
+
+  const selectedCarriers = splitMultiFilter(carrierFilter)
+  const selectedAgents = splitMultiFilter(agentFilter)
+
+  const filteredRows = useMemo(() => {
+    const term = debouncedSearchTerm.trim().toLowerCase()
+    const carrierList = splitMultiFilter(carrierFilter)
+    const agentList = splitMultiFilter(agentFilter)
+    const carrierSet = carrierList.length ? new Set(carrierList) : null
+    const agentSet = agentList.length ? new Set(agentList) : null
+    return rows.filter((r) => {
+      if (carrierSet && !(r.carrier && carrierSet.has(r.carrier))) return false
+      if (agentSet && !(r.sales_agent && agentSet.has(r.sales_agent))) return false
+      if (term) {
+        const haystack = [
+          r.name,
+          r.policy_number,
+          r.carrier,
+          r.sales_agent,
+          r.writing_number,
+          r.phone_number,
+          r.policy_type,
+          r.ghl_stage,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+        if (!haystack.includes(term)) return false
+      }
+      return true
+    })
+  }, [rows, debouncedSearchTerm, carrierFilter, agentFilter])
+
+  const activeFilterCount =
+    (debouncedSearchTerm.trim() ? 1 : 0) +
+    (selectedCarriers.length ? 1 : 0) +
+    (selectedAgents.length ? 1 : 0)
+
+  const clearFilters = () => {
+    setSearchTerm('')
+    setCarrierFilter('all')
+    setAgentFilter('all')
+  }
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize))
+  const pageStart = filteredRows.length === 0 ? 0 : (currentPage - 1) * pageSize
+  const pageEndExclusive = Math.min(pageStart + pageSize, filteredRows.length)
+  const paginatedRows = filteredRows.slice(pageStart, pageEndExclusive)
   const selectedStagesKey = selectedStages.join('|')
 
   const fetchRows = useCallback(async () => {
@@ -150,7 +252,7 @@ export default function ReviewPoliciesPage() {
         const { data, error } = await supabase
           .from('deal_tracker')
           .select(
-            'id, name, policy_number, carrier, ghl_stage, policy_status, deal_creation_date, effective_date, notes, updated_at, last_updated'
+            'id, name, policy_number, carrier, ghl_stage, policy_status, deal_creation_date, effective_date, notes, updated_at, last_updated, sales_agent, writing_number, call_center, policy_type, phone_number'
           )
           .in('ghl_stage', selectedStages)
           .order('updated_at', { ascending: false })
@@ -235,7 +337,7 @@ export default function ReviewPoliciesPage() {
 
   useEffect(() => {
     setCurrentPage(1)
-  }, [selectedStagesKey, pageSize])
+  }, [selectedStagesKey, pageSize, debouncedSearchTerm, carrierFilter, agentFilter])
 
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages)
@@ -338,16 +440,22 @@ export default function ReviewPoliciesPage() {
       'Policy Number',
       'Name',
       'Carrier',
+      'Agent',
+      'Call Center',
+      'Effective Date',
       'Current GHL Stage',
       'Manual Move',
       'Review Note',
       'Reviewer Name',
     ]
-    const data = rows.map((r) => [
+    const data = filteredRows.map((r) => [
       r.id,
       r.policy_number ?? '',
       r.name ?? '',
       r.carrier ?? '',
+      r.sales_agent ?? '',
+      r.call_center ?? '',
+      r.effective_date ?? '',
       r.ghl_stage ?? '',
       '',
       '',
@@ -356,7 +464,8 @@ export default function ReviewPoliciesPage() {
     const ws = XLSX.utils.aoa_to_sheet([headers, ...data])
     ws['!cols'] = [
       { wch: 38 }, { wch: 18 }, { wch: 24 }, { wch: 22 },
-      { wch: 30 }, { wch: 30 }, { wch: 42 }, { wch: 22 },
+      { wch: 22 }, { wch: 18 }, { wch: 14 }, { wch: 30 },
+      { wch: 30 }, { wch: 42 }, { wch: 22 },
     ]
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Review Policies')
@@ -410,6 +519,166 @@ export default function ReviewPoliciesPage() {
     }
   }
 
+  const renderMultiSelect = (
+    keyName: string,
+    label: string,
+    value: string,
+    options: string[],
+    setter: (value: string | ((prev: string) => string)) => void
+  ) => {
+    const selected = splitMultiFilter(value)
+    const isOpen = openMultiFilter === keyName
+    const search = multiFilterSearch[keyName] || ''
+    const visibleOptions = options.filter((opt) =>
+      opt.toLowerCase().includes(search.toLowerCase())
+    )
+    const toggle = (option: string) => {
+      const next = selected.includes(option)
+        ? selected.filter((v) => v !== option)
+        : [...selected, option]
+      updateMultiFilter(setter, next)
+    }
+    const selectedLabel =
+      selected.length === 0
+        ? `All ${label}`
+        : selected.length === 1
+          ? selected[0]
+          : `${selected.length} selected`
+
+    return (
+      <div className="relative space-y-1.5" data-multifilter-root="true">
+        <label className="block text-xs font-medium text-muted-foreground">{label}</label>
+        <button
+          type="button"
+          onClick={() => setOpenMultiFilter(isOpen ? null : keyName)}
+          className={cn(
+            adminSelectTrigger,
+            'group flex h-10 w-full items-center gap-2 rounded-md border px-3 text-left text-sm transition-colors',
+            isOpen ? 'border-orange-500/60 ring-2 ring-orange-500/15' : 'hover:border-border/80'
+          )}
+        >
+          <span
+            className={cn(
+              'flex-1 truncate text-[13px]',
+              selected.length === 0 && 'text-muted-foreground'
+            )}
+          >
+            {selectedLabel}
+          </span>
+          {selected.length > 0 ? (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label="Clear selection"
+              onClick={(e) => {
+                e.stopPropagation()
+                setter('all')
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setter('all')
+                }
+              }}
+              className="rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </span>
+          ) : null}
+          <ChevronDown
+            className={cn(
+              'h-4 w-4 shrink-0 text-muted-foreground transition-transform',
+              isOpen && 'rotate-180'
+            )}
+          />
+        </button>
+
+        {isOpen ? (
+          <div className="absolute left-0 top-[calc(100%+6px)] z-50 w-full min-w-[260px] overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl shadow-black/20 dark:border-slate-700 dark:bg-slate-900">
+            <div className="sticky top-0 z-10 border-b border-border/60 bg-popover/95 p-2 backdrop-blur dark:bg-slate-900/95">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  autoFocus
+                  value={search}
+                  onChange={(e) =>
+                    setMultiFilterSearch((prev) => ({ ...prev, [keyName]: e.target.value }))
+                  }
+                  placeholder={`Search ${label.toLowerCase()}…`}
+                  className={cn(adminInput, 'h-8 pl-7 text-xs sm:h-8')}
+                />
+              </div>
+              <div className="mt-2 flex items-center justify-between text-[11px]">
+                <button
+                  type="button"
+                  className="font-medium text-orange-400 hover:text-orange-300"
+                  onClick={() => updateMultiFilter(setter, search ? visibleOptions : options)}
+                >
+                  {search ? 'Select shown' : 'Select all'}
+                </button>
+                <button
+                  type="button"
+                  className="font-medium text-muted-foreground hover:text-foreground"
+                  onClick={() => setter('all')}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-64 overflow-auto p-1">
+              {visibleOptions.map((opt) => {
+                const active = selected.includes(opt)
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => toggle(opt)}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors',
+                      active ? 'bg-orange-500/12 text-foreground' : 'text-foreground/85 hover:bg-muted/70'
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors',
+                        active
+                          ? 'border-orange-500 bg-orange-500 text-white'
+                          : 'border-border bg-background text-transparent'
+                      )}
+                    >
+                      <Check className="h-3 w-3" />
+                    </span>
+                    <span className="flex-1 truncate">{opt}</span>
+                  </button>
+                )
+              })}
+              {visibleOptions.length === 0 ? (
+                <div className="px-2 py-8 text-center text-xs text-muted-foreground">No matches</div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-border/60 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground dark:bg-slate-950/40">
+              <span>
+                {selected.length === 0
+                  ? 'No selection'
+                  : `${selected.length} of ${options.length} selected`}
+              </span>
+              <button
+                type="button"
+                className="font-medium text-foreground hover:text-orange-400"
+                onClick={() => setOpenMultiFilter(null)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
   return (
     <div className="admin-page space-y-6">
       <PageHeader
@@ -422,7 +691,11 @@ export default function ReviewPoliciesPage() {
         <CardHeader className={cn('pb-5', adminCardHeaderBar)}>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className={adminCardTitle}>
-              Review Queue <span className="text-xs font-normal text-muted-foreground">({rows.length})</span>
+              Review Queue{' '}
+              <span className="text-xs font-normal text-muted-foreground">
+                ({filteredRows.length}
+                {filteredRows.length !== rows.length ? ` of ${rows.length}` : ''})
+              </span>
             </CardTitle>
             <div className="flex items-center gap-2">
               <Input
@@ -492,11 +765,46 @@ export default function ReviewPoliciesPage() {
               </Button>
             </div>
           </div>
+          <div className={cn('mt-3 space-y-3 rounded-lg p-3', adminFilterWell)}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Search &amp; filters
+              </p>
+              {activeFilterCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3 w-3" />
+                  Clear filters ({activeFilterCount})
+                </button>
+              ) : null}
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-muted-foreground">Search</label>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 transform text-muted-foreground" />
+                  <Input
+                    placeholder="Name, policy #, agent, phone, type…"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className={cn(adminInput, 'pl-10')}
+                  />
+                </div>
+              </div>
+              {renderMultiSelect('carrier', 'Carrier', carrierFilter, carrierOptions, setCarrierFilter)}
+              {renderMultiSelect('agent', 'Agent', agentFilter, agentOptions, setAgentFilter)}
+            </div>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
             <span>
-              Showing {rows.length === 0 ? 0 : pageStart + 1}-{pageEndExclusive} of {rows.length} policies
+              Showing {filteredRows.length === 0 ? 0 : pageStart + 1}-{pageEndExclusive} of{' '}
+              {filteredRows.length} policies
+              {filteredRows.length !== rows.length ? ` (filtered from ${rows.length})` : ''}
             </span>
             <div className="flex items-center gap-2">
               <span>Rows per page:</span>
@@ -518,27 +826,32 @@ export default function ReviewPoliciesPage() {
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border bg-muted/30 hover:bg-transparent odd:bg-transparent even:bg-transparent dark:border-slate-800 dark:bg-slate-900/40">
+                  <TableHead className={cn(adminThPlain, 'w-[64px] text-center')}>Edit</TableHead>
                   <TableHead className={cn(adminThPlain, 'min-w-[180px]')}>Name</TableHead>
                   <TableHead className={adminThPlain}>Policy #</TableHead>
                   <TableHead className={cn(adminThPlain, 'min-w-[150px]')}>Carrier</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[160px]')}>Agent</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[150px]')}>Call Center</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[120px]')}>Effective</TableHead>
                   <TableHead className={cn(adminThPlain, 'min-w-[220px]')}>Current GHL Stage</TableHead>
                   <TableHead className={cn(adminThPlain, 'min-w-[190px]')}>Manual Move</TableHead>
                   <TableHead className={cn(adminThPlain, 'min-w-[260px]')}>Review Note</TableHead>
                   <TableHead className={cn(adminThPlain, 'min-w-[280px]')}>Review Notes (All)</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[150px]')}>Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-8 text-center">
+                    <TableCell colSpan={11} className="py-8 text-center">
                       <Loader2 className="mx-auto h-8 w-8 animate-spin text-orange-400" />
                     </TableCell>
                   </TableRow>
-                ) : rows.length === 0 ? (
+                ) : filteredRows.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-8 text-center text-muted-foreground">
-                      No policies currently in review scope.
+                    <TableCell colSpan={11} className="py-8 text-center text-muted-foreground">
+                      {rows.length === 0
+                        ? 'No policies currently in review scope.'
+                        : 'No policies match the current search and filters.'}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -548,12 +861,69 @@ export default function ReviewPoliciesPage() {
                     const noteList = notesByPolicyId[row.id] || []
                     return (
                       <TableRow key={row.id} className={adminTableRowInteractive}>
+                        <TableCell className="w-[64px] px-2 align-middle">
+                          {!isEditing ? (
+                            <button
+                              type="button"
+                              title="Edit review"
+                              aria-label="Edit review"
+                              onClick={() => setEditingById((prev) => ({ ...prev, [row.id]: true }))}
+                              className="group inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-sm transition-all hover:-translate-y-0.5 hover:border-orange-500/50 hover:bg-orange-500/10 hover:text-orange-400 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/40"
+                            >
+                              <Pencil className="h-3.5 w-3.5 transition-transform group-hover:scale-110" />
+                            </button>
+                          ) : (
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                title="Save review"
+                                aria-label="Save review"
+                                onClick={() => saveReview(row)}
+                                disabled={savingId === row.id}
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white shadow-sm transition-all hover:bg-blue-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
+                              >
+                                {savingId === row.id ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Check className="h-4 w-4" />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                title="Cancel"
+                                aria-label="Cancel edit"
+                                onClick={() => {
+                                  setEditingById((prev) => ({ ...prev, [row.id]: false }))
+                                  setDraftNoteById((prev) => ({ ...prev, [row.id]: '' }))
+                                  setNextStageById((prev) => ({ ...prev, [row.id]: '' }))
+                                }}
+                                disabled={savingId === row.id}
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-sm transition-all hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/30"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                            </div>
+                          )}
+                        </TableCell>
                         <TableCell className={cn(adminTdStrong, 'min-w-[180px]')}>{row.name || '-'}</TableCell>
                         <TableCell className={cn(adminTdMuted, 'font-mono text-sm')}>{row.policy_number}</TableCell>
                         <TableCell className={adminTdMuted}>
                           <span className="block max-w-[150px] truncate" title={row.carrier || '-'}>
                             {row.carrier || '-'}
                           </span>
+                        </TableCell>
+                        <TableCell className={adminTdMuted}>
+                          <span className="block max-w-[160px] truncate" title={row.sales_agent || '-'}>
+                            {row.sales_agent || '-'}
+                          </span>
+                        </TableCell>
+                        <TableCell className={adminTdMuted}>
+                          <span className="block max-w-[150px] truncate" title={row.call_center || '-'}>
+                            {row.call_center || '-'}
+                          </span>
+                        </TableCell>
+                        <TableCell className={cn(adminTdMuted, 'whitespace-nowrap text-xs')}>
+                          {row.effective_date ? formatStoredDateForDisplay(row.effective_date) : '-'}
                         </TableCell>
                         <TableCell className={adminTdMuted}>{row.ghl_stage || '-'}</TableCell>
                         <TableCell className={adminTdMuted}>
@@ -625,43 +995,6 @@ export default function ReviewPoliciesPage() {
                             <span className="text-xs text-muted-foreground">No review yet</span>
                           )}
                         </TableCell>
-                        <TableCell className={adminTdMuted}>
-                          <div className="flex items-center gap-2">
-                            {!isEditing ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className={adminOutlineBtn}
-                                onClick={() => setEditingById((prev) => ({ ...prev, [row.id]: true }))}
-                              >
-                                Edit
-                              </Button>
-                            ) : (
-                              <>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className={adminOutlineBtn}
-                                  onClick={() => {
-                                    setEditingById((prev) => ({ ...prev, [row.id]: false }))
-                                    setDraftNoteById((prev) => ({ ...prev, [row.id]: '' }))
-                                    setNextStageById((prev) => ({ ...prev, [row.id]: '' }))
-                                  }}
-                                >
-                                  Cancel
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  onClick={() => saveReview(row)}
-                                  disabled={savingId === row.id}
-                                  className="bg-blue-600 text-white hover:bg-blue-700"
-                                >
-                                  {savingId === row.id ? 'Saving...' : 'Save'}
-                                </Button>
-                              </>
-                            )}
-                          </div>
-                        </TableCell>
                       </TableRow>
                     )
                   })
@@ -670,7 +1003,7 @@ export default function ReviewPoliciesPage() {
             </Table>
           </div>
 
-          {rows.length > 0 && (
+          {filteredRows.length > 0 && (
             <div className={cn('flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800/80', adminPaginationBar)}>
               <div className="text-sm text-muted-foreground">
                 Page {currentPage} of {totalPages}
