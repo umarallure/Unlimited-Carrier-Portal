@@ -1001,10 +1001,21 @@ function DraftsTab() {
                             ) : (
                               <div className="flex flex-col gap-0.5">
                                 {p.audit.commissions.map((c, i) => {
-                                  const adv = c.advance_amount ?? 0
-                                  const cb = c.charge_back_amount ?? 0
-                                  const net = adv - cb
-                                  const hasAmount = c.advance_amount != null || c.charge_back_amount != null
+                                  const cbRaw = c.charge_back_amount
+                                  const advRaw = c.advance_amount
+                                  const isChargeback = cbRaw != null && Number(cbRaw) !== 0
+                                  const hasAdvance = advRaw != null && Number(advRaw) !== 0
+                                  // Chargeback always shows as a negative amount;
+                                  // sign-agnostic about how the DB stores it.
+                                  const magnitude = isChargeback
+                                    ? Math.abs(Number(cbRaw))
+                                    : hasAdvance
+                                      ? Math.abs(Number(advRaw))
+                                      : null
+                                  const formatted =
+                                    magnitude == null
+                                      ? '—'
+                                      : `${isChargeback ? '-' : ''}$${magnitude.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                                   return (
                                     <div
                                       key={`${c.date ?? 'no-date'}-${i}`}
@@ -1014,15 +1025,23 @@ function DraftsTab() {
                                       <span
                                         className={cn(
                                           'tabular-nums',
-                                          hasAmount && net < 0
+                                          isChargeback
                                             ? 'text-red-600 dark:text-red-400'
-                                            : hasAmount
+                                            : hasAdvance
                                               ? 'text-emerald-600 dark:text-emerald-400'
                                               : 'text-muted-foreground'
                                         )}
                                       >
-                                        {hasAmount ? money(net) : '—'}
+                                        {formatted}
                                       </span>
+                                      {isChargeback ? (
+                                        <Badge
+                                          variant="outline"
+                                          className="border-red-500/40 bg-red-500/10 px-1.5 py-0 text-[10px] text-red-600 dark:text-red-300"
+                                        >
+                                          CB
+                                        </Badge>
+                                      ) : null}
                                     </div>
                                   )
                                 })}
