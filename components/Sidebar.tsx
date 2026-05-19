@@ -14,6 +14,7 @@ import {
     TrendingUp,
     History,
     LayoutGrid,
+    FileSearch,
     ChevronLeft,
     ChevronRight,
     Sun,
@@ -174,6 +175,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Invoicing"
           icon={FileText}
           active={navActive('/invoicing')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/invoicing-audit"
+          label="Invoicing Audit"
+          icon={FileSearch}
+          active={navActive('/invoicing-audit')}
           collapsed={collapsed}
         />
         <NavRow href="/upload-tree" label="Org tree upload" icon={Upload} active={navActive('/upload-tree')} collapsed={collapsed} />
