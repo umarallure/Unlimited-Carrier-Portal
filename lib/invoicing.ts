@@ -132,8 +132,16 @@ const CALL_CENTER_ALIAS_TO_CANONICAL = new Map<string, string>(
 
 const ALL_CANONICAL_CALL_CENTERS = new Set(CANONICAL_CALL_CENTER_ALIASES.map((entry) => entry.canonical))
 
-function isPresetAllCallCentersFilter(value: string | null | undefined): boolean {
+function isPresetAllCallCentersFilter(value: string | string[] | null | undefined): boolean {
+  if (Array.isArray(value)) return false
   return String(value ?? '').trim() === PRESET_ALL_CALL_CENTERS_FILTER
+}
+
+/** True when a real call-center scope is requested (a non-empty value, the
+ *  preset-all sentinel, or a non-empty list); false for null/empty/empty-list. */
+function hasCallCenterScope(filterCallCenter: string | string[] | null | undefined): boolean {
+  if (Array.isArray(filterCallCenter)) return filterCallCenter.some((v) => String(v ?? '').trim().length > 0)
+  return String(filterCallCenter ?? '').trim().length > 0
 }
 
 export function normalizeCallCenterName(callCenter: string | null | undefined): string {
@@ -145,7 +153,7 @@ export function normalizeCallCenterName(callCenter: string | null | undefined): 
   return raw
 }
 
-function callCenterFilterCandidates(filterCallCenter: string | null | undefined): string[] {
+function callCenterFilterCandidates(filterCallCenter: string | string[] | null | undefined): string[] {
   if (isPresetAllCallCentersFilter(filterCallCenter)) {
     const out = new Set<string>()
     for (const entry of CANONICAL_CALL_CENTER_ALIASES) {
@@ -157,25 +165,36 @@ function callCenterFilterCandidates(filterCallCenter: string | null | undefined)
     }
     return Array.from(out).map((v) => v.trim()).filter(Boolean)
   }
-  const normalized = normalizeCallCenterName(filterCallCenter)
-  if (!normalized) return []
-  const out = new Set<string>([normalized, String(filterCallCenter ?? '').trim()])
-  const aliasDef = CANONICAL_CALL_CENTER_ALIASES.find((entry) => entry.canonical === normalized)
-  if (aliasDef) {
-    for (const alias of aliasDef.aliases) {
-      if (!alias) continue
-      out.add(alias)
+  // Accept a single value or a list (multi-select). Expand every selected value
+  // into its canonical name plus all known alias spellings, so the DB `.in(...)`
+  // query matches every variant of every selected call center.
+  const selected = Array.isArray(filterCallCenter) ? filterCallCenter : [filterCallCenter]
+  const out = new Set<string>()
+  for (const value of selected) {
+    const raw = String(value ?? '').trim()
+    if (!raw) continue
+    const normalized = normalizeCallCenterName(raw)
+    out.add(normalized)
+    out.add(raw)
+    const aliasDef = CANONICAL_CALL_CENTER_ALIASES.find((entry) => entry.canonical === normalized)
+    if (aliasDef) {
+      for (const alias of aliasDef.aliases) {
+        if (!alias) continue
+        out.add(alias)
+      }
     }
   }
   return Array.from(out).map((v) => v.trim()).filter(Boolean)
 }
 
-function matchesCallCenterFilter(callCenter: string | null | undefined, filterCallCenter: string | null | undefined): boolean {
-  if (!filterCallCenter) return true
+function matchesCallCenterFilter(callCenter: string | null | undefined, filterCallCenter: string | string[] | null | undefined): boolean {
+  if (!filterCallCenter || (Array.isArray(filterCallCenter) && filterCallCenter.length === 0)) return true
   if (isPresetAllCallCentersFilter(filterCallCenter)) {
     return ALL_CANONICAL_CALL_CENTERS.has(normalizeCallCenterName(callCenter))
   }
-  return normalizeCallCenterName(callCenter) === normalizeCallCenterName(filterCallCenter)
+  const target = normalizeCallCenterName(callCenter)
+  const selected = Array.isArray(filterCallCenter) ? filterCallCenter : [filterCallCenter]
+  return selected.some((value) => normalizeCallCenterName(value) === target)
 }
 
 function isCustomerPipelineStage(stage: string | null | undefined): boolean {
@@ -787,7 +806,7 @@ async function fetchAllChargebackStageDeals<T extends Record<string, unknown>>(s
 
 async function fetchAllChargebackStageDealsByCallCenter<T extends Record<string, unknown>>(
   selectCols: string,
-  callCenter: string,
+  callCenter: string | string[],
 ): Promise<T[]> {
   const PAGE_SIZE = 1000
   const allRows: T[] = []
@@ -833,7 +852,7 @@ async function fetchAllCustomerPipelineDeals<T extends Record<string, unknown>>(
 
 async function fetchAllCustomerPipelineDealsByCallCenter<T extends Record<string, unknown>>(
   selectCols: string,
-  callCenter: string,
+  callCenter: string | string[],
 ): Promise<T[]> {
   const PAGE_SIZE = 1000
   const allRows: T[] = []
@@ -881,9 +900,9 @@ async function batchFetchStatusHistory(
 export async function buildInvoiceDraft(
   startDate: string,
   endDate: string,
-  filterCallCenter?: string | null,
+  filterCallCenter?: string | string[] | null,
 ): Promise<InvoiceDraftResult> {
-  const scopedCenter = filterCallCenter ? normalizeCallCenterName(filterCallCenter) : null
+  const scopedCenter = hasCallCenterScope(filterCallCenter)
   let scopedPolicyNumbersForCenter: string[] | null = null
   if (scopedCenter) {
     const centerCandidates = callCenterFilterCandidates(filterCallCenter)
@@ -1060,7 +1079,7 @@ export async function buildInvoiceDraft(
   const customerPipelineDealsDraft = scopedCenter
     ? await fetchAllCustomerPipelineDealsByCallCenter<DealTrackerCallCenterRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, ghl_stage, updated_at, created_at',
-        filterCallCenter as string,
+        filterCallCenter as string | string[],
       )
     : await fetchAllCustomerPipelineDeals<DealTrackerCallCenterRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, ghl_stage, updated_at, created_at',
@@ -1137,7 +1156,7 @@ export async function buildInvoiceDraft(
   const cbStageDeals = scopedCenter
     ? await fetchAllChargebackStageDealsByCallCenter<DealTrackerCallCenterRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
-        filterCallCenter as string,
+        filterCallCenter as string | string[],
       )
     : await fetchAllChargebackStageDeals<DealTrackerCallCenterRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, policy_type, deal_value, ghl_stage, effective_date, updated_at, created_at',
@@ -1770,9 +1789,9 @@ async function batchFetchLatestCommissionRateByNormalizedPolicy(policyNumbers: s
 export async function buildBpoInvoiceLines(
   startDate: string,
   endDate: string,
-  filterCallCenter?: string | null,
+  filterCallCenter?: string | string[] | null,
 ): Promise<BpoInvoiceDetailResult> {
-  const scopedCenter = filterCallCenter ? normalizeCallCenterName(filterCallCenter) : null
+  const scopedCenter = hasCallCenterScope(filterCallCenter)
   let scopedPolicyNumbersForCenter: string[] | null = null
   if (scopedCenter) {
     const centerCandidates = callCenterFilterCandidates(filterCallCenter)
@@ -2004,7 +2023,7 @@ export async function buildBpoInvoiceLines(
   const customerPipelineDeals = scopedCenter
     ? await fetchAllCustomerPipelineDealsByCallCenter<DealTrackerInvoiceRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, ghl_stage, updated_at, created_at',
-        filterCallCenter as string,
+        filterCallCenter as string | string[],
       )
     : await fetchAllCustomerPipelineDeals<DealTrackerInvoiceRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, ghl_stage, updated_at, created_at',
@@ -2094,7 +2113,7 @@ export async function buildBpoInvoiceLines(
   const cbStageDeals = scopedCenter
     ? await fetchAllChargebackStageDealsByCallCenter<DealTrackerInvoiceRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
-        filterCallCenter as string,
+        filterCallCenter as string | string[],
       )
     : await fetchAllChargebackStageDeals<DealTrackerInvoiceRow>(
         'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
