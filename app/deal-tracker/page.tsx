@@ -283,24 +283,23 @@ export default function DealTrackerPage() {
         if (!data || data.length < 1000) break
       }
 
-      const uniqueAgents = Array.from(
-        new Set(dealRows.map((e: any) => e.sales_agent).filter(Boolean))
-      ).sort()
-      const uniqueCallCenters = Array.from(
-        new Set(dealRows.map((e: any) => e.call_center).filter(Boolean))
-      ).sort()
-      const uniqueStatuses = Array.from(
-        new Set(dealRows.map((e: any) => e.policy_status).filter(Boolean))
-      ).sort()
-      const uniqueGhlStages = Array.from(
-        new Set(dealRows.map((e: any) => e.ghl_stage).filter(Boolean))
-      ).sort()
-      const uniqueCarrierStatuses = Array.from(
-        new Set(dealRows.map((e: any) => e.carrier_status).filter(Boolean))
-      ).sort()
-      const uniqueDealStatuses = Array.from(
-        new Set(dealRows.map((e: any) => e.status).filter(Boolean))
-      ).sort()
+      // Trim before de-duping so stray whitespace (e.g. a leading/trailing tab)
+      // can't produce visually-identical duplicate options in the dropdowns.
+      const uniqueValues = (field: string) =>
+        Array.from(
+          new Set(
+            dealRows
+              .map((e: any) => (e[field] == null ? '' : String(e[field]).trim()))
+              .filter(Boolean)
+          )
+        ).sort()
+
+      const uniqueAgents = uniqueValues('sales_agent')
+      const uniqueCallCenters = uniqueValues('call_center')
+      const uniqueStatuses = uniqueValues('policy_status')
+      const uniqueGhlStages = uniqueValues('ghl_stage')
+      const uniqueCarrierStatuses = uniqueValues('carrier_status')
+      const uniqueDealStatuses = uniqueValues('status')
 
       setAgents(uniqueAgents as string[])
       setCallCenters(uniqueCallCenters as string[])

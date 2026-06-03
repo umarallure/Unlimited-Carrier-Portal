@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Calendar, Loader2, Shield } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/PageHeader'
+import { MultiSelectFilter } from '@/components/filters/MultiSelectFilter'
 import { createClient } from '@/lib/supabase/client'
 import {
   buildInvoiceDraft,
@@ -89,14 +90,59 @@ export default function InvoicingPage() {
   const [excludedLineIds, setExcludedLineIds] = useState<Record<string, true>>({})
   const [lineEdits, setLineEdits] = useState<Record<string, Partial<BpoInvoiceLine>>>({})
   const [pdfExportedByCenter, setPdfExportedByCenter] = useState<Record<string, true>>({})
-  const [availableCallCenters] = useState<string[]>(() => PRESET_CALL_CENTERS.slice().sort((a, b) => a.localeCompare(b)))
-  const [selectedCallCenter, setSelectedCallCenter] = useState<string>('ALL')
+  // Populated from live deal_tracker data (canonicalized) on mount; falls back
+  // to the preset list if the fetch fails. See the effect below.
+  const [availableCallCenters, setAvailableCallCenters] = useState<string[]>(() =>
+    PRESET_CALL_CENTERS.slice().sort((a, b) => a.localeCompare(b)),
+  )
+  // Multi-select: empty array means "All Call Centers". One selected center
+  // enables per-center draft save/load (drafts are stored per call center).
+  const [selectedCenters, setSelectedCenters] = useState<string[]>([])
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null)
   const [showWeekScript, setShowWeekScript] = useState(false)
   const [weekScriptRowsFromDrafts, setWeekScriptRowsFromDrafts] = useState<Array<{ callCenter: string; payment: number }>>([])
   const [weekScriptLoading, setWeekScriptLoading] = useState(false)
   /** When false, To is always start + 13 days (14-day slab). When true, To is editable. */
   const [customEndDate, setCustomEndDate] = useState(false)
+
+  // Load call-center options from live deal_tracker data, collapsing variant
+  // spellings to their canonical name (handles the "different versions" problem).
+  // Unmapped centers normalize to themselves, so new ones still appear.
+  useEffect(() => {
+    let cancelled = false
+    const loadCallCenters = async () => {
+      try {
+        const rows: { call_center: string | null }[] = []
+        for (let from = 0; ; from += 1000) {
+          const { data, error } = await supabase
+            .from('deal_tracker')
+            .select('call_center')
+            .order('created_at', { ascending: false })
+            .range(from, from + 999)
+          if (error) throw error
+          rows.push(...((data as { call_center: string | null }[]) || []))
+          if (!data || data.length < 1000) break
+        }
+        if (cancelled) return
+        const canonical = new Set<string>()
+        for (const r of rows) {
+          const raw = String(r.call_center ?? '').trim()
+          if (!raw) continue
+          canonical.add(normalizeCallCenterName(raw))
+        }
+        if (canonical.size > 0) {
+          setAvailableCallCenters(Array.from(canonical).sort((a, b) => a.localeCompare(b)))
+        }
+      } catch {
+        // Keep the preset fallback already in state.
+      }
+    }
+    void loadCallCenters()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const balanceDueForBpo = (callCenter: string, subtotal: number): number => {
     const raw = previousChargebackByCallCenter[callCenter] ?? '0'
@@ -139,7 +185,7 @@ export default function InvoicingPage() {
     }
   }
 
-  const generateInvoice = async (callCenterFilter?: string | null) => {
+  const generateInvoice = async (callCenterFilter?: string | string[] | null) => {
     if (!dateFrom || !dateTo) {
       alert('Please select both From and To dates.')
       return
@@ -175,10 +221,11 @@ export default function InvoicingPage() {
   }
 
   const saveDraftLocally = async () => {
-    if (selectedCallCenter === 'ALL') {
-      alert('Please select one call center. Drafts are saved per slab per call center.')
+    if (selectedCenters.length !== 1) {
+      alert('Please select exactly one call center. Drafts are saved per slab per call center.')
       return
     }
+    const center = selectedCenters[0]
     if (!draft || !bpoDetail) {
       alert('Generate invoice first, then move it to draft.')
       return
@@ -186,7 +233,7 @@ export default function InvoicingPage() {
     const payload: InvoiceDraftSnapshot = {
       dateFrom,
       dateTo,
-      selectedCallCenter,
+      selectedCallCenter: center,
       draft,
       bpoDetail,
       previousChargebackByCallCenter,
@@ -201,7 +248,7 @@ export default function InvoicingPage() {
       await saveInvoiceDraftSnapshot({
         startDate: dateFrom,
         endDate: dateTo,
-        callCenterFilter: selectedCallCenter,
+        callCenterFilter: center,
         payload,
         savedByEmail: data.user?.email || null,
       })
@@ -214,10 +261,11 @@ export default function InvoicingPage() {
   }
 
   const loadDraftLocally = async () => {
-    if (selectedCallCenter === 'ALL') {
-      alert('Please select one call center to load its draft.')
+    if (selectedCenters.length !== 1) {
+      alert('Please select exactly one call center to load its draft.')
       return
     }
+    const center = selectedCenters[0]
     if (!dateFrom || !dateTo) {
       alert('Select invoice date range first to load server draft.')
       return
@@ -226,7 +274,7 @@ export default function InvoicingPage() {
       const record = await loadInvoiceDraftSnapshot({
         startDate: dateFrom,
         endDate: dateTo,
-        callCenterFilter: selectedCallCenter,
+        callCenterFilter: center,
       })
       if (!record?.payload) {
         alert('No saved draft found for this cycle/call center.')
@@ -235,7 +283,7 @@ export default function InvoicingPage() {
       const saved = record.payload
       setDateFrom(saved.dateFrom || dateFrom)
       setDateTo(saved.dateTo || dateTo)
-      setSelectedCallCenter(saved.selectedCallCenter || selectedCallCenter)
+      setSelectedCenters(saved.selectedCallCenter ? [saved.selectedCallCenter] : [])
       setDraft(saved.draft)
       setBpoDetail(saved.bpoDetail)
       setPreviousChargebackByCallCenter(saved.previousChargebackByCallCenter || {})
@@ -1050,7 +1098,7 @@ export default function InvoicingPage() {
             <Button
               onClick={() =>
                 void generateInvoice(
-                  selectedCallCenter === 'ALL' ? PRESET_ALL_CALL_CENTERS_FILTER : selectedCallCenter,
+                  selectedCenters.length === 0 ? PRESET_ALL_CALL_CENTERS_FILTER : selectedCenters,
                 )
               }
               disabled={loading}
@@ -1068,23 +1116,17 @@ export default function InvoicingPage() {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Call Center</span>
-            <select
-              value={selectedCallCenter}
-              onChange={(e) => setSelectedCallCenter(e.target.value)}
-              className="h-9 min-w-[260px] rounded-md border border-slate-300 bg-white px-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-              style={{ colorScheme: 'dark' }}
-            >
-              <option value="ALL" style={{ color: '#0f172a', backgroundColor: '#ffffff' }}>All Call Centers</option>
-              {availableCallCenters.map((center) => (
-                <option key={center} value={center} style={{ color: '#0f172a', backgroundColor: '#ffffff' }}>
-                  {center}
-                </option>
-              ))}
-            </select>
-            <Button size="sm" variant="outline" onClick={() => void saveDraftLocally()}>
+            <MultiSelectFilter
+              label="call center"
+              allLabel="All Call Centers"
+              options={availableCallCenters}
+              selected={selectedCenters}
+              onChange={setSelectedCenters}
+            />
+            <Button size="sm" variant="outline" onClick={() => void saveDraftLocally()} disabled={selectedCenters.length !== 1}>
               Move to Draft
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void loadDraftLocally()} disabled={selectedCallCenter === 'ALL'}>
+            <Button size="sm" variant="outline" onClick={() => void loadDraftLocally()} disabled={selectedCenters.length !== 1}>
               Load Draft
             </Button>
             <Button
