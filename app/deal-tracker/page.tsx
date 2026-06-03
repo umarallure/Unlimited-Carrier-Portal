@@ -264,8 +264,24 @@ export default function DealTrackerPage() {
       }))
       setAgencyCarrierOptions(options)
 
-      // 2) Use a bounded server-side read to derive options without loading the full table.
-      const dealRows = await getDealTrackerEntries({ limit: 5000 })
+      // 2) Derive filter options with a lightweight, columns-only read.
+      // NOTE: do NOT use getDealTrackerEntries() here — it does `SELECT *` plus a
+      // 3-level embedded join (agency_carriers -> agencies, carriers) which takes
+      // ~40s for 5000 rows and leaves these dropdowns empty until it finishes.
+      // Selecting only the columns we need (no join) reads the full table in ~5s.
+      const OPTION_COLUMNS =
+        'sales_agent, call_center, policy_status, ghl_stage, carrier_status, status'
+      const dealRows: any[] = []
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await supabase
+          .from('deal_tracker')
+          .select(OPTION_COLUMNS)
+          .order('created_at', { ascending: false })
+          .range(from, from + 999)
+        if (error) throw error
+        dealRows.push(...(data || []))
+        if (!data || data.length < 1000) break
+      }
 
       const uniqueAgents = Array.from(
         new Set(dealRows.map((e: any) => e.sales_agent).filter(Boolean))
