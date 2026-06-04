@@ -16,7 +16,7 @@ The Deal Tracker system creates a standardized view of all deals from different 
 3. Load carrier status mappings from CSV
 
 ## Step 1: Run Database Migrationdd
-
+sdjadnajdn
 Execute the SQL migration file to create the necessary tables:
 
 ```sql
