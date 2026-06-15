@@ -1605,10 +1605,18 @@ type DealTrackerInvoiceRow = {
   deal_creation_date: string | null
   deal_value: number | null
   cc_value?: number | null
+  monthly_premium?: number | null
+  face_amount?: number | null
   ghl_stage?: string | null
   updated_at?: string | null
   created_at?: string | null
 }
+
+const DEAL_TRACKER_BPO_INVOICE_COLS =
+  'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, monthly_premium, face_amount, ghl_stage, updated_at, created_at'
+
+const DEAL_TRACKER_BPO_INVOICE_CB_COLS =
+  'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, monthly_premium, face_amount, ghl_stage, updated_at, created_at'
 
 type CommissionTxRow = {
   id: string
@@ -1685,6 +1693,19 @@ function toNullableNumber(value: unknown): number | null {
   const n = typeof value === 'number' ? value : Number.parseFloat(String(value))
   if (!Number.isFinite(n)) return null
   return n
+}
+
+/** Prefer deal_tracker monthly_premium / face_amount; fall back to daily_deal_flow when null. */
+function mergeInvoiceFinancials(
+  deal: Pick<DealTrackerInvoiceRow, 'monthly_premium' | 'face_amount'> | null | undefined,
+  ddf: { monthlyPremium: number | null; faceAmount: number | null },
+): { monthlyPremium: number | null; coverageAmount: number | null } {
+  const dtMonthlyPremium = toNullableNumber(deal?.monthly_premium)
+  const dtFaceAmount = toNullableNumber(deal?.face_amount)
+  return {
+    monthlyPremium: dtMonthlyPremium ?? ddf.monthlyPremium,
+    coverageAmount: dtFaceAmount ?? ddf.faceAmount,
+  }
 }
 
 function extractNamePartsForMatch(name: string): { first: string; last: string } {
@@ -1861,9 +1882,7 @@ export async function buildBpoInvoiceLines(
         : Promise.resolve({ data: [], error: null }),
       supabase
         .from('deal_tracker')
-        .select(
-          'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, ghl_stage, updated_at, created_at',
-        )
+        .select(DEAL_TRACKER_BPO_INVOICE_COLS)
         .in('policy_number', policyNumbers),
     ])
 
@@ -1974,14 +1993,15 @@ export async function buildBpoInvoiceLines(
         // Keep status progression, but skip non-billable lines like paid_delete.
       } else {
         const ddf = await ensureDdfFinancial()
+        const { monthlyPremium, coverageAmount } = mergeInvoiceFinancials(deal, ddf)
         pushLine(
           callCenter,
           {
             id: `${tx.id}-adv`,
             ...base,
             product: ddf.productType,
-            monthlyPremium: ddf.monthlyPremium,
-            coverageAmount: ddf.faceAmount,
+            monthlyPremium,
+            coverageAmount,
             leadValue: roundMoney(advance * BPO_INVOICE_LEAD_VALUE_SHARE),
             invoicingStatus: salesStatus,
           },
@@ -2002,6 +2022,7 @@ export async function buildBpoInvoiceLines(
       currentStatusByPolicy.set(key, cbStatus)
       if (isBillableStatus(cbStatus)) {
         const ddf = await ensureDdfFinancial()
+        const { monthlyPremium, coverageAmount } = mergeInvoiceFinancials(deal, ddf)
         chargebackLineAddedByPolicy.add(key)
         pushLine(
           callCenter,
@@ -2009,8 +2030,8 @@ export async function buildBpoInvoiceLines(
             id: `${tx.id}-cb`,
             ...base,
             product: ddf.productType,
-            monthlyPremium: ddf.monthlyPremium,
-            coverageAmount: ddf.faceAmount,
+            monthlyPremium,
+            coverageAmount,
             leadValue: roundMoney(cbNorm * BPO_INVOICE_LEAD_VALUE_SHARE),
             invoicingStatus: cbStatus,
           },
@@ -2022,12 +2043,10 @@ export async function buildBpoInvoiceLines(
 
   const customerPipelineDeals = scopedCenter
     ? await fetchAllCustomerPipelineDealsByCallCenter<DealTrackerInvoiceRow>(
-        'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, ghl_stage, updated_at, created_at',
+        DEAL_TRACKER_BPO_INVOICE_COLS,
         filterCallCenter as string | string[],
       )
-    : await fetchAllCustomerPipelineDeals<DealTrackerInvoiceRow>(
-        'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, cc_value, ghl_stage, updated_at, created_at',
-      )
+    : await fetchAllCustomerPipelineDeals<DealTrackerInvoiceRow>(DEAL_TRACKER_BPO_INVOICE_COLS)
 
   // ── Customer pipeline: synthetic sale from deal_tracker when commission_tracker has no row in this period
   // (or no billable sales line) but deal_value and cc_value are set on the deal.
@@ -2080,8 +2099,7 @@ export async function buildBpoInvoiceLines(
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
         const draftDate = formatDraftDate(draftRaw)
-        const monthlyPremium = ddfFinancial.monthlyPremium
-        const coverageAmount = ddfFinancial.faceAmount
+        const { monthlyPremium, coverageAmount } = mergeInvoiceFinancials(deal, ddfFinancial)
         const resolvedCommissionRate = finCommissionRates.get(normalizedPolicy) ?? commissionRateByNormPolicyFromTx.get(normalizedPolicy) ?? null
         const comPctDisplay = resolvedCommissionRate != null ? `${Number(resolvedCommissionRate)}%` : '—'
         const comType = (deal.commission_type || 'Advance').trim() || 'Advance'
@@ -2112,12 +2130,10 @@ export async function buildBpoInvoiceLines(
 
   const cbStageDeals = scopedCenter
     ? await fetchAllChargebackStageDealsByCallCenter<DealTrackerInvoiceRow>(
-        'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
+        DEAL_TRACKER_BPO_INVOICE_CB_COLS,
         filterCallCenter as string | string[],
       )
-    : await fetchAllChargebackStageDeals<DealTrackerInvoiceRow>(
-        'agency_carrier_id, policy_number, call_center, carrier, name, ghl_name, policy_type, sales_agent, commission_type, effective_date, deal_creation_date, deal_value, ghl_stage, updated_at, created_at',
-      )
+    : await fetchAllChargebackStageDeals<DealTrackerInvoiceRow>(DEAL_TRACKER_BPO_INVOICE_CB_COLS)
   const cbStagePolicyNumbers = Array.from(
     new Set(cbStageDeals.flatMap((d) => policyLookupCandidates(d.policy_number)).filter(Boolean)),
   )
@@ -2149,8 +2165,7 @@ export async function buildBpoInvoiceLines(
     const agentAccount = (deal.sales_agent || '—').trim() || '—'
     const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
     const draftDate = formatDraftDate(draftRaw)
-    const monthlyPremium = ddfFinancial.monthlyPremium
-    const coverageAmount = ddfFinancial.faceAmount
+    const { monthlyPremium, coverageAmount } = mergeInvoiceFinancials(deal, ddfFinancial)
     const normalizedPolicy = normalizePolicyNumber(deal.policy_number)
     const resolvedCommissionRate = cbStageCommissionRates.get(normalizedPolicy) ?? commissionRateByNormPolicyFromTx.get(normalizedPolicy) ?? null
     const comPctDisplay = resolvedCommissionRate != null ? `${Number(resolvedCommissionRate)}%` : '—'
@@ -2248,8 +2263,7 @@ export async function buildBpoInvoiceLines(
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
         const draftDate = formatDraftDate(draftRaw)
-        const monthlyPremium = ddfFinancial.monthlyPremium
-        const coverageAmount = ddfFinancial.faceAmount
+        const { monthlyPremium, coverageAmount } = mergeInvoiceFinancials(deal, ddfFinancial)
         const normalizedPolicy = normalizePolicyNumber(deal.policy_number)
         const resolvedCommissionRate = cbStageCommissionRates.get(normalizedPolicy) ?? commissionRateByNormPolicyFromTx.get(normalizedPolicy) ?? null
         const comPctDisplay = resolvedCommissionRate != null ? `${Number(resolvedCommissionRate)}%` : '—'
@@ -2325,8 +2339,7 @@ export async function buildBpoInvoiceLines(
         const agentAccount = (deal.sales_agent || '—').trim() || '—'
         const draftRaw = deal.effective_date || deal.deal_creation_date || endDate
         const draftDate = formatDraftDate(draftRaw)
-        const monthlyPremium = ddfFinancial.monthlyPremium
-        const coverageAmount = ddfFinancial.faceAmount
+        const { monthlyPremium, coverageAmount } = mergeInvoiceFinancials(deal, ddfFinancial)
         const normalizedPolicy = normalizePolicyNumber(deal.policy_number)
         const resolvedCommissionRate = unseenCommissionRates.get(normalizedPolicy) ?? commissionRateByNormPolicyFromTx.get(normalizedPolicy) ?? null
         const comPctDisplay = resolvedCommissionRate != null ? `${Number(resolvedCommissionRate)}%` : '—'

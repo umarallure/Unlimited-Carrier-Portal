@@ -310,7 +310,7 @@ export default function InvoicingAuditPage() {
     <div className="admin-page space-y-6">
       <PageHeader
         title="Invoicing Audit"
-        description="Pull every Daily Deal Flow lead the call centers generated in an invoice period, then reconcile each policy against the accounting Deal Tracker (GHL stage, carrier status, CC value)."
+        description="Pull Pending Approval Daily Deal Flow leads the call centers generated in an invoice period, then reconcile each policy against the accounting Deal Tracker (GHL stage, carrier status, CC value)."
         icon={<FileSearch className="h-7 w-7 text-orange-400" strokeWidth={2} />}
       />
 

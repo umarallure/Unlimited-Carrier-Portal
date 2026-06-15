@@ -34,6 +34,8 @@ const FIELD_LABELS: Record<string, string> = {
   ghl_name: 'GHL Name',
   deal_value: 'Deal Value',
   cc_value: 'CC Value',
+  face_amount: 'Face Amount',
+  monthly_premium: 'Monthly Premium',
   charge_back: 'Charge Back',
   sales_agent: 'Sales Agent',
   writing_number: 'Writing #',
@@ -529,6 +531,8 @@ export function DealTrackerVerificationDialog({
                   <TableHead className="min-w-[90px] font-semibold text-foreground" title="Rule-based: NOT yet paid / Charge Back / Paid from deal value">Status</TableHead>
                   <TableHead className="w-24 font-semibold text-foreground">Deal Value</TableHead>
                   <TableHead className="w-24 font-semibold text-foreground">CC Value</TableHead>
+                  <TableHead className="w-24 font-semibold text-foreground">Face Amount</TableHead>
+                  <TableHead className="w-24 font-semibold text-foreground">Monthly Premium</TableHead>
                   <TableHead className="min-w-[100px] font-semibold text-foreground">Sales Agent</TableHead>
                   <TableHead className="w-24 font-semibold text-foreground">Writing #</TableHead>
                   <TableHead className="w-12 font-semibold text-foreground" title="Daily Deal Flow: did we get call center/phone from external DDF?">DDF</TableHead>
@@ -693,6 +697,26 @@ export function DealTrackerVerificationDialog({
                           step="0.01"
                           value={formatNum(entry.cc_value)}
                           onChange={e => updateEntry(globalIndex, 'cc_value', parseNum(e.target.value))}
+                          className={cn(dialogTableInput, 'w-22')}
+                          placeholder="-"
+                        />
+                      </TableCell>
+                      <TableCell className={cn('p-1', cellChanged('face_amount') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
+                        <Input
+                          type="number"
+                          step="0.01"
+                          value={formatNum(entry.face_amount)}
+                          onChange={e => updateEntry(globalIndex, 'face_amount', parseNum(e.target.value))}
+                          className={cn(dialogTableInput, 'w-22')}
+                          placeholder="-"
+                        />
+                      </TableCell>
+                      <TableCell className={cn('p-1', cellChanged('monthly_premium') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
+                        <Input
+                          type="number"
+                          step="0.01"
+                          value={formatNum(entry.monthly_premium)}
+                          onChange={e => updateEntry(globalIndex, 'monthly_premium', parseNum(e.target.value))}
                           className={cn(dialogTableInput, 'w-22')}
                           placeholder="-"
                         />

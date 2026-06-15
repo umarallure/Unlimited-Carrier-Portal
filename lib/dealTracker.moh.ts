@@ -16,6 +16,8 @@ import {
   calculateCcValue,
   resolveCommissionPreviewDealValue,
   pickAgentNamePreservingExisting,
+  policyFinancialsFromMohPolicy,
+  resolvePolicyFinancialsForDealTracker,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -341,6 +343,7 @@ export async function processMohFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromMohPolicy(policy),
       charge_back: chargeBack,
       notes: (commission?.comments != null && String(commission.comments).trim() !== '') ? commission.comments : (existing?.notes ?? null),
       status: (existing && financialsUnchanged(existing, dealValue, chargeBack)) ? (existing.status ?? (derivedStatus ?? statusFromDealValue(dealValue))) : (derivedStatus ?? statusFromDealValue(dealValue)),
@@ -700,6 +703,7 @@ export async function processMohCommissionsForDealTracker(
       policyStatusResolved,
     )
 
+    const policyFinancials = resolvePolicyFinancialsForDealTracker(policy, existing, 'moh')
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
@@ -713,6 +717,7 @@ export async function processMohCommissionsForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancials,
       charge_back: chargeBack,
       notes: (comm.comments != null && String(comm.comments).trim() !== '') ? comm.comments : (existing?.notes ?? null),
       status: derivedStatus ?? statusFromDealValue(dealValue),
