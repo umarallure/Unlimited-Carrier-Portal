@@ -20,6 +20,8 @@ import {
   policyNeedsDdfLookup,
   calculateCcValue,
   resolveCommissionPreviewDealValue,
+  policyFinancialsFromAetnaStylePolicy,
+  resolvePolicyFinancialsForDealTracker,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -209,6 +211,7 @@ export async function processAflacFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromAetnaStylePolicy(policy),
       charge_back: chargeBackForEntry,
       notes: existing?.notes ?? null,
       status: statusForEntry,
@@ -439,12 +442,14 @@ export async function processAflacCommissionsForDealTracker(
         existingGhlStage: existing.ghl_stage ?? null,
         carrierCode,
       })
+      const policyFinancials = resolvePolicyFinancialsForDealTracker(policy, existing, 'aetna')
       const entry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         carrier_status: carrierStatusForGhl,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         policy_status: policyStatusResolved,
         status: derivedStatus,
@@ -461,6 +466,7 @@ export async function processAflacCommissionsForDealTracker(
         ...existing,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         status: derivedStatus,
         sales_agent: commission.writingagentname || existing.sales_agent,
@@ -521,6 +527,7 @@ export async function processAflacCommissionsForDealTracker(
           carrier_id: carrier.id,
           deal_value: dealValue,
           cc_value: ccValue,
+          ...policyFinancialsFromAetnaStylePolicy(policy),
           charge_back: effectiveChargeBack,
           notes: null,
           status: derivedStatus,

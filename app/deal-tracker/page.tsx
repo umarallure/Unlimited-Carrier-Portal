@@ -494,6 +494,8 @@ export default function DealTrackerPage() {
       'Notes',
       'Deal Value',
       'CC Value',
+      'Face Amount',
+      'Monthly Premium',
       'Charge Back',
       'Sales Agent',
       'Writing #',
@@ -527,6 +529,8 @@ export default function DealTrackerPage() {
         e.notes ?? '',
         e.deal_value ?? '',
         e.cc_value ?? '',
+        e.face_amount ?? '',
+        e.monthly_premium ?? '',
         e.charge_back ?? '',
         e.sales_agent ?? '',
         e.writing_number ?? '',
@@ -673,6 +677,8 @@ export default function DealTrackerPage() {
         effective_date: toYmd(e.effective_date),
         deal_value: e.deal_value != null ? String(e.deal_value) : '',
         cc_value: e.cc_value != null ? String(e.cc_value) : '',
+        face_amount: e.face_amount != null ? String(e.face_amount) : '',
+        monthly_premium: e.monthly_premium != null ? String(e.monthly_premium) : '',
       }
     })
     setDraftById(next)
@@ -696,7 +702,7 @@ export default function DealTrackerPage() {
     try {
       const fields = [
         'name', 'ghl_name', 'policy_number', 'carrier', 'policy_status', 'ghl_stage', 'carrier_status', 'status',
-        'deal_value', 'cc_value', 'sales_agent', 'writing_number', 'call_center', 'phone_number',
+        'deal_value', 'cc_value', 'face_amount', 'monthly_premium', 'sales_agent', 'writing_number', 'call_center', 'phone_number',
         'deal_creation_date', 'effective_date',
       ]
       const changedRows = entries.filter((row) => {
@@ -713,6 +719,10 @@ export default function DealTrackerPage() {
           String(draft.deal_value ?? '').trim() === '' ? null : Number.parseFloat(String(draft.deal_value))
         const ccValue =
           String(draft.cc_value ?? '').trim() === '' ? null : Number.parseFloat(String(draft.cc_value))
+        const faceAmount =
+          String(draft.face_amount ?? '').trim() === '' ? null : Number.parseFloat(String(draft.face_amount))
+        const monthlyPremium =
+          String(draft.monthly_premium ?? '').trim() === '' ? null : Number.parseFloat(String(draft.monthly_premium))
         const payload = {
           name: String(draft.name ?? '').trim() || null,
           ghl_name: String(draft.ghl_name ?? '').trim() || null,
@@ -724,6 +734,8 @@ export default function DealTrackerPage() {
           status: String(draft.status ?? '').trim() || null,
           deal_value: Number.isNaN(dealValue as number) ? null : dealValue,
           cc_value: Number.isNaN(ccValue as number) ? null : ccValue,
+          face_amount: Number.isNaN(faceAmount as number) ? null : faceAmount,
+          monthly_premium: Number.isNaN(monthlyPremium as number) ? null : monthlyPremium,
           sales_agent: String(draft.sales_agent ?? '').trim() || null,
           writing_number: String(draft.writing_number ?? '').trim() || null,
           call_center: String(draft.call_center ?? '').trim() || null,
@@ -1400,6 +1412,8 @@ export default function DealTrackerPage() {
                   </TableHead>
                   <TableHead className={adminThPlain}>Deal Value</TableHead>
                   <TableHead className={adminThPlain}>CC Value</TableHead>
+                  <TableHead className={adminThPlain}>Face Amount</TableHead>
+                  <TableHead className={adminThPlain}>Monthly Premium</TableHead>
                   <TableHead className={adminThPlain}>Sales Agent</TableHead>
                   <TableHead className={adminThPlain}>Writing #</TableHead>
                   <TableHead className={adminThPlain}>Call Center</TableHead>
@@ -1412,13 +1426,13 @@ export default function DealTrackerPage() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={17} className="text-center py-8">
+                    <TableCell colSpan={19} className="text-center py-8">
                       <Loader2 className="w-8 h-8 animate-spin text-orange-400 mx-auto" />
                     </TableCell>
                   </TableRow>
                 ) : filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={17} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={19} className="py-8 text-center text-muted-foreground">
                       {hasActiveFilters ? 'No deals found matching your filters' : 'No deals found'}
                     </TableCell>
                   </TableRow>
@@ -1559,6 +1573,22 @@ export default function DealTrackerPage() {
                       <TableCell className={cn(adminTdMuted, cellChanged('cc_value') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
                         {editMode ? <Input type="number" value={draftById[entry.id]?.cc_value ?? ''} onChange={(e) => updateDraft(entry.id, 'cc_value', e.target.value)} className={inlineEditInputNarrow} /> : entry.cc_value
                           ? `$${entry.cc_value.toLocaleString('en-US', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}`
+                          : '-'}
+                      </TableCell>
+                      <TableCell className={cn(adminTdMuted, cellChanged('face_amount') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
+                        {editMode ? <Input type="number" value={draftById[entry.id]?.face_amount ?? ''} onChange={(e) => updateDraft(entry.id, 'face_amount', e.target.value)} className={inlineEditInputNarrow} /> : entry.face_amount
+                          ? `$${entry.face_amount.toLocaleString('en-US', {
+                              minimumFractionDigits: 0,
+                              maximumFractionDigits: 0,
+                            })}`
+                          : '-'}
+                      </TableCell>
+                      <TableCell className={cn(adminTdMuted, cellChanged('monthly_premium') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
+                        {editMode ? <Input type="number" value={draftById[entry.id]?.monthly_premium ?? ''} onChange={(e) => updateDraft(entry.id, 'monthly_premium', e.target.value)} className={inlineEditInputNarrow} /> : entry.monthly_premium
+                          ? `$${entry.monthly_premium.toLocaleString('en-US', {
                               minimumFractionDigits: 2,
                               maximumFractionDigits: 2,
                             })}`

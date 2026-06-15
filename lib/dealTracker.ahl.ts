@@ -20,6 +20,8 @@ import {
   resolvePolicyStatusFromCarrierMapping,
   calculateCcValue,
   resolveCommissionPreviewDealValue,
+  policyFinancialsFromAetnaStylePolicy,
+  resolvePolicyFinancialsForDealTracker,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -230,6 +232,7 @@ export async function processAhlFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromAetnaStylePolicy(policy),
       charge_back: chargeBackForEntry,
       notes: existing?.notes ?? null,
       status: statusForEntry,
@@ -451,12 +454,14 @@ export async function processAhlCommissionsForDealTracker(
         existingGhlStage: existing.ghl_stage ?? null,
         carrierCode,
       })
+      const policyFinancials = resolvePolicyFinancialsForDealTracker(policy, existing, 'aetna')
       const entry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         carrier_status: carrierStatusForGhl,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         policy_status: policyStatusResolved,
         status: derivedStatus,
@@ -475,6 +480,7 @@ export async function processAhlCommissionsForDealTracker(
         carrier_status: carrierStatusForGhl,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         policy_status: policyStatusResolved,
         status: derivedStatus,
@@ -538,6 +544,7 @@ export async function processAhlCommissionsForDealTracker(
           carrier_id: carrier.id,
           deal_value: dealValue,
           cc_value: ccValue,
+          ...policyFinancialsFromAetnaStylePolicy(policy),
           charge_back: effectiveChargeBack,
           notes: null,
           status: derivedStatus,

@@ -69,6 +69,8 @@ export interface DealTrackerEntry {
   carrier_id: string | null
   deal_value: number | null
   cc_value: number | null
+  face_amount?: number | null
+  monthly_premium?: number | null
   charge_back?: number | null
   notes: string | null
   status: string | null
@@ -95,7 +97,8 @@ export interface DealTrackerEntry {
 
 /** Fields we compare to detect "what changed" for the verification dialog highlight */
 export const DEAL_TRACKER_COMPARABLE_FIELDS = [
-  'name', 'policy_status', 'ghl_stage', 'carrier_status', 'deal_value', 'cc_value', 'charge_back',
+  'name', 'policy_status', 'ghl_stage', 'carrier_status', 'deal_value', 'cc_value',
+  'face_amount', 'monthly_premium', 'charge_back',
   'sales_agent', 'writing_number', 'call_center', 'phone_number',
   'deal_creation_date', 'commission_date', 'effective_date', 'notes', 'status',
 ] as const
@@ -135,6 +138,82 @@ function parseYmdPrefix(value: string | null | undefined): string | null {
   const d = new Date(raw.includes('T') ? raw : `${raw}T12:00:00`)
   if (Number.isNaN(d.getTime())) return null
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+export function parseDealTrackerMoney(value: unknown): number | null {
+  if (value == null) return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const raw = String(value).trim()
+  if (!raw || raw === '-') return null
+  const isParenNegative = /^\(.*\)$/.test(raw)
+  const inner = isParenNegative ? raw.slice(1, -1) : raw
+  const cleaned = inner.replace(/[^0-9.\-]/g, '').trim()
+  if (!cleaned) return null
+  const n = parseFloat(cleaned)
+  if (!Number.isFinite(n)) return null
+  return isParenNegative ? -n : n
+}
+
+/** Aetna / AFLAC / AHL policy tables: facevalue + currentmodalpremium. */
+export function policyFinancialsFromAetnaStylePolicy(policy: {
+  facevalue?: unknown
+  currentmodalpremium?: unknown
+} | null | undefined): { face_amount: number | null; monthly_premium: number | null } {
+  return {
+    face_amount: parseDealTrackerMoney(policy?.facevalue),
+    monthly_premium: parseDealTrackerMoney(policy?.currentmodalpremium),
+  }
+}
+
+/** AMAM policy table: face_raw + modeprem_raw. */
+export function policyFinancialsFromAmamPolicy(policy: {
+  face_raw?: unknown
+  modeprem_raw?: unknown
+} | null | undefined): { face_amount: number | null; monthly_premium: number | null } {
+  return {
+    face_amount: parseDealTrackerMoney(policy?.face_raw),
+    monthly_premium: parseDealTrackerMoney(policy?.modeprem_raw),
+  }
+}
+
+/** MOH policy table: face_amt + premium. */
+export function policyFinancialsFromMohPolicy(policy: {
+  face_amt?: unknown
+  premium?: unknown
+} | null | undefined): { face_amount: number | null; monthly_premium: number | null } {
+  return {
+    face_amount: parseDealTrackerMoney(policy?.face_amt),
+    monthly_premium: parseDealTrackerMoney(policy?.premium),
+  }
+}
+
+/** Corebridge policy table: face_amount + billable_premium. */
+export function policyFinancialsFromCorebridgePolicy(policy: {
+  face_amount?: unknown
+  billable_premium?: unknown
+} | null | undefined): { face_amount: number | null; monthly_premium: number | null } {
+  return {
+    face_amount: parseDealTrackerMoney(policy?.face_amount),
+    monthly_premium: parseDealTrackerMoney(policy?.billable_premium),
+  }
+}
+
+/** Mirror policy financials when a policy row is present; otherwise preserve existing deal_tracker values. */
+export function resolvePolicyFinancialsForDealTracker(
+  policy: Record<string, unknown> | null | undefined,
+  existing: { face_amount?: unknown; monthly_premium?: unknown } | null | undefined,
+  style: 'aetna' | 'amam' | 'moh' | 'corebridge'
+): { face_amount: number | null; monthly_premium: number | null } {
+  if (policy) {
+    if (style === 'amam') return policyFinancialsFromAmamPolicy(policy)
+    if (style === 'moh') return policyFinancialsFromMohPolicy(policy)
+    if (style === 'corebridge') return policyFinancialsFromCorebridgePolicy(policy)
+    return policyFinancialsFromAetnaStylePolicy(policy)
+  }
+  return {
+    face_amount: parseDealTrackerMoney(existing?.face_amount),
+    monthly_premium: parseDealTrackerMoney(existing?.monthly_premium),
+  }
 }
 
 export function calculateCcValue(
@@ -1713,12 +1792,14 @@ export async function processAetnaCommissionsForDealTracker(
         existingGhlStage: existing.ghl_stage ?? null,
         carrierCode,
       })
+      const policyFinancials = resolvePolicyFinancialsForDealTracker(policyRow, existing, 'aetna')
       const entry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         carrier_status: existing.carrier_status ?? null,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         policy_status: existing.policy_status,
         status: derivedStatus,
@@ -1737,6 +1818,7 @@ export async function processAetnaCommissionsForDealTracker(
         carrier_status: existing.carrier_status ?? null,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         status: derivedStatus,
         sales_agent: existing.sales_agent ?? null,
@@ -1799,6 +1881,7 @@ export async function processAetnaCommissionsForDealTracker(
           carrier_id: carrier.id,
           deal_value: dealValue,
           cc_value: ccValue,
+          ...policyFinancialsFromAetnaStylePolicy(policy),
           charge_back: chargeBack,
           notes: null,
           status: derivedStatus,
@@ -2104,6 +2187,7 @@ export async function processAetnaFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromAetnaStylePolicy(policy),
       charge_back: chargeBackForEntry,
       notes: existing?.notes ?? null,
       status: statusForEntry,
@@ -2362,6 +2446,7 @@ export async function processAmamFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromAmamPolicy(policy),
       charge_back: chargeBackPreserved,
       notes: existing?.notes ?? null,
       status: statusForEntry,
@@ -2565,6 +2650,7 @@ export async function processAmamFilesForDealTrackerFromRows(
       carrier_id: carrier.id,
       deal_value: dealValueFromRows,
       cc_value: ccValueFromRows,
+      ...policyFinancialsFromAmamPolicy(policy),
       charge_back: chargeBackFromRows,
       notes: existing?.notes ?? null,
       status: statusForEntry,
@@ -2894,6 +2980,7 @@ export async function processAmamCommissionsForDealTracker(
           ? String(commission.statement_date).trim()
           : null
 
+      const policyFinancials = resolvePolicyFinancialsForDealTracker(policyForWriting, existing, 'amam')
       const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: ensureGhlStageForPreviewSave(mappedGhlStage ?? existing.ghl_stage),
@@ -2903,6 +2990,7 @@ export async function processAmamCommissionsForDealTracker(
           : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusResolved),
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: chargeBack,
         status: derivedStatus ?? existing.status,
         writing_number: commission.writingagent ?? policyForWriting?.writingagent ?? existing.writing_number,
@@ -2991,6 +3079,7 @@ export async function processAmamCommissionsForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromAmamPolicy(policy),
       notes: null,
       status: derivedStatus,
       last_updated: new Date().toISOString(),
@@ -3253,6 +3342,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
         commission.statement_date != null && String(commission.statement_date).trim() !== ''
           ? String(commission.statement_date).trim()
           : null
+      const policyFinancials = resolvePolicyFinancialsForDealTracker(policyForWriting, existing, 'amam')
       const updatedEntry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: ensureGhlStageForPreviewSave(mappedGhlStage ?? existing.ghl_stage),
@@ -3262,6 +3352,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
           : normalizePolicyStatusForMappedGhlStage(mappedGhlStage, policyStatusResolved),
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: chargeBack,
         status: derivedStatus ?? existing.status,
         writing_number: commission.writingagent ?? policyForWriting?.writingagent ?? existing.writing_number,
@@ -3342,6 +3433,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromAmamPolicy(policy),
       notes: null,
       status: statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
