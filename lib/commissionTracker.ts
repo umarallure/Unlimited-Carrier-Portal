@@ -251,6 +251,23 @@ function buildCommissionRowsFromSource(
   return rows
 }
 
+/**
+ * Re-sync commission_tracker for one uploaded file only.
+ * Never deletes rows from other files — other statement dates/amounts stay intact.
+ */
+function buildCommissionTrackerWipeQueryForFile(
+  agencyCarrierId: string,
+  sourceTable: string,
+  fileId: string,
+) {
+  return supabase
+    .from('commission_tracker')
+    .delete()
+    .eq('agency_carrier_id', agencyCarrierId)
+    .eq('source_table', sourceTable)
+    .eq('source_file_id', fileId)
+}
+
 export async function syncCommissionTrackerForAgencyCarrier(
   agencyCarrierId: string,
   carrierCode: string,
@@ -258,8 +275,9 @@ export async function syncCommissionTrackerForAgencyCarrier(
     /** Limit normalization to a single uploaded file. */
     fileId?: string | null
     /**
-     * When syncing a specific file from Commission Report Save, replace tracker rows
-     * for the same policies (same source table) so only the dialog-selected date remains.
+     * When syncing a specific file from Commission Report Save, replace only that file's
+     * tracker rows (matched by source_file_id). Other statement files for the same policy
+     * are left intact.
      */
     replacePoliciesFromFile?: boolean
   },
@@ -370,18 +388,16 @@ export async function syncCommissionTrackerForAgencyCarrier(
 
     if (!trackerRows.length) return
 
-    let wipeQuery = supabase
-      .from('commission_tracker')
-      .delete()
-      .eq('agency_carrier_id', agencyCarrierId)
-      .eq('source_table', 'corebridge_commissions')
-    if (options?.replacePoliciesFromFile) {
-      const policies = [...new Set(trackerRows.map((r) => r.policy_number).filter(Boolean))]
-      if (policies.length > 0) {
-        wipeQuery = wipeQuery.in('policy_number', policies)
-      }
+    if (!options?.fileId) {
+      console.warn('[CommissionTracker] Skipping Corebridge sync: fileId is required')
+      return
     }
-    const { error: wipeError } = await wipeQuery
+
+    const { error: wipeError } = await buildCommissionTrackerWipeQueryForFile(
+      agencyCarrierId,
+      'corebridge_commissions',
+      options.fileId,
+    )
     if (wipeError) {
       console.error(
         '[CommissionTracker] Failed to wipe existing Corebridge commission_tracker rows before insert:',
@@ -465,18 +481,16 @@ export async function syncCommissionTrackerForAgencyCarrier(
 
     if (!trackerRows.length) return
 
-    let sentinelWipeQuery = supabase
-      .from('commission_tracker')
-      .delete()
-      .eq('agency_carrier_id', agencyCarrierId)
-      .eq('source_table', 'sentinel_commissions')
-    if (options?.replacePoliciesFromFile) {
-      const policies = [...new Set(trackerRows.map((r) => r.policy_number).filter(Boolean))]
-      if (policies.length > 0) {
-        sentinelWipeQuery = sentinelWipeQuery.in('policy_number', policies)
-      }
+    if (!options?.fileId) {
+      console.warn('[CommissionTracker] Skipping Sentinel sync: fileId is required')
+      return
     }
-    const { error: sentinelWipeError } = await sentinelWipeQuery
+
+    const { error: sentinelWipeError } = await buildCommissionTrackerWipeQueryForFile(
+      agencyCarrierId,
+      'sentinel_commissions',
+      options.fileId,
+    )
     if (sentinelWipeError) {
       console.error(
         '[CommissionTracker] Failed to wipe existing Sentinel commission_tracker rows before insert:',
@@ -551,18 +565,16 @@ export async function syncCommissionTrackerForAgencyCarrier(
 
   if (!rows.length) return
 
-  let wipeQuery = supabase
-    .from('commission_tracker')
-    .delete()
-    .eq('agency_carrier_id', agencyCarrierId)
-    .eq('source_table', sourceTable)
-  if (options?.replacePoliciesFromFile) {
-    const policies = [...new Set(rows.map((r) => r.policy_number).filter(Boolean))]
-    if (policies.length > 0) {
-      wipeQuery = wipeQuery.in('policy_number', policies)
-    }
+  if (!options?.fileId) {
+    console.warn('[CommissionTracker] Skipping sync for', sourceTable, ': fileId is required')
+    return
   }
-  const { error: wipeError } = await wipeQuery
+
+  const { error: wipeError } = await buildCommissionTrackerWipeQueryForFile(
+    agencyCarrierId,
+    sourceTable,
+    options.fileId,
+  )
   if (wipeError) {
     console.error(
       '[CommissionTracker] Failed to wipe existing commission_tracker rows before insert:',

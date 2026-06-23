@@ -161,7 +161,7 @@ export function findWithinFileCommissionDuplicates(
     if (indices.length < 2) continue
     issues.push({
       kind: 'within_file',
-      summary: `Rows ${indices.map((i) => i + 1).join(', ')} repeat the same policy, date, and commission amount in this upload.`,
+      summary: `Rows ${indices.map((i) => i + 1).join(', ')} repeat the same policy, statement date, and amount. Remove or edit the duplicate before saving.`,
       policy_number: policy,
       date: dateYmd,
       amountDisplay: amt < 0 ? `Charge back ${amt.toFixed(2)}` : `Advance ${amt.toFixed(2)}`,
@@ -251,7 +251,7 @@ export async function findTrackerCommissionDuplicates(
       const src = (t.source_table || 'commission_tracker').replace(/_/g, ' ')
       issues.push({
         kind: 'existing_record',
-        summary: `Row ${i + 1} matches an existing commission in the tracker (${src}). You can remove or edit duplicates, or save anyway if intentional.`,
+        summary: `Row ${i + 1} matches an existing commission on the same statement date and amount (from ${src}). Change the date or amount, or remove this row — only one entry per policy/date/amount is allowed.`,
         policy_number: normalizePolicyNumber(row.policy_number),
         date: resolveRowDateYmdForDupes(row, carrierCode, fileStatementDate),
         amountDisplay: amt < 0 ? `Charge back ${amt.toFixed(2)}` : `Advance ${amt.toFixed(2)}`,
@@ -260,6 +260,53 @@ export async function findTrackerCommissionDuplicates(
   }
 
   return issues
+}
+
+function resolveStatementDateForRows(rows: CommissionDisplayRow[]): string {
+  const fromRow = rows.find((r) => r.date && String(r.date).trim())?.date
+  return String(fromRow ?? '').trim()
+}
+
+/** Collect duplicate commission issues for a save payload (within file + other files in tracker). */
+export async function collectCommissionDuplicateIssues(
+  agencyCarrierId: string,
+  rows: CommissionDisplayRow[],
+  carrierCode: string,
+  fileStatementDate: string,
+  currentFileId?: string | null,
+): Promise<CommissionDuplicateIssue[]> {
+  const stmt = fileStatementDate.trim() || resolveStatementDateForRows(rows)
+  const within = findWithinFileCommissionDuplicates(rows, carrierCode, stmt)
+  const tracker =
+    agencyCarrierId && currentFileId
+      ? await findTrackerCommissionDuplicates(agencyCarrierId, rows, carrierCode, stmt, currentFileId)
+      : []
+  return [...within, ...tracker]
+}
+
+/** Hard block: same policy + statement date + amount cannot be saved twice (across files). */
+export async function assertCommissionSaveHasNoDuplicates(
+  agencyCarrierId: string,
+  rows: CommissionDisplayRow[],
+  carrierCode: string,
+  fileStatementDate: string,
+  currentFileId?: string | null,
+): Promise<void> {
+  const issues = await collectCommissionDuplicateIssues(
+    agencyCarrierId,
+    rows,
+    carrierCode,
+    fileStatementDate,
+    currentFileId,
+  )
+  if (!issues.length) return
+  const lines = issues.map(
+    (issue) =>
+      `Policy ${issue.policy_number} · ${issue.date} · ${issue.amountDisplay} — ${issue.summary}`,
+  )
+  throw new Error(
+    `Duplicate commission not allowed (same policy, date, and amount). Only save again on a different statement date.\n${lines.join('\n')}`,
+  )
 }
 
 /** True if value looks like only a number (e.g. agent number in AMAM commission file). */
@@ -782,6 +829,14 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
       if (!table) return
       setSaving(true)
       try {
+        const statementDate = resolveStatementDateForRows(editedRows)
+        await assertCommissionSaveHasNoDuplicates(
+          agencyCarrierId,
+          editedRows,
+          carrierCode,
+          statementDate,
+          fileId,
+        )
         const policyNumbers = editedRows.map((r) => r.policy_number).filter(Boolean)
         const dealTrackerMap = await fetchDealTrackerByPolicies(agencyCarrierId, policyNumbers)
         const dbRows = editedRows.map((r) =>

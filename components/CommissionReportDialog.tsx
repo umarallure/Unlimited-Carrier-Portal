@@ -15,8 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Loader2, PlusCircle, X, AlertTriangle, ClipboardList, AlertCircle } from 'lucide-react'
 import {
-  findWithinFileCommissionDuplicates,
-  findTrackerCommissionDuplicates,
+  collectCommissionDuplicateIssues,
   isCommissionRowIncomplete,
   validateCommissionRowsForSave,
   mergeCommissionRowsByPolicy,
@@ -154,7 +153,7 @@ export function CommissionReportDialog({
     })
   }
 
-  const runSave = async (forceIgnoreDuplicates: boolean) => {
+  const runSave = async () => {
     const payload = buildSavePayload()
     const stmt = headerStatementDate.trim() || todayYmd()
 
@@ -171,22 +170,21 @@ export function CommissionReportDialog({
     }
     setSaveError(null)
 
-    if (!forceIgnoreDuplicates) {
-      setCheckingDuplicates(true)
-      try {
-        const within = findWithinFileCommissionDuplicates(payload, carrierCode, stmt)
-        const tracker =
-          agencyCarrierId && fileId
-            ? await findTrackerCommissionDuplicates(agencyCarrierId, payload, carrierCode, stmt, fileId)
-            : []
-        const combined = [...within, ...tracker]
-        if (combined.length) {
-          setDuplicateIssues(combined)
-          return
-        }
-      } finally {
-        setCheckingDuplicates(false)
+    setCheckingDuplicates(true)
+    try {
+      const combined = await collectCommissionDuplicateIssues(
+        agencyCarrierId ?? '',
+        payload,
+        carrierCode,
+        stmt,
+        fileId,
+      )
+      if (combined.length) {
+        setDuplicateIssues(combined)
+        return
       }
+    } finally {
+      setCheckingDuplicates(false)
     }
 
     setDuplicateIssues(null)
@@ -368,18 +366,23 @@ export function CommissionReportDialog({
         {duplicateIssues && duplicateIssues.length > 0 && (
           <div
             role="alert"
-            className="shrink-0 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-950 dark:border-amber-600/80 dark:bg-amber-950/40 dark:text-amber-100"
+            className="shrink-0 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-950 dark:border-red-800 dark:bg-red-950/40 dark:text-red-100"
           >
             <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />
               <div className="min-w-0 space-y-2">
-                <p className="text-sm font-semibold text-amber-900 dark:text-amber-50">
-                  Duplicate commission (same policy, date, and amount)
+                <p className="text-sm font-semibold text-red-900 dark:text-red-50">
+                  Save blocked — duplicate commission (same policy, statement date, and amount)
                 </p>
-                <ul className="max-h-40 list-disc space-y-1 overflow-y-auto pl-4 text-xs text-amber-900/90 dark:text-amber-100/90">
+                <p className="text-xs text-red-800/90 dark:text-red-100/90">
+                  Each policy can only have one commission entry per statement date and amount. Use a different
+                  statement date for a new payment, or change the amount. Existing records from other files are
+                  never removed.
+                </p>
+                <ul className="max-h-40 list-disc space-y-1 overflow-y-auto pl-4 text-xs text-red-900/90 dark:text-red-100/90">
                   {duplicateIssues.map((issue, i) => (
                     <li key={i}>
-                      <span className="font-mono text-amber-800 dark:text-amber-200/95">{issue.policy_number}</span>
+                      <span className="font-mono text-red-800 dark:text-red-200/95">{issue.policy_number}</span>
                       {' · '}
                       {issue.date}
                       {' · '}
@@ -422,15 +425,6 @@ export function CommissionReportDialog({
                       )}
                     </Button>
                   ) : null}
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="bg-amber-600 text-white hover:bg-amber-700 dark:bg-amber-700 dark:hover:bg-amber-600"
-                    onClick={() => runSave(true)}
-                    disabled={saving || savingDealTrackerOnly || checkingDuplicates}
-                  >
-                    Save anyway
-                  </Button>
                 </div>
               </div>
             </div>
@@ -560,7 +554,7 @@ export function CommissionReportDialog({
             Cancel
           </Button>
           <Button
-            onClick={() => runSave(false)}
+            onClick={() => void runSave()}
             disabled={
               saving ||
               savingDealTrackerOnly ||

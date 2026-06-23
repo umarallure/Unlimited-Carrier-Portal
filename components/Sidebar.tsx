@@ -20,6 +20,7 @@ import {
     Sun,
     Moon,
     ClipboardCheck,
+    AlertTriangle,
     type LucideIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -153,6 +154,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Review Policies"
           icon={ClipboardCheck}
           active={navActive('/review-policies')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/policy-audit"
+          label="Policy Audit"
+          icon={AlertTriangle}
+          active={navActive('/policy-audit')}
           collapsed={collapsed}
         />
         <NavRow
