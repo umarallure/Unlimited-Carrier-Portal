@@ -1783,8 +1783,12 @@ async function fetchDailyDealFlowFinancialByNameCarrier(
 async function batchFetchLatestCommissionRateByNormalizedPolicy(policyNumbers: string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>()
   if (!policyNumbers.length) return out
+  const queryCandidates = Array.from(
+    new Set(policyNumbers.flatMap((p) => policyLookupCandidates(p)).filter(Boolean)),
+  )
+  if (!queryCandidates.length) return out
   const BATCH_SIZE = 200
-  const batches = chunk(policyNumbers, BATCH_SIZE)
+  const batches = chunk(queryCandidates, BATCH_SIZE)
   for (const batch of batches) {
     const { data, error } = await supabase
       .from('commission_tracker')
@@ -1946,6 +1950,11 @@ export async function buildBpoInvoiceLines(
     else bucket.charge.push(line)
   }
 
+  // Chargeback rows often omit commission_rate; resolve from commission_tracker by policy #.
+  if (policyNumbers.length > 0) {
+    await getCommissionRatesForPolicies(policyNumbers)
+  }
+
   for (const tx of transactions) {
     const key = buildPolicyKey(tx.agency_carrier_id, tx.policy_number)
     const currentStatus = currentStatusByPolicy.has(key)
@@ -1960,7 +1969,11 @@ export async function buildBpoInvoiceLines(
     if (shouldExcludeInvoiceEntry(tx.carrier || deal?.carrier, callCenter, draftRaw)) continue
     const draftDate = formatDraftDate(draftRaw)
     const normalizedPolicy = normalizePolicyNumber(tx.policy_number)
-    const resolvedCommissionRate = tx.commission_rate ?? commissionRateByNormPolicyFromTx.get(normalizedPolicy) ?? null
+    const resolvedCommissionRate =
+      tx.commission_rate ??
+      commissionRateByNormPolicyFromTx.get(normalizedPolicy) ??
+      commissionRateByNormPolicyCache.get(normalizedPolicy) ??
+      null
     const comPctDisplay = resolvedCommissionRate != null ? `${Number(resolvedCommissionRate)}%` : '—'
     const comType = (deal?.commission_type || 'Advance').trim() || 'Advance'
 
@@ -2614,6 +2627,163 @@ export async function clearInvoiceDraftSnapshot(input: {
     : query.eq('call_center_filter', normalizedFilter)
   const { error } = await query
   if (error) throw new Error(error.message)
+}
+
+export const INVOICE_SLAB_DAYS = 14
+
+export type UnpaidPreviousSlabCallCenter = {
+  callCenter: string
+  previousStartDate: string
+  previousEndDate: string
+  previousRangeLabel: string
+}
+
+function addDaysToYmd(ymd: string, days: number): string | null {
+  const [y, m, d] = ymd.split('-').map((x) => parseInt(x, 10))
+  if (!y || !m || !d) return null
+  const dt = new Date(y, m - 1, d)
+  if (Number.isNaN(dt.getTime())) return null
+  dt.setDate(dt.getDate() + days)
+  const ny = dt.getFullYear()
+  const nm = String(dt.getMonth() + 1).padStart(2, '0')
+  const nd = String(dt.getDate()).padStart(2, '0')
+  return `${ny}-${nm}-${nd}`
+}
+
+function extractCallCentersFromDraftRow(row: {
+  call_center_filter: string | null
+  payload: InvoiceDraftSnapshot | null
+}): string[] {
+  const centers = new Set<string>()
+  const filter = String(row.call_center_filter ?? '').trim()
+  if (filter && filter !== PRESET_ALL_CALL_CENTERS_FILTER) {
+    centers.add(normalizeCallCenterName(filter))
+  }
+  const payload = row.payload
+  if (payload?.selectedCallCenter) {
+    const selected = String(payload.selectedCallCenter).trim()
+    if (selected) centers.add(normalizeCallCenterName(selected))
+  }
+  for (const group of payload?.draft?.groups ?? []) {
+    if (group.callCenter) centers.add(normalizeCallCenterName(group.callCenter))
+  }
+  return Array.from(centers)
+}
+
+function resolveCentersToValidateForPreviousSlab(
+  filterCallCenter: string | string[] | null | undefined,
+  centersWithPriorHistory: Set<string>,
+  centersWithUnpaidPrevDraft: Set<string>,
+): Set<string> {
+  if (
+    !filterCallCenter ||
+    (Array.isArray(filterCallCenter) && filterCallCenter.length === 0) ||
+    isPresetAllCallCentersFilter(filterCallCenter)
+  ) {
+    return new Set([...centersWithPriorHistory, ...centersWithUnpaidPrevDraft])
+  }
+  const selected = Array.isArray(filterCallCenter) ? filterCallCenter : [filterCallCenter]
+  return new Set(
+    selected
+      .map((value) => normalizeCallCenterName(String(value ?? '').trim()))
+      .filter(Boolean),
+  )
+}
+
+/** Call centers that cannot start a new slab until the immediately previous slab is marked paid. */
+export async function getCallCentersWithUnpaidPreviousSlab(input: {
+  startDate: string
+  callCenterFilter?: string | string[] | null
+}): Promise<UnpaidPreviousSlabCallCenter[]> {
+  const BATCH_SIZE = 200
+  const previousStartDate = addDaysToYmd(input.startDate, -INVOICE_SLAB_DAYS)
+  const previousEndDate = addDaysToYmd(input.startDate, -1)
+  if (!previousStartDate || !previousEndDate) return []
+
+  const paidPreviousSlabCenters = new Set<string>()
+  const { data: previousPaidBatches, error: previousPaidBatchesError } = await supabase
+    .from('invoicing_batches')
+    .select('id')
+    .eq('start_date', previousStartDate)
+    .eq('end_date', previousEndDate)
+    .not('paid_at', 'is', null)
+  if (previousPaidBatchesError) {
+    throw new Error(previousPaidBatchesError.message)
+  }
+  const previousPaidBatchIds = ((previousPaidBatches || []) as Array<{ id: string }>).map((row) => String(row.id))
+  for (const batchPart of chunk(previousPaidBatchIds, BATCH_SIZE)) {
+    if (!batchPart.length) continue
+    const { data: ledgerRows, error: ledgerError } = await supabase
+      .from('invoicing_call_center_ledger')
+      .select('call_center')
+      .in('batch_id', batchPart)
+    if (ledgerError) throw new Error(ledgerError.message)
+    for (const row of (ledgerRows || []) as Array<{ call_center: string }>) {
+      paidPreviousSlabCenters.add(normalizeCallCenterName(row.call_center))
+    }
+  }
+
+  const centersWithPriorHistory = new Set<string>()
+  const { data: priorPaidBatches, error: priorPaidBatchesError } = await supabase
+    .from('invoicing_batches')
+    .select('id')
+    .lt('end_date', input.startDate)
+    .not('paid_at', 'is', null)
+  if (priorPaidBatchesError) {
+    throw new Error(priorPaidBatchesError.message)
+  }
+  const priorPaidBatchIds = ((priorPaidBatches || []) as Array<{ id: string }>).map((row) => String(row.id))
+  for (const batchPart of chunk(priorPaidBatchIds, BATCH_SIZE)) {
+    if (!batchPart.length) continue
+    const { data: ledgerRows, error: ledgerError } = await supabase
+      .from('invoicing_call_center_ledger')
+      .select('call_center')
+      .in('batch_id', batchPart)
+    if (ledgerError) throw new Error(ledgerError.message)
+    for (const row of (ledgerRows || []) as Array<{ call_center: string }>) {
+      centersWithPriorHistory.add(normalizeCallCenterName(row.call_center))
+    }
+  }
+
+  const centersWithUnpaidPrevDraft = new Set<string>()
+  const { data: unpaidDrafts, error: unpaidDraftsError } = await supabase
+    .from('invoicing_drafts')
+    .select('call_center_filter, payload')
+    .eq('start_date', previousStartDate)
+    .eq('end_date', previousEndDate)
+    .is('paid_batch_id', null)
+  if (unpaidDraftsError) {
+    throw new Error(unpaidDraftsError.message)
+  }
+  for (const row of (unpaidDrafts || []) as Array<{
+    call_center_filter: string | null
+    payload: InvoiceDraftSnapshot | null
+  }>) {
+    for (const center of extractCallCentersFromDraftRow(row)) {
+      centersWithUnpaidPrevDraft.add(center)
+    }
+  }
+
+  const centersToValidate = resolveCentersToValidateForPreviousSlab(
+    input.callCenterFilter,
+    centersWithPriorHistory,
+    centersWithUnpaidPrevDraft,
+  )
+
+  const blocked: UnpaidPreviousSlabCallCenter[] = []
+  const previousRangeLabel = formatInvoiceRangeLabel(previousStartDate, previousEndDate)
+  for (const center of centersToValidate) {
+    if (paidPreviousSlabCenters.has(center)) continue
+    if (!centersWithUnpaidPrevDraft.has(center) && !centersWithPriorHistory.has(center)) continue
+    blocked.push({
+      callCenter: center,
+      previousStartDate,
+      previousEndDate,
+      previousRangeLabel,
+    })
+  }
+
+  return blocked.sort((a, b) => a.callCenter.localeCompare(b.callCenter))
 }
 
 export async function getPreviousChargebackByCallCenter(callCenters: string[]): Promise<Record<string, number>> {

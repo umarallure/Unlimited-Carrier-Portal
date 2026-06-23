@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { Fragment, useState, useEffect, useRef } from 'react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
@@ -29,8 +29,10 @@ import {
   adminCardTitle,
   adminDatePickerInput,
   adminDatePickerRow,
+  adminExpandRowBg,
   adminFilterWell,
   adminInput,
+  adminNestedTableShell,
   adminOutlineBtn,
   adminPaginationBar,
   adminSelectContent,
@@ -44,6 +46,125 @@ import {
   adminTypeTabIdle,
   adminTypeTabsWrap,
 } from '@/lib/adminFieldClasses'
+
+type DealTrackerCommissionTxn = {
+  id: string
+  agency_carrier_id: string
+  carrier: string
+  policy_number: string
+  name: string | null
+  sales_agent: string | null
+  date: string
+  commission_rate: number | null
+  advance_amount: number | null
+  charge_back_amount: number | null
+  source_table: string | null
+}
+
+type DealTrackerCommissionSummary = {
+  transactionCount: number
+  advanceTotal: number
+  chargeBackTotal: number
+  latestCommissionRate: number | null
+  transactions: DealTrackerCommissionTxn[]
+}
+
+function commissionPolicyKey(agencyCarrierId: string, policyNumber: string): string {
+  const norm = String(policyNumber ?? '').trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
+  const stripped = /^\d+$/.test(norm) ? (norm.replace(/^0+/, '') || '0') : norm
+  return `${agencyCarrierId}::${stripped}`
+}
+
+function policyNumberLookupVariants(policyNumber: string): string[] {
+  const norm = String(policyNumber ?? '').trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
+  const trimmed = String(policyNumber ?? '').trim()
+  if (!norm) return []
+  if (!/^\d+$/.test(norm)) return Array.from(new Set([norm, trimmed].filter(Boolean)))
+  const stripped = norm.replace(/^0+/, '') || '0'
+  const out = new Set<string>([norm, stripped, trimmed])
+  for (let len = Math.max(norm.length, stripped.length); len <= 12; len++) {
+    if (stripped.length > len) continue
+    out.add(stripped.padStart(len, '0'))
+  }
+  return Array.from(out)
+}
+
+function formatCommissionMoney(value: number | null | undefined): string {
+  if (value == null || value === 0) return ''
+  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+async function loadCommissionSummariesForDeals(
+  deals: Array<{ agency_carrier_id: string; policy_number: string }>,
+): Promise<Record<string, DealTrackerCommissionSummary>> {
+  const empty = (): DealTrackerCommissionSummary => ({
+    transactionCount: 0,
+    advanceTotal: 0,
+    chargeBackTotal: 0,
+    latestCommissionRate: null,
+    transactions: [],
+  })
+  const out: Record<string, DealTrackerCommissionSummary> = {}
+  if (!deals.length) return out
+
+  for (const deal of deals) {
+    out[commissionPolicyKey(deal.agency_carrier_id, deal.policy_number)] = empty()
+  }
+
+  const queryPolicies = Array.from(
+    new Set(deals.flatMap((d) => policyNumberLookupVariants(d.policy_number))),
+  )
+  if (!queryPolicies.length) return out
+
+  const allRows: DealTrackerCommissionTxn[] = []
+  const BATCH = 200
+  for (let i = 0; i < queryPolicies.length; i += BATCH) {
+    const batch = queryPolicies.slice(i, i + BATCH)
+    const { data, error } = await supabase
+      .from('commission_tracker')
+      .select(
+        'id, agency_carrier_id, carrier, policy_number, name, sales_agent, date, commission_rate, advance_amount, charge_back_amount, source_table',
+      )
+      .in('policy_number', batch)
+      .order('date', { ascending: true })
+    if (error) throw error
+    allRows.push(...((data || []) as DealTrackerCommissionTxn[]))
+  }
+
+  const grouped = new Map<string, DealTrackerCommissionTxn[]>()
+  for (const row of allRows) {
+    const key = commissionPolicyKey(row.agency_carrier_id, row.policy_number)
+    const list = grouped.get(key) || []
+    list.push(row)
+    grouped.set(key, list)
+  }
+
+  for (const deal of deals) {
+    const key = commissionPolicyKey(deal.agency_carrier_id, deal.policy_number)
+    const txs = grouped.get(key) || []
+    let advanceTotal = 0
+    let chargeBackTotal = 0
+    let latestDate = ''
+    let latestCommissionRate: number | null = null
+    for (const tx of txs) {
+      advanceTotal += tx.advance_amount ?? 0
+      chargeBackTotal += tx.charge_back_amount ?? 0
+      if (tx.commission_rate != null && String(tx.date) >= latestDate) {
+        latestDate = String(tx.date)
+        latestCommissionRate = tx.commission_rate
+      }
+    }
+    out[key] = {
+      transactionCount: txs.length,
+      advanceTotal: Math.round(advanceTotal * 100) / 100,
+      chargeBackTotal: Math.round(chargeBackTotal * 100) / 100,
+      latestCommissionRate,
+      transactions: [...txs].sort((a, b) => String(a.date).localeCompare(String(b.date))),
+    }
+  }
+
+  return out
+}
 
 export default function DealTrackerPage() {
   const HARDCODED_AGENCY_AGENT_MAP: Record<string, string[]> = {
@@ -134,6 +255,8 @@ export default function DealTrackerPage() {
   const [savingInlineEdits, setSavingInlineEdits] = useState(false)
   const [exportingExcel, setExportingExcel] = useState(false)
   const [draftById, setDraftById] = useState<Record<string, any>>({})
+  const [commissionByPolicyKey, setCommissionByPolicyKey] = useState<Record<string, DealTrackerCommissionSummary>>({})
+  const [expandedCommissionKey, setExpandedCommissionKey] = useState<string | null>(null)
   const [openMultiFilter, setOpenMultiFilter] = useState<string | null>(null)
   const [multiFilterSearch, setMultiFilterSearch] = useState<Record<string, string>>({})
   
@@ -325,6 +448,18 @@ export default function DealTrackerPage() {
       const count = Array.isArray(response) ? rows.length : response.count
       setEntries(rows || [])
       setTotalCount(count || 0)
+      setExpandedCommissionKey(null)
+      if (rows?.length) {
+        const summaries = await loadCommissionSummariesForDeals(
+          rows.map((r: { agency_carrier_id: string; policy_number: string }) => ({
+            agency_carrier_id: r.agency_carrier_id,
+            policy_number: r.policy_number,
+          })),
+        )
+        setCommissionByPolicyKey(summaries)
+      } else {
+        setCommissionByPolicyKey({})
+      }
     } catch (error) {
       console.error('Error fetching entries:', error)
     } finally {
@@ -1414,6 +1549,10 @@ export default function DealTrackerPage() {
                   <TableHead className={adminThPlain}>CC Value</TableHead>
                   <TableHead className={adminThPlain}>Face Amount</TableHead>
                   <TableHead className={adminThPlain}>Monthly Premium</TableHead>
+                  <TableHead className={`${adminThPlain} text-right`} title="Latest commission rate from commission tracker">Com %</TableHead>
+                  <TableHead className={`${adminThPlain} text-right`} title="Total advances from commission tracker">Advance</TableHead>
+                  <TableHead className={`${adminThPlain} text-right`} title="Total chargebacks from commission tracker">Charge Back</TableHead>
+                  <TableHead className={`${adminThPlain} text-center`}>Transactions</TableHead>
                   <TableHead className={adminThPlain}>Sales Agent</TableHead>
                   <TableHead className={adminThPlain}>Writing #</TableHead>
                   <TableHead className={adminThPlain}>Call Center</TableHead>
@@ -1426,13 +1565,13 @@ export default function DealTrackerPage() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={19} className="text-center py-8">
+                    <TableCell colSpan={23} className="text-center py-8">
                       <Loader2 className="w-8 h-8 animate-spin text-orange-400 mx-auto" />
                     </TableCell>
                   </TableRow>
                 ) : filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={19} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={23} className="py-8 text-center text-muted-foreground">
                       {hasActiveFilters ? 'No deals found matching your filters' : 'No deals found'}
                     </TableCell>
                   </TableRow>
@@ -1440,8 +1579,11 @@ export default function DealTrackerPage() {
                   paginatedEntries.map((entry) => {
                     const changedFields = getChangedFieldsFromHistory(entry)
                     const cellChanged = (field: string) => changedFields.includes(field)
+                    const commissionKey = commissionPolicyKey(entry.agency_carrier_id, entry.policy_number)
+                    const commission = commissionByPolicyKey[commissionKey]
                     return (
-                    <TableRow key={entry.id} className={adminTableRowInteractive}>
+                    <Fragment key={entry.id}>
+                    <TableRow className={adminTableRowInteractive}>
                       <TableCell className={cn(adminTdStrong, 'min-w-[220px] font-medium', cellChanged('name') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
                         {editMode ? (
                           <Input value={draftById[entry.id]?.name ?? ''} onChange={(e) => updateDraft(entry.id, 'name', e.target.value)} className={inlineEditInputWide} />
@@ -1594,6 +1736,30 @@ export default function DealTrackerPage() {
                             })}`
                           : '-'}
                       </TableCell>
+                      <TableCell className={`${adminTdMuted} text-right`}>
+                        {commission?.latestCommissionRate != null ? `${commission.latestCommissionRate}%` : '-'}
+                      </TableCell>
+                      <TableCell className={`${adminTdMuted} text-right font-mono`}>
+                        {commission?.advanceTotal ? `$${formatCommissionMoney(commission.advanceTotal)}` : '-'}
+                      </TableCell>
+                      <TableCell className={`${adminTdMuted} text-right font-mono text-rose-700 dark:text-rose-400`}>
+                        {commission?.chargeBackTotal ? `$${formatCommissionMoney(commission.chargeBackTotal)}` : '-'}
+                      </TableCell>
+                      <TableCell className={`${adminTdMuted} text-center text-sm`}>
+                        {commission && commission.transactionCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setExpandedCommissionKey((prev) => (prev === commissionKey ? null : commissionKey))}
+                            className="inline-flex items-center rounded-md px-2 py-1.5 text-orange-600 transition-colors hover:bg-muted hover:text-orange-500 dark:text-orange-400 dark:hover:bg-slate-800 dark:hover:text-orange-300"
+                            title="View individual commission transactions for this policy"
+                          >
+                            <span className="mr-1 font-mono">{commission.transactionCount}</span>
+                            <span>{expandedCommissionKey === commissionKey ? 'Hide' : 'Details'}</span>
+                          </button>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
                       <TableCell className={cn(adminTdMuted, cellChanged('sales_agent') && 'border-l-2 border-amber-500 bg-amber-500/20')}>
                         {editMode ? <Input value={draftById[entry.id]?.sales_agent ?? ''} onChange={(e) => updateDraft(entry.id, 'sales_agent', e.target.value)} className={inlineEditInput} /> : (entry.sales_agent || '-')}
                       </TableCell>
@@ -1641,6 +1807,55 @@ export default function DealTrackerPage() {
                         })()}
                       </TableCell>
                     </TableRow>
+                    {expandedCommissionKey === commissionKey && commission && commission.transactions.length > 0 && (
+                      <TableRow className={adminExpandRowBg}>
+                        <TableCell colSpan={23} className="p-0">
+                          <div className="border-t border-border px-4 py-3 dark:border-slate-800">
+                            <div className="mb-2 text-xs font-semibold text-foreground dark:text-slate-300">
+                              Commission transactions for policy {entry.policy_number}
+                              <span className="ml-2 font-normal text-muted-foreground">(from commission tracker)</span>
+                            </div>
+                            <div className={adminNestedTableShell}>
+                              <Table>
+                                <TableHeader>
+                                  <TableRow className="border-b border-border dark:border-slate-800">
+                                    <TableHead className={`${adminThPlain} text-xs`}>Date</TableHead>
+                                    <TableHead className={`${adminThPlain} text-xs`}>Carrier</TableHead>
+                                    <TableHead className={`${adminThPlain} text-xs`}>Sales Agent</TableHead>
+                                    <TableHead className={`${adminThPlain} text-right text-xs`}>Com %</TableHead>
+                                    <TableHead className={`${adminThPlain} text-right text-xs`}>Advance</TableHead>
+                                    <TableHead className={`${adminThPlain} text-right text-xs`}>Charge Back</TableHead>
+                                    <TableHead className={`${adminThPlain} text-xs`}>Source</TableHead>
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {commission.transactions.map((tx, i) => (
+                                    <TableRow key={tx.id || `${commissionKey}-tx-${i}`} className="border-b border-border/80 dark:border-slate-900/60">
+                                      <TableCell className={`${adminTdMuted} text-xs`}>{tx.date || '-'}</TableCell>
+                                      <TableCell className={`${adminTdMuted} text-xs`}>{tx.carrier || '-'}</TableCell>
+                                      <TableCell className={`${adminTdMuted} text-xs`}>{tx.sales_agent || '-'}</TableCell>
+                                      <TableCell className={`${adminTdMuted} text-right text-xs`}>
+                                        {tx.commission_rate != null ? `${tx.commission_rate}%` : '-'}
+                                      </TableCell>
+                                      <TableCell className={`${adminTdMuted} text-right text-xs font-mono`}>
+                                        {tx.advance_amount != null ? `$${formatCommissionMoney(tx.advance_amount)}` : '-'}
+                                      </TableCell>
+                                      <TableCell className={`${adminTdMuted} text-right text-xs font-mono text-rose-700 dark:text-rose-400`}>
+                                        {tx.charge_back_amount != null ? `$${formatCommissionMoney(tx.charge_back_amount)}` : '-'}
+                                      </TableCell>
+                                      <TableCell className={`${adminTdMuted} text-xs`}>
+                                        {(tx.source_table || 'commission_tracker').replace(/_/g, ' ')}
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </Fragment>
                     )
                   })
                 )}
