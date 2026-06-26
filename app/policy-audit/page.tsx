@@ -24,15 +24,12 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock,
-  DollarSign,
   FileWarning,
   Loader2,
   RefreshCw,
   Search,
   StickyNote,
-  TrendingUp,
   X,
-  XCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatStoredDateForDisplay } from '@/lib/calendarDate'
@@ -69,6 +66,8 @@ type AuditPolicyRow = {
   call_center: string | null
   writing_number: string | null
   commission_type: string | null
+  last_audited_at: string | null
+  audit_count: number
 }
 
 type ReviewNote = {
@@ -142,7 +141,7 @@ const ACTIVE_STAGES_NEEDING_COMMISSION = [
 ]
 
 const SELECT_FIELDS =
-  'id, name, policy_number, carrier, ghl_stage, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type'
+  'id, name, policy_number, carrier, ghl_stage, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type, last_audited_at, audit_count'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -154,12 +153,6 @@ function daysBetween(dateStr: string | null): number | null {
   const today = new Date()
   today.setHours(12, 0, 0, 0)
   return Math.floor((today.getTime() - d.getTime()) / (1000 * 60 * 60 * 24))
-}
-
-function isReviewedToday(notes: ReviewNote[]): boolean {
-  if (!notes || notes.length === 0) return false
-  const todayStr = new Date().toISOString().slice(0, 10)
-  return notes[0].created_at.slice(0, 10) === todayStr
 }
 
 // Any note ever = "audited at some point"
@@ -506,8 +499,8 @@ export default function PolicyAuditPage() {
 
   // ── Data loaders ─────────────────────────────────────────────────────────────
 
-  const appendNotes = useCallback(async (rows: AuditPolicyRow[]) => {
-    if (rows.length === 0) return
+  const fetchNotes = useCallback(async (rows: AuditPolicyRow[]): Promise<Record<string, ReviewNote[]>> => {
+    if (rows.length === 0) return {}
     const ids = rows.map((r) => r.id)
     const allNotes: ReviewNote[] = []
     for (let i = 0; i < ids.length; i += 200) {
@@ -526,7 +519,7 @@ export default function PolicyAuditPage() {
       if (!grouped[key]) grouped[key] = []
       grouped[key].push(n)
     }
-    setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
+    return grouped
   }, [])
 
   const loadPendingApproval = useCallback(async () => {
@@ -536,9 +529,10 @@ export default function PolicyAuditPage() {
       .order('deal_creation_date', { ascending: true, nullsFirst: false })
     if (error) throw error
     const rows = (data || []) as AuditPolicyRow[]
+    const grouped = await fetchNotes(rows)
     setPendingRows(rows)
-    await appendNotes(rows)
-  }, [appendNotes])
+    setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
+  }, [fetchNotes])
 
   const loadDeclined = useCallback(async () => {
     const { data, error } = await supabase
@@ -547,9 +541,10 @@ export default function PolicyAuditPage() {
       .order('effective_date', { ascending: false, nullsFirst: false })
     if (error) throw error
     const rows = (data || []) as AuditPolicyRow[]
+    const grouped = await fetchNotes(rows)
     setDeclinedRows(rows)
-    await appendNotes(rows)
-  }, [appendNotes])
+    setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
+  }, [fetchNotes])
 
   const loadPastDraft = useCallback(async () => {
     const { data, error } = await supabase
@@ -562,9 +557,10 @@ export default function PolicyAuditPage() {
     const past = rows
       .filter((r) => r.effective_date && ymdFromDate(r.effective_date) < today)
       .sort((a, b) => (daysBetween(b.effective_date) ?? 0) - (daysBetween(a.effective_date) ?? 0))
+    const grouped = await fetchNotes(past)
     setPastDraftRows(past)
-    await appendNotes(past)
-  }, [appendNotes])
+    setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
+  }, [fetchNotes])
 
   const loadMissingCommission = useCallback(async () => {
     const { data, error } = await supabase
@@ -574,9 +570,10 @@ export default function PolicyAuditPage() {
       .order('effective_date', { ascending: true, nullsFirst: false })
     if (error) throw error
     const rows = (data || []) as AuditPolicyRow[]
+    const grouped = await fetchNotes(rows)
     setMissingCommRows(rows)
-    await appendNotes(rows)
-  }, [appendNotes])
+    setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
+  }, [fetchNotes])
 
   const loadPaidEarned = useCallback(async () => {
     const { data, error } = await supabase
@@ -585,9 +582,10 @@ export default function PolicyAuditPage() {
       .order('effective_date', { ascending: false, nullsFirst: false })
     if (error) throw error
     const rows = (data || []) as AuditPolicyRow[]
+    const grouped = await fetchNotes(rows)
     setEarnedRows(rows)
-    await appendNotes(rows)
-  }, [appendNotes])
+    setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
+  }, [fetchNotes])
 
   const loadPaidAdvanced = useCallback(async () => {
     const { data, error } = await supabase
@@ -596,9 +594,10 @@ export default function PolicyAuditPage() {
       .order('effective_date', { ascending: false, nullsFirst: false })
     if (error) throw error
     const rows = (data || []) as AuditPolicyRow[]
+    const grouped = await fetchNotes(rows)
     setAdvancedRows(rows)
-    await appendNotes(rows)
-  }, [appendNotes])
+    setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
+  }, [fetchNotes])
 
   const loadTab = useCallback(
     async (tab: string) => {
@@ -696,9 +695,9 @@ export default function PolicyAuditPage() {
     if (creationDateTo) rows = rows.filter((r) => r.deal_creation_date && ymdFromDate(r.deal_creation_date) <= creationDateTo)
 
     if (auditStatusFilter === 'audited') {
-      rows = rows.filter((r) => hasAnyNotes(notesByPolicyId[r.id] || []))
+      rows = rows.filter((r) => r.last_audited_at !== null)
     } else if (auditStatusFilter === 'not-audited') {
-      rows = rows.filter((r) => !hasAnyNotes(notesByPolicyId[r.id] || []))
+      rows = rows.filter((r) => r.last_audited_at === null)
     }
 
     if (sortField) {
@@ -736,6 +735,7 @@ export default function PolicyAuditPage() {
 
   // ── Daily audit stats (all loaded data) ─────────────────────────────────────
   const dailyStats = useMemo(() => {
+    const todayStr = new Date().toISOString().slice(0, 10)
     const seen = new Set<string>()
     let auditedToday = 0
     let total = 0
@@ -743,24 +743,27 @@ export default function PolicyAuditPage() {
       if (seen.has(row.id)) continue
       seen.add(row.id)
       total++
-      if (isReviewedToday(notesByPolicyId[row.id] || [])) auditedToday++
+      if (row.last_audited_at && row.last_audited_at.slice(0, 10) === todayStr) auditedToday++
     }
     return { auditedToday, total, remaining: total - auditedToday }
-  }, [allLoadedRows, notesByPolicyId])
+  }, [allLoadedRows])
 
   // Tab-level audited stats
   const tabStats = useMemo(() => {
+    const todayStr = new Date().toISOString().slice(0, 10)
     let auditedEver = 0
     let auditedToday = 0
     let notAudited = 0
     for (const r of currentTabRows) {
-      const notes = notesByPolicyId[r.id] || []
-      if (hasAnyNotes(notes)) auditedEver++
-      else notAudited++
-      if (isReviewedToday(notes)) auditedToday++
+      if (r.last_audited_at !== null) {
+        auditedEver++
+        if (r.last_audited_at.slice(0, 10) === todayStr) auditedToday++
+      } else {
+        notAudited++
+      }
     }
     return { auditedEver, auditedToday, notAudited }
-  }, [currentTabRows, notesByPolicyId])
+  }, [currentTabRows])
 
   // Advanced commission stats
   const advancedCommStats = useMemo(() => {
@@ -862,6 +865,15 @@ export default function PolicyAuditPage() {
           ...prev,
           [dialogRow.id]: [newNote, ...(prev[dialogRow.id] || [])],
         }))
+        // Patch last_audited_at on the row itself so the filter uses the DB column, not notesByPolicyId
+        const patchRow = (r: AuditPolicyRow) =>
+          r.id === dialogRow.id ? { ...r, last_audited_at: now, audit_count: (r.audit_count ?? 0) + 1 } : r
+        setPendingRows((prev) => prev.map(patchRow))
+        setDeclinedRows((prev) => prev.map(patchRow))
+        setPastDraftRows((prev) => prev.map(patchRow))
+        setMissingCommRows((prev) => prev.map(patchRow))
+        setEarnedRows((prev) => prev.map(patchRow))
+        setAdvancedRows((prev) => prev.map(patchRow))
       }
 
       if (dialogNextStage && dialogNextStage !== dialogRow.ghl_stage) {
@@ -885,14 +897,20 @@ export default function PolicyAuditPage() {
             body: JSON.stringify({ policyNumber: dialogRow.policy_number, note: fullNote, dealTrackerReviewNoteId: reviewNoteId }),
           }).catch(() => {})
         }
-        // Update deal_tracker locally
-        const dtUpdate: Record<string, string> = { updated_at: now, last_updated: now }
+        // Update deal_tracker: append to notes text
         if (fullNote) {
           const stamp = new Date().toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' })
           const entry = `[Audit ${stamp}] ${reviewer || 'Unknown'}: ${fullNote}`
-          dtUpdate.notes = dialogRow.notes ? `${dialogRow.notes}\n\n${entry}` : entry
+          const appendedNotes = dialogRow.notes ? `${dialogRow.notes}\n\n${entry}` : entry
+          await supabase.from('deal_tracker').update({ updated_at: now, last_updated: now, notes: appendedNotes } as never).eq('id', dialogRow.id)
         }
-        await supabase.from('deal_tracker').update(dtUpdate as never).eq('id', dialogRow.id)
+      }
+
+      // Stamp audit tracking on every save (note or stage change)
+      if (fullNote || dialogNextStage) {
+        await supabase.from('deal_tracker')
+          .update({ last_audited_at: now, audit_count: (dialogRow.audit_count ?? 0) + 1 } as never)
+          .eq('id', dialogRow.id)
       }
 
       closeDialog()
@@ -1181,7 +1199,8 @@ export default function PolicyAuditPage() {
                       paginatedRows.length === 0 ? <EmptyRow cols={10} message="No policies match the current filters." /> :
                         paginatedRows.map((row) => {
                           const notes = notesByPolicyId[row.id] || []
-                          const reviewedToday = isReviewedToday(notes)
+                          const todayStr = new Date().toISOString().slice(0, 10)
+                          const reviewedToday = row.last_audited_at !== null && row.last_audited_at.slice(0, 10) === todayStr
                           return (
                             <TableRow key={row.id} className={cn(adminTableRowInteractive, 'cursor-pointer')} onClick={() => openDialog(row, 'pending-approval')}>
                               <TableCell className={adminTdMuted}>
