@@ -120,12 +120,17 @@ export async function processCorebridgeFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildCorebridgeInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   console.log('[Deal Tracker] Corebridge: policies needing DDF:', policiesNeedingDdf.length, '| unique insured names:', uniqueNames.length, '| sample:', uniqueNames.slice(0, 5))
 
   const dailyDealFlowMap =
     uniqueNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -390,8 +395,13 @@ export async function processCorebridgeCommissionsForDealTracker(
           .filter((name: string) => name.length > 0)
       )
     )
+    const policyNumberByNameComm = new Map<string, string>()
+    policyNumbersNeedingDdf.forEach(pn => {
+      const name = normalizeNameForSearch((latestRowByPolicy.get(pn)?.insured_name ?? '').toString().trim())
+      if (name && pn) policyNumberByNameComm.set(name, pn)
+    })
     if (policyNamesForDdf.length > 0) {
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDdf, carrierName)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDdf, carrierName, undefined, policyNumberByNameComm)
     }
   }
 

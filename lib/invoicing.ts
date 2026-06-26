@@ -1410,6 +1410,8 @@ export type BpoInvoiceLine = {
   comPct: string | null
   comType: string
   policyNumber: string
+  /** Policy effective date — used in the per-line audit popup. */
+  effectiveDate?: string | null
 }
 
 /** Per call-center (BPO) invoice: sales block on top, chargebacks below. */
@@ -1996,6 +1998,7 @@ export async function buildBpoInvoiceLines(
       comPct: comPctDisplay,
       comType,
       policyNumber: tx.policy_number,
+      effectiveDate: deal?.effective_date ?? null,
     }
 
     const advance = toNumber(tx.advance_amount)
@@ -2132,6 +2135,7 @@ export async function buildBpoInvoiceLines(
             policyNumber: deal.policy_number,
             leadValue,
             invoicingStatus: salesStatus,
+            effectiveDate: deal.effective_date ?? null,
           },
           'sales',
         )
@@ -2216,6 +2220,7 @@ export async function buildBpoInvoiceLines(
         policyNumber: deal.policy_number,
         leadValue,
         invoicingStatus: cbStatus,
+        effectiveDate: deal.effective_date ?? null,
       },
       'charge',
     )
@@ -2297,6 +2302,7 @@ export async function buildBpoInvoiceLines(
             policyNumber: deal.policy_number,
             leadValue,
             invoicingStatus: cbStatus,
+            effectiveDate: deal.effective_date ?? null,
           },
           'charge',
         )
@@ -2373,6 +2379,7 @@ export async function buildBpoInvoiceLines(
             policyNumber: deal.policy_number,
             leadValue: roundMoney(repayGross * BPO_INVOICE_LEAD_VALUE_SHARE),
             invoicingStatus: 'repay',
+            effectiveDate: deal.effective_date ?? null,
           },
           'sales',
         )
