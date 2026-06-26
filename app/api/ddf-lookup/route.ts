@@ -36,7 +36,7 @@ function getCachedOrFetch(
 }
 
 export async function POST(request: NextRequest) {
-  type LookupItem = { key?: string; name?: string; dealCreationDate?: string | null }
+  type LookupItem = { key?: string; name?: string; dealCreationDate?: string | null; policyNumber?: string | null }
   let body: { carrier?: string; names?: string[]; items?: LookupItem[] }
   try {
     body = await request.json()
@@ -51,11 +51,12 @@ export async function POST(request: NextRequest) {
           key: String(it?.key ?? `${index}`),
           name: String(it?.name ?? '').trim(),
           dealCreationDate: it?.dealCreationDate ?? null,
+          policyNumber: it?.policyNumber ?? null,
         }))
         .filter((it) => it.name.length > 0)
     : []
   const names = Array.isArray(body.names)
-    ? body.names.map((n, index) => ({ key: `${index}`, name: String(n ?? '').trim(), dealCreationDate: null }))
+    ? body.names.map((n, index) => ({ key: `${index}`, name: String(n ?? '').trim(), dealCreationDate: null, policyNumber: null }))
     : []
   const normalizedItems = (items.length > 0 ? items : names).filter((it) => it.name.length > 0)
 
@@ -67,8 +68,38 @@ export async function POST(request: NextRequest) {
     const sourceItems = normalizedItems
     const { client, table } = getDdfClient(source)
     const records = await getCachedOrFetch(carrier, source, client as ReturnType<typeof createClient>, table)
-    const map = matchDdfNamesToRecords(records, sourceItems.map((it) => it.name))
+
+    // Strategy 0: resolve items that carry a policyNumber via tracking_id (exact match, highest priority)
+    type AnyRecord = { tracking_id?: string | null; lead_vendor?: string | null; lead_vendor_name?: string | null; client_phone_number?: string | null; phone_number?: string | null; draft_date?: string | null; insured_name?: string | null }
+    const trackingIdMap = new Map<string, AnyRecord>()
+    for (const r of records as AnyRecord[]) {
+      const tid = r.tracking_id
+      if (tid && String(tid).trim()) {
+        const k = String(tid).trim().toLowerCase()
+        if (!trackingIdMap.has(k)) trackingIdMap.set(k, r)
+      }
+    }
+    const trackingIdResolvedKeys = new Set<string>()
     sourceItems.forEach((it) => {
+      if (!it.policyNumber) return
+      const tidKey = String(it.policyNumber).trim().toLowerCase()
+      const match = trackingIdMap.get(tidKey)
+      if (!match) return
+      const m = match as AnyRecord
+      resolvedResults.set(it.key, {
+        call_center: ((m.lead_vendor ?? m.lead_vendor_name ?? null) != null ? String(m.lead_vendor ?? m.lead_vendor_name ?? '').trim() : null) || null,
+        phone_number: ((m.client_phone_number ?? m.phone_number ?? null) != null ? String(m.client_phone_number ?? m.phone_number ?? '').trim() : null) || null,
+        draft_date: m.draft_date != null ? String(m.draft_date).trim() : null,
+        lead_name: m.insured_name != null ? String(m.insured_name).trim() : null,
+      })
+      trackingIdResolvedKeys.add(it.key)
+    })
+
+    // Strategy 1+: name-based matching for items not resolved by tracking_id
+    const itemsForNameMatch = sourceItems.filter((it) => !trackingIdResolvedKeys.has(it.key))
+    const policyNumbers = itemsForNameMatch.map((it) => it.policyNumber ?? null)
+    const map = matchDdfNamesToRecords(records, itemsForNameMatch.map((it) => it.name), policyNumbers)
+    itemsForNameMatch.forEach((it) => {
       const key = it.key
       const matched = map.get(normalizeLookupName(it.name)) || map.get(it.name) || null
       if (matched) {

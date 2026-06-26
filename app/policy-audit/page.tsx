@@ -96,18 +96,43 @@ const DECLINE_REASON_CATEGORIES = [
   'Other',
 ] as const
 
-const FDPF_STAGE_OPTIONS = [
-  'FDPF Pending Reason',
-  'FDPF Insufficient Funds',
-  'FDPF Unauthorized Draft',
-  'FDPF Incorrect Banking Info',
-] as const
 
 const DECLINED_STAGES = [
   'Declined Underwriting',
   'Application Withdrawn',
   'Pending Manual Action',
 ]
+
+const CRM_STAGE_GROUPS = [
+  {
+    group: 'Transfer Portal',
+    stages: [
+      'Pending Approval', 'New Submission', 'Fulfilled Carrier Requirement',
+      'Application Withdrawn', 'Declined Underwriting', 'Pending Manual Action',
+      'Returned To Center - DQ', 'DQ\'d Can\'t be sold', 'GI DQ', 'Chargeback DQ',
+      'Previously Sold BPO', 'Needs BPO Callback', 'Incomplete Transfer',
+      'Pending Failed Payment Fix',
+    ],
+  },
+  {
+    group: 'Customer Pipeline',
+    stages: [
+      'Issued - Pending First Draft', 'Premium Paid - Commission Pending',
+      'ACTIVE PLACED - Paid as Earned', 'ACTIVE PLACED - Paid as Advanced',
+      'ACTIVE - 3 Months +', 'ACTIVE - 6 months +', 'ACTIVE - 9 months',
+      'ACTIVE - Past Charge-Back Period',
+    ],
+  },
+  {
+    group: 'Chargeback Pipeline',
+    stages: [
+      'FDPF Pending Reason', 'FDPF Insufficient Funds', 'FDPF Incorrect Banking Info',
+      'FDPF Unauthorized Draft', 'Pending Failed Payment Fix', 'Pending Lapse',
+      'Chargeback Failed Payment', 'Chargeback Cancellation', 'Pending Chargeback Fix',
+      'Chargeback Fixed',
+    ],
+  },
+] as const
 
 const ACTIVE_STAGES_NEEDING_COMMISSION = [
   'Active Placed - Paid as Advanced',
@@ -472,6 +497,7 @@ export default function PolicyAuditPage() {
   const [dialogReasonCategory, setDialogReasonCategory] = useState('')
   const [saving, setSaving] = useState(false)
 
+
   // ── Debounce search ──────────────────────────────────────────────────────────
   useEffect(() => {
     const h = setTimeout(() => setDebouncedSearch(searchTerm), 280)
@@ -821,24 +847,53 @@ export default function PolicyAuditPage() {
           .single()
         if (noteError) throw new Error(noteError.message)
         reviewNoteId = noteData?.id != null ? String(noteData.id) : null
+
+        // Immediately mark as audited in local state — no need to wait for reload
+        const newNote: ReviewNote = {
+          id: reviewNoteId ?? `tmp-${Date.now()}`,
+          policy_id: dialogRow.id,
+          note: fullNote,
+          previous_ghl_stage: dialogRow.ghl_stage,
+          next_ghl_stage: dialogNextStage || null,
+          reviewer_name: reviewer,
+          created_at: now,
+        }
+        setNotesByPolicyId((prev) => ({
+          ...prev,
+          [dialogRow.id]: [newNote, ...(prev[dialogRow.id] || [])],
+        }))
       }
 
-      if (fullNote && reviewNoteId) {
-        await fetch('/api/review-policies/sync-lead-note', {
+      if (dialogNextStage && dialogNextStage !== dialogRow.ghl_stage) {
+        // Update both INSURVAS CRM (stage + stage_id + pipeline_id) and deal_tracker.ghl_stage
+        await fetch('/api/review-policies/update-crm-stage', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ policyNumber: dialogRow.policy_number, note: fullNote, dealTrackerReviewNoteId: reviewNoteId }),
+          body: JSON.stringify({
+            policyNumber: dialogRow.policy_number,
+            newStage: dialogNextStage,
+            note: fullNote || undefined,
+            dealTrackerId: dialogRow.id,
+          }),
         }).catch(() => {})
+      } else {
+        // No stage change — just sync the note to CRM lead_notes
+        if (fullNote && reviewNoteId) {
+          await fetch('/api/review-policies/sync-lead-note', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ policyNumber: dialogRow.policy_number, note: fullNote, dealTrackerReviewNoteId: reviewNoteId }),
+          }).catch(() => {})
+        }
+        // Update deal_tracker locally
+        const dtUpdate: Record<string, string> = { updated_at: now, last_updated: now }
+        if (fullNote) {
+          const stamp = new Date().toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' })
+          const entry = `[Audit ${stamp}] ${reviewer || 'Unknown'}: ${fullNote}`
+          dtUpdate.notes = dialogRow.notes ? `${dialogRow.notes}\n\n${entry}` : entry
+        }
+        await supabase.from('deal_tracker').update(dtUpdate as never).eq('id', dialogRow.id)
       }
-
-      const dtUpdate: Record<string, string | number> = { updated_at: now, last_updated: now }
-      if (dialogNextStage && dialogNextStage !== dialogRow.ghl_stage) dtUpdate.ghl_stage = dialogNextStage
-      if (fullNote) {
-        const stamp = new Date().toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' })
-        const entry = `[Audit ${stamp}] ${reviewer || 'Unknown'}: ${fullNote}`
-        dtUpdate.notes = dialogRow.notes ? `${dialogRow.notes}\n\n${entry}` : entry
-      }
-      await supabase.from('deal_tracker').update(dtUpdate).eq('id', dialogRow.id)
 
       closeDialog()
       await loadTab(activeTab)
@@ -847,11 +902,6 @@ export default function PolicyAuditPage() {
     } finally {
       setSaving(false)
     }
-  }
-
-  function dialogStageOptions(): string[] {
-    if (dialogTab === 'past-draft') return [...FDPF_STAGE_OPTIONS]
-    return []
   }
 
   // ── Shared table cell helpers ─────────────────────────────────────────────────
@@ -1123,7 +1173,7 @@ export default function PolicyAuditPage() {
                       <SortHeader field="effective_date" label="Effective Date" {...sharedSortProps} />
                       <SortHeader field="deal_creation_date" label="Days Pending" {...sharedSortProps} />
                       <TableHead className={cn(adminThPlain, 'min-w-[200px]')}>Last Note</TableHead>
-                      <TableHead className={cn(adminThPlain, 'w-[90px] text-right')}>Action</TableHead>
+                      <TableHead className={cn(adminThPlain, 'w-[150px] text-right')}>Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1146,7 +1196,14 @@ export default function PolicyAuditPage() {
                               {renderEffDate(row)}
                               <TableCell className={adminTdMuted}><DaysBadge days={daysBetween(row.deal_creation_date)} label="pending" /></TableCell>
                               <TableCell className={adminTdMuted}><NotesList notes={notes} /></TableCell>
-                              {renderActionBtn(row, 'pending-approval')}
+                              <TableCell className="text-right">
+                                <div className="flex items-center justify-end gap-1">
+                                  <Button size="sm" variant="outline" className={adminOutlineBtn}
+                                    onClick={(e) => { e.stopPropagation(); openDialog(row, 'pending-approval') }}>
+                                    Review
+                                  </Button>
+                                </div>
+                              </TableCell>
                             </TableRow>
                           )
                         })}
@@ -1596,21 +1653,24 @@ export default function PolicyAuditPage() {
                   </div>
                 )}
 
-                {/* Stage move — past-draft tab only */}
-                {dialogStageOptions().length > 0 && (
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Move to FDPF Stage</label>
-                    <Select value={dialogNextStage || '__none__'} onValueChange={(v) => setDialogNextStage(v === '__none__' ? '' : v)}>
-                      <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}><SelectValue placeholder="Keep current stage" /></SelectTrigger>
-                      <SelectContent className={adminSelectContent}>
-                        <SelectItem value="__none__" className={adminSelectItem}>Keep current stage</SelectItem>
-                        {dialogStageOptions().map((s) => (
-                          <SelectItem key={s} value={s} className={adminSelectItem}>{s}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
+                {/* GHL Stage change — all tabs */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Change GHL Stage <span className="text-xs font-normal text-muted-foreground">(updates Carrier Portal + INSURVAS CRM)</span></label>
+                  <Select value={dialogNextStage || '__none__'} onValueChange={(v) => setDialogNextStage(v === '__none__' ? '' : v)}>
+                    <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}><SelectValue placeholder="Keep current stage" /></SelectTrigger>
+                    <SelectContent className={adminSelectContent}>
+                      <SelectItem value="__none__" className={adminSelectItem}>Keep current stage</SelectItem>
+                      {CRM_STAGE_GROUPS.map(({ group, stages }) => (
+                        <div key={group}>
+                          <p className="px-2 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</p>
+                          {stages.map((s) => (
+                            <SelectItem key={s} value={s} className={adminSelectItem}>{s}</SelectItem>
+                          ))}
+                        </div>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
                 {/* Note textarea */}
                 <div className="space-y-2">
@@ -1673,6 +1733,7 @@ export default function PolicyAuditPage() {
           ) : null}
         </DialogContent>
       </Dialog>
+
     </div>
   )
 }

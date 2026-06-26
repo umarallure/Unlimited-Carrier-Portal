@@ -189,6 +189,11 @@ export async function processMohFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildMohInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   const skipCountMoh = policies.length - policiesNeedingDdf.length
   console.log('[Deal Tracker] MOH: carrier=', carrierName, '| names to DDF=', uniqueInsuredNamesMoh.length, '| skip (already have DDF)=', skipCountMoh)
@@ -198,7 +203,7 @@ export async function processMohFilesForDealTracker(
 
   const dailyDealFlowMap =
     uniqueInsuredNamesMoh.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNamesMoh, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNamesMoh, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -538,10 +543,16 @@ export async function processMohCommissionsForDealTracker(
         return buildMohInsuredName(policy)
       })
       .filter((n: string) => n.length > 0)
-
+    const policyNumberByNameComm = new Map<string, string>()
+    allPolicyNumbersNeedingDDF.forEach(pn => {
+      const policy = policiesMap.get(pn)
+      if (!policy) return
+      const normalized = normalizeNameForSearch(buildMohInsuredName(policy))
+      if (normalized && pn) policyNumberByNameComm.set(normalized, pn)
+    })
     if (policyNamesForDDF.length > 0) {
       console.log('[Deal Tracker] MOH commissions: fetching DDF for', policyNamesForDDF.length, 'names | sample:', policyNamesForDDF.slice(0, 5))
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier, undefined, policyNumberByNameComm)
       console.log('[Deal Tracker] MOH commissions: DDF map size:', dailyDealFlowMap.size, 'of', policyNamesForDDF.length)
     } else {
       console.log('[Deal Tracker] MOH commissions: no policy names for DDF – upload policy file first so moh_policies has rows for these policy numbers')

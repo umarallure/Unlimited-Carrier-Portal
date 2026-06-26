@@ -125,10 +125,15 @@ export async function processTransamericaFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildTransamericaInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   const dailyDealFlowMap =
     uniqueNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -375,14 +380,19 @@ export async function processTransamericaCommissionsForDealTracker(
   >()
   if (missingPolicyNumbers.length > 0) {
     const namesForDDF: string[] = []
+    const policyNumberByNameComm = new Map<string, string>()
     for (const pn of missingPolicyNumbers) {
       const policy = policiesMap.get(pn)
       const comm = commissionMap.get(pn)
       const candidate = buildTransamericaInsuredName(policy ?? {}) || (comm?.insured_name ?? '').toString().trim()
-      if (candidate) namesForDDF.push(candidate)
+      if (candidate) {
+        namesForDDF.push(candidate)
+        const normalized = normalizeNameForSearch(candidate)
+        if (normalized && pn) policyNumberByNameComm.set(normalized, pn)
+      }
     }
     if (namesForDDF.length > 0) {
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(namesForDDF, carrierName)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(namesForDDF, carrierName, undefined, policyNumberByNameComm)
     }
   }
 

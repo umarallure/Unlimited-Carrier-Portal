@@ -111,9 +111,14 @@ export async function processAhlFilesForDealTracker(
   const uniqueInsuredNames = Array.from(
     new Set(policiesNeedingDdf.map(p => (p.insuredname || '').trim()).filter(n => n.length > 0))
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch((p.insuredname || '').trim())
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -392,8 +397,15 @@ export async function processAhlCommissionsForDealTracker(
         .filter((n): n is string => n.length > 0)
     )
   )
+  const policyNumberByNameComm = new Map<string, string>()
+  allCommissionPolicyNumbers.forEach(pn => {
+    const p = policiesMap.get(pn)
+    const ex = existingMap.get(pn)
+    const normalized = normalizeNameForSearch((p?.insuredname || ex?.name || '').trim())
+    if (normalized && pn) policyNumberByNameComm.set(normalized, pn)
+  })
   if (policyNamesForDDF.length > 0) {
-    dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier)
+    dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier, undefined, policyNumberByNameComm)
   }
 
   const previewEntries: DealTrackerPreviewEntry[] = []
