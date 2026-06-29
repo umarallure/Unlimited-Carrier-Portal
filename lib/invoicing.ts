@@ -1412,6 +1412,12 @@ export type BpoInvoiceLine = {
   policyNumber: string
   /** Policy effective date — used in the per-line audit popup. */
   effectiveDate?: string | null
+  /** Agency carrier ID — for querying full commission history in audit popup. */
+  agencyCarrierId?: string | null
+  /** Underlying deal value from deal_tracker — for 9-month rule display. */
+  dealValue?: number | null
+  /** Current GHL stage from deal_tracker — shown in audit popup. */
+  ghlStage?: string | null
 }
 
 /** Per call-center (BPO) invoice: sales block on top, chargebacks below. */
@@ -1999,6 +2005,8 @@ export async function buildBpoInvoiceLines(
       comType,
       policyNumber: tx.policy_number,
       effectiveDate: deal?.effective_date ?? null,
+      agencyCarrierId: tx.agency_carrier_id,
+      ghlStage: deal?.ghl_stage ?? null,
     }
 
     const advance = toNumber(tx.advance_amount)
@@ -2136,6 +2144,9 @@ export async function buildBpoInvoiceLines(
             leadValue,
             invoicingStatus: salesStatus,
             effectiveDate: deal.effective_date ?? null,
+            agencyCarrierId: deal.agency_carrier_id,
+            dealValue: dv,
+            ghlStage: deal.ghl_stage ?? null,
           },
           'sales',
         )
@@ -2221,6 +2232,9 @@ export async function buildBpoInvoiceLines(
         leadValue,
         invoicingStatus: cbStatus,
         effectiveDate: deal.effective_date ?? null,
+        agencyCarrierId: deal.agency_carrier_id,
+        dealValue,
+        ghlStage: deal.ghl_stage ?? null,
       },
       'charge',
     )
@@ -2303,6 +2317,9 @@ export async function buildBpoInvoiceLines(
             leadValue,
             invoicingStatus: cbStatus,
             effectiveDate: deal.effective_date ?? null,
+            agencyCarrierId: deal.agency_carrier_id,
+            dealValue,
+            ghlStage: deal.ghl_stage ?? null,
           },
           'charge',
         )
@@ -2380,6 +2397,9 @@ export async function buildBpoInvoiceLines(
             leadValue: roundMoney(repayGross * BPO_INVOICE_LEAD_VALUE_SHARE),
             invoicingStatus: 'repay',
             effectiveDate: deal.effective_date ?? null,
+            agencyCarrierId: deal.agency_carrier_id,
+            dealValue,
+            ghlStage: deal.ghl_stage ?? null,
           },
           'sales',
         )
