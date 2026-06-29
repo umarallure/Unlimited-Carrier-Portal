@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { AlertTriangle, Calendar, ClipboardList, Loader2, Shield } from 'lucide-react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { useEffect, useRef, useState } from 'react'
+import { AlertTriangle, Calendar, ChevronLeft, ChevronRight, ClipboardList, Loader2, Shield } from 'lucide-react'
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import * as XLSX from 'xlsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -31,59 +31,44 @@ import {
   type BpoInvoiceDetailResult,
   type UnpaidPreviousSlabCallCenter,
 } from '@/lib/invoicing'
+import { policyLookupCandidates } from '@/lib/leadNotesSync'
 import { cn } from '@/lib/utils'
 
 function formatMoney(value: number): string {
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-function getAuditDetails(line: BpoInvoiceLine): { headline: string; explanation: string; isChargeback: boolean } {
-  const gross = `$${formatMoney(Math.abs(line.leadValue) * 2)}`
-  const date = line.draftDate
-  switch (line.invoicingStatus) {
-    case 'new_sale':
-      return {
-        headline: 'New Sale',
-        explanation: `Policy is active. A commission of ${gross} (gross) was received on ${date}. This policy has not been previously invoiced in this system.`,
-        isChargeback: false,
-      }
-    case 'repay':
-      return {
-        headline: 'Repay — Reinstated after Chargeback',
-        explanation: `This policy was previously charged back and has now been reinstated. A new commission of ${gross} (gross) was received on ${date}.`,
-        isChargeback: false,
-      }
-    case 'cb_repay':
-      return {
-        headline: 'CB Repay',
-        explanation: `A commission of ${gross} (gross) received on ${date} is repaying a prior chargeback. The policy has been reactivated.`,
-        isChargeback: false,
-      }
-    case 'New Charge Back':
-      return {
-        headline: 'New Chargeback',
-        explanation: `This policy was previously invoiced as a new sale. A chargeback of ${gross} (gross) was received on ${date}, indicating the policy is no longer active.`,
-        isChargeback: true,
-      }
-    case 'rechargeback':
-      return {
-        headline: 'Re-Chargeback',
-        explanation: `This policy was previously repaid after an earlier chargeback. A further chargeback of ${gross} (gross) on ${date} indicates the policy has lapsed again.`,
-        isChargeback: true,
-      }
-    case 'cb_never_paid':
-      return {
-        headline: 'Chargeback — Never Previously Invoiced',
-        explanation: `A chargeback of ${gross} (gross) was received on ${date}. This policy has no prior invoiced sale in the system — the chargeback will not offset any payment.`,
-        isChargeback: true,
-      }
-    default:
-      return {
-        headline: formatInvoicingStatusLabel(line.invoicingStatus),
-        explanation: `This line carries status "${line.invoicingStatus}" and was included with a lead value of $${formatMoney(Math.abs(line.leadValue))}.`,
-        isChargeback: false,
-      }
+type AuditCommRow = { date: string; advance_amount: number | null; charge_back_amount: number | null; carrier: string }
+type AuditInvHistRow = { invoicing_status: string; effective_date: string; week_of: string | null; lead_value: number | null }
+type AuditDetails = { loading: boolean; commHistory: AuditCommRow[]; invHistory: AuditInvHistRow[] }
+
+function auditStatusMeta(status: InvoicingStatus): { headline: string; isChargeback: boolean } {
+  switch (status) {
+    case 'new_sale': return { headline: 'New Sale', isChargeback: false }
+    case 'repay': return { headline: 'Repay — Reinstated after Chargeback', isChargeback: false }
+    case 'cb_repay': return { headline: 'CB Repay', isChargeback: false }
+    case 'New Charge Back': return { headline: 'New Chargeback', isChargeback: true }
+    case 'rechargeback': return { headline: 'Re-Chargeback', isChargeback: true }
+    case 'cb_never_paid': return { headline: 'Chargeback — Never Invoiced', isChargeback: true }
+    default: return { headline: formatInvoicingStatusLabel(status), isChargeback: false }
   }
+}
+
+function auditSourceLabel(lineId: string): string {
+  if (lineId.startsWith('stage-cb-')) return 'Chargeback pipeline stage (no commission received)'
+  if (lineId.startsWith('stage-repay-')) return 'Customer pipeline stage (stage-triggered repay)'
+  if (lineId.startsWith('cp-deal-')) return 'Customer pipeline (no commission statement in period)'
+  return 'Commission statement'
+}
+
+function auditMonthsActive(effectiveDate: string | null | undefined, referenceDate: string): number {
+  if (!effectiveDate) return 0
+  const eff = new Date(effectiveDate)
+  const ref = new Date(referenceDate)
+  if (isNaN(eff.getTime()) || isNaN(ref.getTime()) || ref < eff) return 0
+  let m = (ref.getFullYear() - eff.getFullYear()) * 12 + (ref.getMonth() - eff.getMonth())
+  if (ref.getDate() < eff.getDate()) m -= 1
+  return Math.max(0, m)
 }
 
 function normalizePolicyNumberForMatch(policyNumber: string | null | undefined): string {
@@ -175,6 +160,61 @@ export default function InvoicingPage() {
     subtotal: number
   } | null>(null)
   const [mergePreviewPrevNeg, setMergePreviewPrevNeg] = useState('0')
+  const [auditDetails, setAuditDetails] = useState<AuditDetails | null>(null)
+  const [auditAllLines, setAuditAllLines] = useState<BpoInvoiceLine[]>([])
+  const auditFetchRef = useRef(0)
+
+  useEffect(() => {
+    if (!auditLine) { setAuditDetails(null); return }
+    const seq = ++auditFetchRef.current
+    setAuditDetails({ loading: true, commHistory: [], invHistory: [] })
+    const candidates = policyLookupCandidates(auditLine.policyNumber)
+    ;(async () => {
+      const [commRes, histRes] = await Promise.all([
+        supabase.from('commission_tracker')
+          .select('date, advance_amount, charge_back_amount, carrier')
+          .in('policy_number', candidates)
+          .order('date', { ascending: false })
+          .limit(50),
+        supabase.from('invoicing_status_history')
+          .select('invoicing_status, effective_date, week_of, lead_value')
+          .in('policy_number', candidates)
+          .order('effective_date', { ascending: false })
+          .limit(30),
+      ])
+      if (seq !== auditFetchRef.current) return
+      setAuditDetails({
+        loading: false,
+        commHistory: (commRes.data || []) as AuditCommRow[],
+        invHistory: (histRes.data || []) as AuditInvHistRow[],
+      })
+    })().catch(() => {
+      if (seq !== auditFetchRef.current) return
+      setAuditDetails((p) => p ? { ...p, loading: false } : null)
+    })
+  }, [auditLine, supabase])
+
+  const openAudit = (line: BpoInvoiceLine, groupLines: BpoInvoiceLine[]) => {
+    setAuditLine(line)
+    setAuditAllLines(groupLines)
+  }
+
+  const auditLineIdx = auditAllLines.findIndex((l) => l.id === auditLine?.id)
+
+  const goAudit = (dir: 1 | -1) => {
+    const next = auditAllLines[auditLineIdx + dir]
+    if (next) setAuditLine(next)
+  }
+
+  useEffect(() => {
+    if (!auditLine) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); goAudit(1) }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); goAudit(-1) }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  })
 
   const invoiceCallCenterFilter =
     selectedCenters.length === 0 ? PRESET_ALL_CALL_CENTERS_FILTER : selectedCenters
@@ -1337,51 +1377,210 @@ export default function InvoicingPage() {
     <div className="admin-page space-y-6 print:space-y-4">
       {/* Policy audit popup */}
       <Dialog open={auditLine != null} onOpenChange={(open) => { if (!open) setAuditLine(null) }}>
-        <DialogContent className="max-w-lg">
+        <DialogContent hideClose className="flex max-h-[90vh] max-w-3xl flex-col gap-0 overflow-hidden p-0">
           {auditLine && (() => {
-            const { headline, explanation, isChargeback } = getAuditDetails(auditLine)
+            const { headline, isChargeback } = auditStatusMeta(auditLine.invoicingStatus)
             const grossAmt = Math.abs(auditLine.leadValue) * 2
+            const isStageSource = auditLine.id.startsWith('stage-cb-') || auditLine.id.startsWith('stage-repay-') || auditLine.id.startsWith('cp-deal-')
+            const refDate = bpoDetail?.endDate ?? dateTo
+            const monthsActv = auditLine.effectiveDate ? auditMonthsActive(auditLine.effectiveDate, refDate) : null
+            const remaining = monthsActv !== null ? Math.max(0, 9 - monthsActv) : null
+            const dealValue = auditLine.dealValue ?? null
+            const ccValue = dealValue != null ? dealValue / 2 : null
+            const monthlyCC = ccValue != null ? ccValue / 9 : null
+            const totalLines = auditAllLines.length
+            const pos = auditLineIdx >= 0 ? auditLineIdx + 1 : null
+
+            const FR = (label: string, value: React.ReactNode) => (
+              <div className="flex items-start justify-between gap-3 py-[3px] text-xs">
+                <span className="shrink-0 text-slate-500 dark:text-slate-400">{label}</span>
+                <span className="text-right font-medium text-slate-800 dark:text-slate-200">{value}</span>
+              </div>
+            )
+
+            const SH = (title: string) => (
+              <p className="mb-1.5 text-[9px] font-extrabold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">{title}</p>
+            )
+
+            const Divider = () => <div className="my-3 border-t border-slate-100 dark:border-slate-800" />
+
+            const HistTable = ({ loading, empty, children }: { loading?: boolean; empty?: boolean; children?: React.ReactNode }) =>
+              loading ? (
+                <div className="flex items-center gap-1.5 py-1 text-xs text-slate-400"><Loader2 className="h-3 w-3 animate-spin" />Loading…</div>
+              ) : empty ? (
+                <p className="py-0.5 text-xs italic text-slate-400">None found.</p>
+              ) : (
+                <div className="overflow-hidden rounded border border-slate-200 dark:border-slate-700">{children}</div>
+              )
+
             return (
               <>
-                <DialogHeader>
-                  <DialogTitle className="flex items-center gap-2">
-                    <ClipboardList className="h-4 w-4 shrink-0 text-slate-500" />
-                    Policy Audit — {auditLine.policyNumber}
-                  </DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 text-sm">
-                  {/* Status badge */}
-                  <div className={cn(
-                    'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
-                    isChargeback
-                      ? 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300'
-                      : 'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300',
-                  )}>
+                <DialogTitle className="sr-only">Policy Audit — {auditLine.policyNumber}</DialogTitle>
+                {/* ── Single header bar: title + nav + close ── */}
+                <div className="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
+                  <ClipboardList className="h-4 w-4 shrink-0 text-slate-400" />
+                  <div className="min-w-0 flex-1">
+                    <span className="text-sm font-semibold text-slate-900 dark:text-white">Policy Audit</span>
+                    <span className="ml-2 font-mono text-xs text-slate-500 dark:text-slate-400">{auditLine.policyNumber}</span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {pos !== null && totalLines > 1 && (
+                      <span className="mr-1 text-xs tabular-nums text-slate-400">{pos} / {totalLines}</span>
+                    )}
+                    <button type="button" disabled={auditLineIdx <= 0} onClick={() => goAudit(-1)} title="← Previous"
+                      className="flex h-7 w-7 items-center justify-center rounded border border-slate-200 text-slate-500 hover:bg-slate-100 disabled:opacity-25 dark:border-slate-700 dark:hover:bg-slate-800">
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                    </button>
+                    <button type="button" disabled={auditLineIdx < 0 || auditLineIdx >= totalLines - 1} onClick={() => goAudit(1)} title="→ Next"
+                      className="flex h-7 w-7 items-center justify-center rounded border border-slate-200 text-slate-500 hover:bg-slate-100 disabled:opacity-25 dark:border-slate-700 dark:hover:bg-slate-800">
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                    <DialogClose className="ml-1 flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">
+                      <span className="text-base leading-none">×</span>
+                    </DialogClose>
+                  </div>
+                </div>
+
+                {/* ── Coloured status strip ── */}
+                <div className={cn(
+                  'flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2',
+                  isChargeback
+                    ? 'border-orange-200 bg-orange-50 dark:border-orange-900/40 dark:bg-orange-950/20'
+                    : 'border-teal-200 bg-teal-50 dark:border-teal-900/40 dark:bg-teal-950/20',
+                )}>
+                  <span className={cn('text-xs font-bold', isChargeback ? 'text-orange-800 dark:text-orange-300' : 'text-teal-800 dark:text-teal-300')}>
                     {headline}
-                  </div>
-                  {/* Key facts */}
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/40">
-                    <span className="font-medium text-slate-500">Insured</span>
-                    <span>{auditLine.insuredName}</span>
-                    <span className="font-medium text-slate-500">Carrier</span>
-                    <span>{auditLine.carrier}</span>
-                    <span className="font-medium text-slate-500">{isChargeback ? 'Chargeback date' : 'Commission date'}</span>
-                    <span className="font-mono">{auditLine.draftDate}</span>
-                    <span className="font-medium text-slate-500">Effective date</span>
-                    <span className="font-mono">{auditLine.effectiveDate || '—'}</span>
-                    <span className="font-medium text-slate-500">Gross amount</span>
-                    <span className={cn('font-mono font-semibold', isChargeback ? 'text-rose-700 dark:text-rose-400' : 'text-teal-700 dark:text-teal-400')}>
-                      {isChargeback ? '-' : ''}${formatMoney(grossAmt)}
+                  </span>
+                  <div className="flex items-center gap-1.5 text-xs font-semibold tabular-nums">
+                    <span className={cn('rounded px-2 py-0.5',
+                      isChargeback ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' : 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300')}>
+                      Gross {isChargeback ? '-' : '+'}${formatMoney(grossAmt)}
                     </span>
-                    <span className="font-medium text-slate-500">Lead value (50%)</span>
-                    <span className={cn('font-mono', isChargeback ? 'text-rose-700 dark:text-rose-400' : '')}>
-                      {isChargeback ? '-' : ''}${formatMoney(Math.abs(auditLine.leadValue))}
+                    <span className={cn('rounded px-2 py-0.5',
+                      isChargeback ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300' : 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300')}>
+                      Lead {isChargeback ? '-' : '+'}${formatMoney(Math.abs(auditLine.leadValue))}
                     </span>
                   </div>
-                  {/* Explanation */}
-                  <p className="rounded-lg border border-slate-200 bg-white p-3 text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
-                    {explanation}
-                  </p>
+                </div>
+
+                {/* ── Two-column body: left=facts, right=history ── */}
+                <div className="flex min-h-0 flex-1 overflow-hidden">
+
+                  {/* Left panel — policy facts, this entry, 9-month */}
+                  <div className="flex w-[42%] shrink-0 flex-col overflow-y-auto border-r border-slate-100 p-4 dark:border-slate-800">
+                    {SH('Policy Info')}
+                    {FR('Insured', auditLine.insuredName)}
+                    {FR('Carrier', auditLine.carrier)}
+                    {FR('Agent', auditLine.agentAccount)}
+                    {FR('Effective', <span className="font-mono">{auditLine.effectiveDate || '—'}</span>)}
+                    {auditLine.ghlStage && FR('GHL Stage',
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] leading-tight dark:bg-slate-800">{auditLine.ghlStage}</span>
+                    )}
+                    {auditLine.monthlyPremium != null && FR('Premium', <span className="font-mono">${formatMoney(auditLine.monthlyPremium)}/mo</span>)}
+                    {auditLine.coverageAmount != null && FR('Coverage', <span className="font-mono">${formatMoney(auditLine.coverageAmount)}</span>)}
+                    {FR('Com %', auditLine.comPct || '—')}
+                    {FR('Com type', auditLine.comType)}
+
+                    <Divider />
+                    {SH('This Entry')}
+                    {FR('Source', <span className="text-slate-500 dark:text-slate-400 text-[11px]">{auditSourceLabel(auditLine.id).split(' (')[0]}</span>)}
+                    {FR(isChargeback ? 'CB date' : 'Comm date', <span className="font-mono">{auditLine.draftDate}</span>)}
+                    {FR('Gross', <span className={cn('font-mono font-semibold', isChargeback ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>{isChargeback ? '-' : '+'}${formatMoney(grossAmt)}</span>)}
+                    {FR('Lead (50%)', <span className={cn('font-mono font-semibold', isChargeback ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>{isChargeback ? '-' : '+'}${formatMoney(Math.abs(auditLine.leadValue))}</span>)}
+
+                    {isStageSource && dealValue != null && dealValue > 0 && ccValue != null && monthlyCC != null && (
+                      <>
+                        <Divider />
+                        {SH('9-Month Rule')}
+                        <div className="rounded border border-blue-200/60 bg-blue-50/40 px-3 py-2 dark:border-blue-900/30 dark:bg-blue-950/15">
+                          {FR('Deal value', <span className="font-mono">${formatMoney(dealValue)}</span>)}
+                          {FR('CC (50%)', <span className="font-mono">${formatMoney(ccValue)}</span>)}
+                          {FR('Monthly ÷9', <span className="font-mono">${formatMoney(monthlyCC)}</span>)}
+                          {FR('Ref date', <span className="font-mono">{refDate || '—'}</span>)}
+                          {monthsActv !== null && FR('Months active', <span className="font-mono">{monthsActv} mo</span>)}
+                          {remaining !== null && FR('Remaining',
+                            <span className={cn('font-mono font-bold', remaining > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400')}>{remaining} mo</span>
+                          )}
+                          {remaining !== null && FR(
+                            isChargeback ? 'Chargeback' : 'Repay',
+                            <span className={cn('font-mono font-bold', isChargeback ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>
+                              {isChargeback ? '-' : '+'}${formatMoney(monthlyCC * remaining)}
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Right panel — histories */}
+                  <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-4">
+                    {SH('Invoice Cycle History')}
+                    <HistTable loading={auditDetails?.loading} empty={!auditDetails?.invHistory.length}>
+                      {auditDetails?.invHistory.length ? (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 dark:bg-slate-900/60">
+                              <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Period</th>
+                              <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Status</th>
+                              <th className="px-2 py-1.5 text-right font-semibold text-slate-500">Lead</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {auditDetails.invHistory.map((row, i) => {
+                              const isCb = row.invoicing_status === 'New Charge Back' || row.invoicing_status === 'rechargeback'
+                              return (
+                                <tr key={i} className="hover:bg-slate-50/50">
+                                  <td className="px-2 py-1.5 font-mono text-slate-600 dark:text-slate-400">{row.week_of || row.effective_date}</td>
+                                  <td className="px-2 py-1.5">
+                                    <span className={cn('rounded-full px-1.5 py-0.5 text-[10px] font-semibold',
+                                      isCb ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+                                        : 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400')}>
+                                      {formatInvoicingStatusLabel(row.invoicing_status as InvoicingStatus)}
+                                    </span>
+                                  </td>
+                                  <td className={cn('px-2 py-1.5 text-right font-mono font-semibold tabular-nums',
+                                    isCb ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>
+                                    {row.lead_value != null ? `${isCb ? '-' : '+'}$${formatMoney(Math.abs(row.lead_value))}` : '—'}
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      ) : null}
+                    </HistTable>
+
+                    <Divider />
+
+                    {SH('Commission Statement History')}
+                    <HistTable loading={auditDetails?.loading} empty={!auditDetails?.commHistory.length}>
+                      {auditDetails?.commHistory.length ? (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 dark:bg-slate-900/60">
+                              <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Date</th>
+                              <th className="px-2 py-1.5 text-right font-semibold text-slate-500">Advance</th>
+                              <th className="px-2 py-1.5 text-right font-semibold text-slate-500">Chargeback</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {auditDetails.commHistory.map((row, i) => (
+                              <tr key={i} className="hover:bg-slate-50/50">
+                                <td className="px-2 py-1.5 font-mono text-slate-600 dark:text-slate-400">{row.date}</td>
+                                <td className="px-2 py-1.5 text-right font-mono font-semibold tabular-nums text-teal-600 dark:text-teal-400">
+                                  {row.advance_amount && row.advance_amount > 0 ? `+$${formatMoney(row.advance_amount)}` : <span className="text-slate-300 dark:text-slate-700">—</span>}
+                                </td>
+                                <td className="px-2 py-1.5 text-right font-mono font-semibold tabular-nums text-rose-600 dark:text-rose-400">
+                                  {row.charge_back_amount && row.charge_back_amount !== 0 ? `-$${formatMoney(Math.abs(row.charge_back_amount))}` : <span className="text-slate-300 dark:text-slate-700">—</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : null}
+                    </HistTable>
+                  </div>
+
                 </div>
               </>
             )
@@ -1932,7 +2131,7 @@ export default function InvoicingPage() {
                                 <button
                                   type="button"
                                   title="View audit details"
-                                  onClick={() => setAuditLine(line)}
+                                  onClick={() => openAudit(line, [...group.salesLines, ...group.chargebackLines])}
                                   className="shrink-0 rounded p-1 text-slate-400 hover:bg-teal-50 hover:text-teal-600 dark:hover:bg-teal-950 dark:hover:text-teal-400"
                                 >
                                   <ClipboardList className="h-3.5 w-3.5" />
@@ -2097,7 +2296,7 @@ export default function InvoicingPage() {
                                 <button
                                   type="button"
                                   title="View audit details"
-                                  onClick={() => setAuditLine(line)}
+                                  onClick={() => openAudit(line, [...group.salesLines, ...group.chargebackLines])}
                                   className="shrink-0 rounded p-1 text-slate-400 hover:bg-orange-50 hover:text-orange-600 dark:hover:bg-orange-950 dark:hover:text-orange-400"
                                 >
                                   <ClipboardList className="h-3.5 w-3.5" />
