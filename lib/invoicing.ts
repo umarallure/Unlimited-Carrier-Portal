@@ -2102,15 +2102,21 @@ export async function buildBpoInvoiceLines(
         if (dv <= 0) continue
         const signal = finSignals.get(key)
         const statementSaleGross = signal?.latestSaleGross ?? null
+        const proRatedGross = roundMoney(Math.abs(proRatedChargebackLeadValue(dv, deal.effective_date, endDate) * 2))
         const gross = statementSaleGross != null && statementSaleGross > 0
           ? roundMoney(statementSaleGross)
-          : roundMoney(Math.abs(proRatedChargebackLeadValue(dv, deal.effective_date, endDate) * 2))
+          : proRatedGross
         if (gross <= 0) continue
         const prior = finPrior.get(key) ?? latestStatusByPolicy.get(key) ?? null
         const salesStatus = deriveNextStatus(prior, gross)
         currentStatusByPolicy.set(key, salesStatus)
         if (!isBillableStatus(salesStatus)) continue
-        const leadValue = roundMoney(gross * BPO_INVOICE_LEAD_VALUE_SHARE)
+        // For repay/cb_repay: use the actual prior chargeback amount, not the 9-month estimate
+        const lastCbGross = signal?.latestChargebackGross ?? null
+        const repayGross = (salesStatus === 'repay' || salesStatus === 'cb_repay') && lastCbGross != null
+          ? roundMoney(Math.abs(lastCbGross))
+          : gross
+        const leadValue = roundMoney(repayGross * BPO_INVOICE_LEAD_VALUE_SHARE)
         if (leadValue === 0) continue
         const callCenter = normalizeCallCenterName(deal.call_center)
         const insuredName = (deal.ghl_name || deal.name || '—').trim() || '—'

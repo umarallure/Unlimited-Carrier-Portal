@@ -279,6 +279,38 @@ async function syncEditedEntriesToCommissionTracker(
  * Save deal tracker entries after user confirmation.
  * If options.pendingRows is provided, writes policy/commission rows to DB first, then saves deal_tracker with resolved source ids.
  */
+/**
+ * Push ghl_stage → leads.stage_id for every saved row, in one batched server call.
+ * Best-effort: never blocks or fails the deal_tracker save. The server matches each
+ * policy_number to its lead (via tracking_id) and applies the ghl_stage as the stage.
+ */
+async function syncLeadStagesForSavedEntries(entries: DealTrackerPreviewEntry[]): Promise<void> {
+  try {
+    const seen = new Set<string>()
+    const updates: { policyNumber: string; ghlStage: string }[] = []
+    for (const e of entries) {
+      const policyNumber = String(e.policy_number ?? '').trim()
+      const ghlStage = String(e.ghl_stage ?? '').trim()
+      if (!policyNumber || !ghlStage || isInvalidGhlStageForSave(ghlStage)) continue
+      if (seen.has(policyNumber)) continue
+      seen.add(policyNumber)
+      updates.push({ policyNumber, ghlStage })
+    }
+    if (updates.length === 0) return
+    const res = await fetch('/api/deal-tracker/sync-lead-stages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      console.error('[deal-tracker] lead stage sync failed:', data?.error || res.statusText)
+    }
+  } catch (error) {
+    console.error('[deal-tracker] lead stage sync error:', error instanceof Error ? error.message : error)
+  }
+}
+
 export async function saveDealTrackerAfterConfirmation(
   entries: DealTrackerPreviewEntry[],
   options?: SaveDealTrackerAfterConfirmationOptions
@@ -302,6 +334,7 @@ export async function saveDealTrackerAfterConfirmation(
     if (options?.dealTrackerOnly) {
       try {
         const result = await saveDealTrackerEntries(entries, { onProgress, triggerFileId })
+        await syncLeadStagesForSavedEntries(entries)
         return {
           success: true,
           ...result,
@@ -398,6 +431,7 @@ export async function saveDealTrackerAfterConfirmation(
     if (!isCommissionPendingFlow) {
       await syncEditedEntriesToCommissionTracker(entriesToSave, onProgress)
     }
+    await syncLeadStagesForSavedEntries(entriesToSave)
     return {
       success: true,
       ...result,
