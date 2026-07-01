@@ -9,8 +9,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { getDdfRecordsForCarrier, matchDdfNamesToRecords } from '@/lib/dealTracker'
 import { getDdfClient } from '@/lib/ddfSource'
+import { syncLeadStagesFromDdfStatus, type DdfStatusStageSync } from '@/lib/leadNotesSync'
+import { decryptTrackingIdSafe } from '@/lib/trackingIdCrypto'
 
 const CACHE_TTL_MS = 90_000
+// Bump this string any time the DDF select fields change — old cached entries (missing the new
+// fields) would otherwise survive the 90 s TTL and silently break downstream logic.
+const CACHE_VERSION = 'v2-submission_id'
 const ddfCache = new Map<string, { data: Awaited<ReturnType<typeof getDdfRecordsForCarrier>>; ts: number }>()
 
 function normalizeLookupName(value: string): string {
@@ -23,7 +28,7 @@ function getCachedOrFetch(
   supabase: ReturnType<typeof createClient>,
   table: string,
 ) {
-  const key = `${source}:${table}:${(carrier || 'AMAM').toUpperCase()}`
+  const key = `${CACHE_VERSION}:${source}:${table}:${(carrier || 'AMAM').toUpperCase()}`
   const now = Date.now()
   const entry = ddfCache.get(key)
   if (entry && now - entry.ts < CACHE_TTL_MS) {
@@ -70,16 +75,18 @@ export async function POST(request: NextRequest) {
     const records = await getCachedOrFetch(carrier, source, client as ReturnType<typeof createClient>, table)
 
     // Strategy 0: resolve items that carry a policyNumber via tracking_id (exact match, highest priority)
-    type AnyRecord = { tracking_id?: string | null; lead_vendor?: string | null; lead_vendor_name?: string | null; client_phone_number?: string | null; phone_number?: string | null; draft_date?: string | null; insured_name?: string | null }
+    type AnyRecord = { tracking_id?: string | null; submission_id?: string | null; lead_vendor?: string | null; lead_vendor_name?: string | null; client_phone_number?: string | null; phone_number?: string | null; draft_date?: string | null; insured_name?: string | null; status?: string | null }
     const trackingIdMap = new Map<string, AnyRecord>()
     for (const r of records as AnyRecord[]) {
       const tid = r.tracking_id
       if (tid && String(tid).trim()) {
-        const k = String(tid).trim().toLowerCase()
+        // Decrypt ciphertext → plaintext so the carrier's plaintext policy number can match
+        const k = decryptTrackingIdSafe(String(tid).trim()).trim().toLowerCase()
         if (!trackingIdMap.has(k)) trackingIdMap.set(k, r)
       }
     }
     const trackingIdResolvedKeys = new Set<string>()
+    const leadStageSyncs: DdfStatusStageSync[] = []
     sourceItems.forEach((it) => {
       if (!it.policyNumber) return
       const tidKey = String(it.policyNumber).trim().toLowerCase()
@@ -93,7 +100,26 @@ export async function POST(request: NextRequest) {
         lead_name: m.insured_name != null ? String(m.insured_name).trim() : null,
       })
       trackingIdResolvedKeys.add(it.key)
+      // Link policy_id to the lead. Stage is intentionally NOT driven from the DDF
+      // `status` column — the pipeline stage is applied separately from
+      // deal_tracker.ghl_stage at save time (see /api/deal-tracker/sync-lead-stages).
+      // Empty status makes syncLeadStagesFromDdfStatus write policy_id only.
+      leadStageSyncs.push({
+        trackingId: String(it.policyNumber).trim(),
+        status: '',
+        submissionId: m.submission_id ? String(m.submission_id).trim() : null,
+      })
     })
+    if (leadStageSyncs.length > 0) {
+      console.log('[ddf-lookup] stage sync entries:', JSON.stringify(leadStageSyncs))
+      try {
+        await syncLeadStagesFromDdfStatus(client as ReturnType<typeof createClient>, leadStageSyncs)
+      } catch (e: unknown) {
+        console.error('[ddf-lookup] lead stage sync failed:', e instanceof Error ? e.message : e)
+      }
+    } else {
+      console.log('[ddf-lookup] no tracking_id matches — stage sync skipped')
+    }
 
     // Strategy 1+: name-based matching for items not resolved by tracking_id
     const itemsForNameMatch = sourceItems.filter((it) => !trackingIdResolvedKeys.has(it.key))

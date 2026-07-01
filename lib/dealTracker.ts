@@ -9,6 +9,7 @@ import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageRe
 import { effectiveDateForThreeMonthRuleFromPreview, extractYmdFromDbValue } from './calendarDate'
 import { getDdfClient } from './ddfSource'
 import { buildDealTrackerAttribution } from './dealTrackerAttribution'
+import { decryptTrackingIdSafe } from './trackingIdCrypto'
 
 export { mergeEffectiveDate } from './calendarDate'
 export { mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
@@ -1009,13 +1010,14 @@ export async function getDdfRecordsForCarrier(
   carrier?: string | null
   draft_date?: string | null
   tracking_id?: string | null
+  status?: string | null
 }[]> {
   const carrierUpper = (carrier || '').toUpperCase()
   const isAmam = carrierUpper === 'AMAM' || carrierUpper === 'ANAM' || carrierUpper.includes('AMERICAN AMICABLE')
   // External DDF table may not have lead_vendor_name or phone_number; use only columns that exist there
   let query = externalSupabase
     .from(tableName)
-    .select('insured_name, lead_vendor, client_phone_number, carrier, draft_date, tracking_id')
+    .select('insured_name, lead_vendor, client_phone_number, carrier, draft_date, tracking_id, status, submission_id')
     .order('created_at', { ascending: false })
     .limit(DDF_FETCH_LIMIT)
   if (isAmam) {
@@ -1037,6 +1039,8 @@ export async function getDdfRecordsForCarrier(
     phone_number?: string | null
     carrier?: string | null
     draft_date?: string | null
+    tracking_id?: string | null
+    status?: string | null
   }[]
 }
 
@@ -1110,7 +1114,8 @@ export function matchDdfNamesToRecords(
     }
     const tid = record.tracking_id
     if (tid && String(tid).trim()) {
-      const tidKey = String(tid).trim().toLowerCase()
+      // Decrypt ciphertext → plaintext so the carrier's plaintext policy number can match
+      const tidKey = decryptTrackingIdSafe(String(tid).trim()).trim().toLowerCase()
       if (!trackingIdMap.has(tidKey)) trackingIdMap.set(tidKey, record)
     }
   }
