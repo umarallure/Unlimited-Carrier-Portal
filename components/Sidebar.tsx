@@ -147,6 +147,7 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
         <NavRow href="/agencies" label="Agencies" icon={Briefcase} active={navActive('/agencies')} collapsed={collapsed} />
         <NavRow href="/carriers" label="Carriers" icon={FileText} active={navActive('/carriers')} collapsed={collapsed} />
         <NavRow href="/agents" label="Agents" icon={Users} active={navActive('/agents')} collapsed={collapsed} />
+        <NavRow href="/users" label="Users" icon={Shield} active={navActive('/users')} collapsed={collapsed} />
         <NavRow href="/records" label="Records" icon={FileText} active={navActive('/records')} collapsed={collapsed} />
         <NavRow href="/deal-tracker" label="Deal Tracker" icon={TrendingUp} active={navActive('/deal-tracker')} collapsed={collapsed} />
         <NavRow
