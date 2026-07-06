@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Calendar, Loader2, Search } from 'lucide-react'
 import { Plus } from 'lucide-react'
+import { MultiSelectFilter } from '@/components/filters/MultiSelectFilter'
 import { type AgencyCarrierOption } from '@/components/DealTrackerPolicyDialog'
 import { CommissionTransactionDialog, type CommissionTransactionForm } from '@/components/CommissionTransactionDialog'
 import {
@@ -109,8 +110,11 @@ export default function CommissionReportPage() {
   const [allRows, setAllRows] = useState<CommissionRow[]>([])
   const [rawRows, setRawRows] = useState<CommissionRow[]>([])
   const [loading, setLoading] = useState(true)
-  const [carrierCode, setCarrierCode] = useState<string>('ALL')
-  const [agentFilter, setAgentFilter] = useState<string>('ALL')
+  const [carrierCode, setCarrierCode] = useState<string[]>([])
+  const [agentFilter, setAgentFilter] = useState<string[]>([])
+  const [agencyFilter, setAgencyFilter] = useState<string[]>([])
+  const [agencyByAcId, setAgencyByAcId] = useState<Map<string, string>>(new Map())
+  const [agencyOptions, setAgencyOptions] = useState<string[]>([])
   const [sourceFilter, setSourceFilter] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
   const [dateFrom, setDateFrom] = useState('')
@@ -253,6 +257,18 @@ export default function CommissionReportPage() {
         carrierId: row.carriers?.id || row.carrier_id || null,
       }))
       setAgencyCarrierOptions(options)
+
+      const acAgencyMap = new Map<string, string>()
+      const agencyNameSet = new Set<string>()
+      for (const row of (agencyCarrierRows || [])) {
+        const name = (row as any).agencies?.name
+        if (name) {
+          acAgencyMap.set(row.id, name)
+          agencyNameSet.add(name)
+        }
+      }
+      setAgencyByAcId(acAgencyMap)
+      setAgencyOptions(Array.from(agencyNameSet).sort())
     } catch (err) {
       console.error('Error loading commission report:', err)
       setRows([])
@@ -339,8 +355,12 @@ export default function CommissionReportPage() {
       if (!dt || dt > to) return false
     }
 
-    if (carrierCode !== 'ALL' && (row.carrier?.trim() ?? '') !== carrierCode) return false
-    if (agentFilter !== 'ALL' && (row.sales_agent?.trim() ?? '') !== agentFilter) return false
+    if (carrierCode.length > 0 && !carrierCode.includes(row.carrier?.trim() ?? '')) return false
+    if (agentFilter.length > 0 && !agentFilter.includes(row.sales_agent?.trim() ?? '')) return false
+    if (agencyFilter.length > 0) {
+      const rowAgency = agencyByAcId.get(row.agency_carrier_id)
+      if (!rowAgency || !agencyFilter.includes(rowAgency)) return false
+    }
 
     if (sourceFilter !== 'all') {
       const set = sourcesByPolicyKey.get(policyGroupKey(row))
@@ -360,7 +380,7 @@ export default function CommissionReportPage() {
   useEffect(() => {
     setCurrentPage(1)
     setExpandedKey(null)
-  }, [carrierCode, agentFilter, sourceFilter, searchTerm, dateFrom, dateTo])
+  }, [carrierCode, agentFilter, agencyFilter, sourceFilter, searchTerm, dateFrom, dateTo])
 
   const filteredStats = useMemo(() => {
     const policyKeys = new Set(filtered.map((r) => policyGroupKey(r)))
@@ -430,8 +450,9 @@ export default function CommissionReportPage() {
   const filterActiveCount = useMemo(() => {
     let n = 0
     if (searchTerm.trim()) n++
-    if (carrierCode !== 'ALL') n++
-    if (agentFilter !== 'ALL') n++
+    if (carrierCode.length > 0) n++
+    if (agentFilter.length > 0) n++
+    if (agencyFilter.length > 0) n++
     if (sourceFilter !== 'all') n++
     if (dateFrom || dateTo) n++
     return n
@@ -445,17 +466,23 @@ export default function CommissionReportPage() {
         label: `Search: ${searchTerm.trim()}`,
         onRemove: () => setSearchTerm(''),
       })
-    if (carrierCode !== 'ALL')
+    if (carrierCode.length > 0)
       items.push({
         key: 'car',
-        label: `Carrier: ${carrierCode}`,
-        onRemove: () => setCarrierCode('ALL'),
+        label: `Carrier: ${carrierCode.join(', ')}`,
+        onRemove: () => setCarrierCode([]),
       })
-    if (agentFilter !== 'ALL')
+    if (agentFilter.length > 0)
       items.push({
         key: 'agent',
-        label: `Agent: ${agentFilter}`,
-        onRemove: () => setAgentFilter('ALL'),
+        label: `Agent: ${agentFilter.join(', ')}`,
+        onRemove: () => setAgentFilter([]),
+      })
+    if (agencyFilter.length > 0)
+      items.push({
+        key: 'agency',
+        label: `Agency: ${agencyFilter.join(', ')}`,
+        onRemove: () => setAgencyFilter([]),
       })
     if (sourceFilter !== 'all')
       items.push({
@@ -473,12 +500,13 @@ export default function CommissionReportPage() {
         },
       })
     return items
-  }, [searchTerm, carrierCode, sourceFilter, dateFrom, dateTo])
+  }, [searchTerm, carrierCode, agentFilter, agencyFilter, sourceFilter, dateFrom, dateTo])
 
   const clearAllFilters = () => {
     setSearchTerm('')
-    setCarrierCode('ALL')
-    setAgentFilter('ALL')
+    setCarrierCode([])
+    setAgentFilter([])
+    setAgencyFilter([])
     setSourceFilter('all')
     setDateFrom('')
     setDateTo('')
@@ -639,29 +667,32 @@ export default function CommissionReportPage() {
               />
             </div>
 
-            <Select value={carrierCode} onValueChange={setCarrierCode}>
-              <SelectTrigger className={cn(adminSelectTrigger, 'h-9 w-[min(100%,220px)] text-sm')}>
-                <SelectValue placeholder="Carrier" />
-              </SelectTrigger>
-              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                <SelectItem value="ALL" className={adminSelectItem}>All carriers</SelectItem>
-                {carrierCodeOptions.map((c) => (
-                  <SelectItem key={c} value={c} className={adminSelectItem}>{c}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <MultiSelectFilter
+              label="Carrier"
+              options={carrierCodeOptions}
+              selected={carrierCode}
+              onChange={setCarrierCode}
+              allLabel="All carriers"
+              triggerClassName="w-[min(100%,220px)]"
+            />
 
-            <Select value={agentFilter} onValueChange={setAgentFilter}>
-              <SelectTrigger className={cn(adminSelectTrigger, 'h-9 w-[min(100%,200px)] text-sm')}>
-                <SelectValue placeholder="Agent" />
-              </SelectTrigger>
-              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                <SelectItem value="ALL" className={adminSelectItem}>All agents</SelectItem>
-                {agentOptions.map((a) => (
-                  <SelectItem key={a} value={a} className={adminSelectItem}>{a}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <MultiSelectFilter
+              label="Agent"
+              options={agentOptions}
+              selected={agentFilter}
+              onChange={setAgentFilter}
+              allLabel="All agents"
+              triggerClassName="w-[min(100%,200px)]"
+            />
+
+            <MultiSelectFilter
+              label="Agency"
+              options={agencyOptions}
+              selected={agencyFilter}
+              onChange={setAgencyFilter}
+              allLabel="All agencies"
+              triggerClassName="w-[min(100%,200px)]"
+            />
 
             <Select value={sourceFilter} onValueChange={setSourceFilter}>
               <SelectTrigger className={cn(adminSelectTrigger, 'h-9 w-[min(100%,220px)] text-sm')}>
