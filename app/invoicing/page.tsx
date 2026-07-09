@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Calendar, ChevronLeft, ChevronRight, ClipboardList, Loader2, Shield } from 'lucide-react'
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import * as XLSX from 'xlsx'
@@ -148,6 +148,7 @@ export default function InvoicingPage() {
   const [mergePickFrom, setMergePickFrom] = useState('')
   const [mergePickTo, setMergePickTo] = useState('')
   const [mergePickLoading, setMergePickLoading] = useState(false)
+  const [centerNavLoading, setCenterNavLoading] = useState(false)
   const [mergePickError, setMergePickError] = useState<string | null>(null)
   const [mergingCallCenter, setMergingCallCenter] = useState<string | null>(null)
   const [mergePreview, setMergePreview] = useState<{
@@ -474,6 +475,48 @@ export default function InvoicingPage() {
     }
   }
 
+  const currentCenterIndex = useMemo(() => {
+    if (selectedCenters.length !== 1) return -1
+    return availableCallCenters.indexOf(selectedCenters[0])
+  }, [selectedCenters, availableCallCenters])
+
+  const navigateCenter = async (direction: 'prev' | 'next') => {
+    if (currentCenterIndex === -1 || !dateFrom || !dateTo) return
+    const total = availableCallCenters.length
+    if (total === 0) return
+    const targetIndex = direction === 'next'
+      ? (currentCenterIndex + 1) % total
+      : (currentCenterIndex - 1 + total) % total
+    const newCenter = availableCallCenters[targetIndex]
+
+    setCenterNavLoading(true)
+    try {
+      const record = await loadInvoiceDraftSnapshot({
+        startDate: dateFrom,
+        endDate: dateTo,
+        callCenterFilter: newCenter,
+      })
+      if (record?.payload) {
+        const saved = record.payload
+        setSelectedCenters([newCenter])
+        setDateFrom(saved.dateFrom || dateFrom)
+        setDateTo(saved.dateTo || dateTo)
+        setDraft(saved.draft)
+        setBpoDetail(saved.bpoDetail)
+        setPreviousChargebackByCallCenter(saved.previousChargebackByCallCenter || {})
+        setExcludedPolicyKeys(saved.excludedPolicyKeys || {})
+        setExcludedLineIds(saved.excludedLineIds || {})
+        setLineEdits(saved.lineEdits || {})
+        setPdfExportedByCenter(saved.pdfExportedByCenter || {})
+        setDraftSavedAt(record.updated_at || saved.savedAt || null)
+      }
+    } catch {
+      // Silent — stay on current center
+    } finally {
+      setCenterNavLoading(false)
+    }
+  }
+
   const markPaid = async () => {
     if (!visibleDraft || visibleDraft.groups.length === 0) return
     const missingPdfCenters = visibleDraft.groups
@@ -524,10 +567,6 @@ export default function InvoicingPage() {
 
   const markGroupPaid = async (callCenter: string) => {
     if (!visibleDraft) return
-    if (!pdfExportedByCenter[callCenter]) {
-      alert(`Please export PDF for ${callCenter} before marking paid.`)
-      return
-    }
     const group = visibleDraft.groups.find((g) => g.callCenter === callCenter)
     if (!group) return
     setSaving(true)
@@ -1737,6 +1776,33 @@ export default function InvoicingPage() {
               selected={selectedCenters}
               onChange={setSelectedCenters}
             />
+            {selectedCenters.length === 1 && (
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => navigateCenter('prev')}
+                  disabled={centerNavLoading}
+                  className="h-8 px-2 text-xs"
+                >
+                  {centerNavLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronLeft className="h-3.5 w-3.5" />}
+                  Prev
+                </Button>
+                <span className="min-w-[40px] text-center text-xs text-muted-foreground">
+                  {currentCenterIndex + 1}/{availableCallCenters.length}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => navigateCenter('next')}
+                  disabled={centerNavLoading}
+                  className="h-8 px-2 text-xs"
+                >
+                  Next
+                  {centerNavLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                </Button>
+              </div>
+            )}
             <Button size="sm" variant="outline" onClick={() => void saveDraftLocally()} disabled={selectedCenters.length !== 1}>
               Move to Draft
             </Button>
@@ -2077,7 +2143,7 @@ export default function InvoicingPage() {
                 <Button
                   size="sm"
                   onClick={() => void markGroupPaid(group.callCenter)}
-                  disabled={saving || !pdfExportedByCenter[group.callCenter]}
+                  disabled={saving}
                   className="bg-green-600 text-white hover:bg-green-700"
                 >
                   Mark Paid

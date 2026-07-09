@@ -68,6 +68,7 @@ type AuditPolicyRow = {
   commission_type: string | null
   last_audited_at: string | null
   audit_count: number
+  agency_carrier_id: string | null
 }
 
 type ReviewNote = {
@@ -141,7 +142,7 @@ const ACTIVE_STAGES_NEEDING_COMMISSION = [
 ]
 
 const SELECT_FIELDS =
-  'id, name, policy_number, carrier, ghl_stage, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type, last_audited_at, audit_count'
+  'id, name, policy_number, carrier, ghl_stage, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type, last_audited_at, audit_count, agency_carrier_id'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -471,8 +472,11 @@ export default function PolicyAuditPage() {
   const [creationDateTo, setCreationDateTo] = useState('')
   const [filterCarriers, setFilterCarriers] = useState<string[]>([])
   const [filterAgents, setFilterAgents] = useState<string[]>([])
+  const [filterAgencies, setFilterAgencies] = useState<string[]>([])
   const [filterGhlStages, setFilterGhlStages] = useState<string[]>([])
   const [auditStatusFilter, setAuditStatusFilter] = useState<'all' | 'audited' | 'not-audited'>('not-audited')
+  const [agencyByAcId, setAgencyByAcId] = useState<Map<string, string>>(new Map())
+  const [agencyOptions, setAgencyOptions] = useState<string[]>([])
 
   // ── Sort ──
   const [sortField, setSortField] = useState<SortField | null>(null)
@@ -623,6 +627,28 @@ export default function PolicyAuditPage() {
 
   useEffect(() => { loadTab('pending-approval') }, [loadTab])
 
+  // Fetch agency_carriers mapping once on mount
+  useEffect(() => {
+    supabase
+      .from('agency_carriers')
+      .select('id, agencies ( name )')
+      .order('created_at', { ascending: true })
+      .then((result: { data: any; error: any }) => {
+        const acMap = new Map<string, string>()
+        const nameSet = new Set<string>()
+        for (const row of (result.data || [])) {
+          const name = row.agencies?.name as string | undefined
+          if (name) {
+            acMap.set(row.id as string, name)
+            nameSet.add(name)
+          }
+        }
+        setAgencyByAcId(acMap)
+        setAgencyOptions(Array.from(nameSet).sort())
+      })
+      .catch(() => {})
+  }, [])
+
   const handleTabChange = useCallback(
     (tab: string) => {
       setActiveTab(tab)
@@ -661,6 +687,10 @@ export default function PolicyAuditPage() {
     () => Array.from(new Set(allLoadedRows.map((r) => r.sales_agent).filter(Boolean) as string[])).sort(),
     [allLoadedRows]
   )
+  const agencyFilterOptions = useMemo(
+    () => Array.from(new Set(allLoadedRows.map((r) => agencyByAcId.get(r.agency_carrier_id ?? '')).filter(Boolean) as string[])).sort(),
+    [allLoadedRows, agencyByAcId]
+  )
   const ghlStageOptions = useMemo(
     () => Array.from(new Set(currentTabRows.map((r) => r.ghl_stage).filter(Boolean) as string[])).sort(),
     [currentTabRows]
@@ -684,6 +714,13 @@ export default function PolicyAuditPage() {
     if (filterAgents.length > 0) {
       const s = new Set(filterAgents)
       rows = rows.filter((r) => r.sales_agent && s.has(r.sales_agent))
+    }
+    if (filterAgencies.length > 0) {
+      const s = new Set(filterAgencies)
+      rows = rows.filter((r) => {
+        const agency = agencyByAcId.get(r.agency_carrier_id ?? '')
+        return !!agency && s.has(agency)
+      })
     }
     if (filterGhlStages.length > 0) {
       const s = new Set(filterGhlStages)
@@ -714,7 +751,7 @@ export default function PolicyAuditPage() {
 
     return rows
   }, [
-    currentTabRows, debouncedSearch, filterCarriers, filterAgents, filterGhlStages,
+    currentTabRows, debouncedSearch, filterCarriers, filterAgents, filterAgencies, filterGhlStages, agencyByAcId,
     effDateFrom, effDateTo, creationDateFrom, creationDateTo, auditStatusFilter,
     sortField, sortDir, notesByPolicyId,
   ])
@@ -728,7 +765,7 @@ export default function PolicyAuditPage() {
 
   // Reset page on filter/tab/sort change
   useEffect(() => { setCurrentPage(1) }, [
-    activeTab, debouncedSearch, filterCarriers, filterAgents, filterGhlStages,
+    activeTab, debouncedSearch, filterCarriers, filterAgents, filterAgencies, filterGhlStages,
     effDateFrom, effDateTo, creationDateFrom, creationDateTo, auditStatusFilter,
     sortField, sortDir, pageSize,
   ])
@@ -785,6 +822,7 @@ export default function PolicyAuditPage() {
     (debouncedSearch ? 1 : 0) +
     (filterCarriers.length ? 1 : 0) +
     (filterAgents.length ? 1 : 0) +
+    (filterAgencies.length ? 1 : 0) +
     (filterGhlStages.length ? 1 : 0) +
     (effDateFrom || effDateTo ? 1 : 0) +
     (creationDateFrom || creationDateTo ? 1 : 0) +
@@ -798,6 +836,7 @@ export default function PolicyAuditPage() {
     setCreationDateTo('')
     setFilterCarriers([])
     setFilterAgents([])
+    setFilterAgencies([])
     setFilterGhlStages([])
     setAuditStatusFilter('all')
   }
@@ -1095,6 +1134,7 @@ export default function PolicyAuditPage() {
             </div>
             <MultiSelectDropdown label="Carrier" options={carrierOptions} selected={filterCarriers} onChange={setFilterCarriers} />
             <MultiSelectDropdown label="Agent" options={agentOptions} selected={filterAgents} onChange={setFilterAgents} />
+            <MultiSelectDropdown label="Agency" options={agencyFilterOptions} selected={filterAgencies} onChange={setFilterAgencies} />
             <MultiSelectDropdown label="GHL Stage" options={ghlStageOptions} selected={filterGhlStages} onChange={setFilterGhlStages} />
           </div>
 
