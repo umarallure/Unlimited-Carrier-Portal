@@ -21,6 +21,7 @@ import {
     Moon,
     ClipboardCheck,
     AlertTriangle,
+    ScrollText,
     type LucideIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -191,6 +192,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Invoicing Audit"
           icon={FileSearch}
           active={navActive('/invoicing-audit')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/invoicing-ledger"
+          label="Invoices Ledger"
+          icon={ScrollText}
+          active={navActive('/invoicing-ledger')}
           collapsed={collapsed}
         />
         <NavRow href="/upload-tree" label="Org tree upload" icon={Upload} active={navActive('/upload-tree')} collapsed={collapsed} />
