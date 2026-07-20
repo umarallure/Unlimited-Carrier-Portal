@@ -2671,17 +2671,6 @@ export type UnpaidPreviousSlabCallCenter = {
   previousRangeLabel: string
 }
 
-function addDaysToYmd(ymd: string, days: number): string | null {
-  const [y, m, d] = ymd.split('-').map((x) => parseInt(x, 10))
-  if (!y || !m || !d) return null
-  const dt = new Date(y, m - 1, d)
-  if (Number.isNaN(dt.getTime())) return null
-  dt.setDate(dt.getDate() + days)
-  const ny = dt.getFullYear()
-  const nm = String(dt.getMonth() + 1).padStart(2, '0')
-  const nd = String(dt.getDate()).padStart(2, '0')
-  return `${ny}-${nm}-${nd}`
-}
 
 function extractCallCentersFromDraftRow(row: {
   call_center_filter: string | null
@@ -2723,100 +2712,136 @@ function resolveCentersToValidateForPreviousSlab(
   )
 }
 
-/** Call centers that cannot start a new slab until the immediately previous slab is marked paid. */
+/** Call centers that cannot start a new invoice until their most recent previous invoice period is marked paid.
+ *  Returns both blocked centers and centers whose last invoice period is fully paid. */
 export async function getCallCentersWithUnpaidPreviousSlab(input: {
   startDate: string
   callCenterFilter?: string | string[] | null
-}): Promise<UnpaidPreviousSlabCallCenter[]> {
+}): Promise<{ blocked: UnpaidPreviousSlabCallCenter[]; paidCenterNames: string[] }> {
   const BATCH_SIZE = 200
-  const previousStartDate = addDaysToYmd(input.startDate, -INVOICE_SLAB_DAYS)
-  const previousEndDate = addDaysToYmd(input.startDate, -1)
-  if (!previousStartDate || !previousEndDate) return []
 
-  const paidPreviousSlabCenters = new Set<string>()
-  const { data: previousPaidBatches, error: previousPaidBatchesError } = await supabase
+  // Step 1: Find all prior batches (paid or unpaid) with end_date < startDate.
+  // Track the most recent batch per call center via the ledger.
+  const mostRecentBatchByCenter = new Map<string, {
+    start_date: string
+    end_date: string
+    paid_at: string | null
+  }>()
+  const { data: priorBatches, error: priorBatchesError } = await supabase
     .from('invoicing_batches')
-    .select('id')
-    .eq('start_date', previousStartDate)
-    .eq('end_date', previousEndDate)
-    .not('paid_at', 'is', null)
-  if (previousPaidBatchesError) {
-    throw new Error(previousPaidBatchesError.message)
-  }
-  const previousPaidBatchIds = ((previousPaidBatches || []) as Array<{ id: string }>).map((row) => String(row.id))
-  for (const batchPart of chunk(previousPaidBatchIds, BATCH_SIZE)) {
-    if (!batchPart.length) continue
-    const { data: ledgerRows, error: ledgerError } = await supabase
-      .from('invoicing_call_center_ledger')
-      .select('call_center')
-      .in('batch_id', batchPart)
-    if (ledgerError) throw new Error(ledgerError.message)
-    for (const row of (ledgerRows || []) as Array<{ call_center: string }>) {
-      paidPreviousSlabCenters.add(normalizeCallCenterName(row.call_center))
-    }
-  }
-
-  const centersWithPriorHistory = new Set<string>()
-  const { data: priorPaidBatches, error: priorPaidBatchesError } = await supabase
-    .from('invoicing_batches')
-    .select('id')
+    .select('id, start_date, end_date, paid_at')
     .lt('end_date', input.startDate)
-    .not('paid_at', 'is', null)
-  if (priorPaidBatchesError) {
-    throw new Error(priorPaidBatchesError.message)
-  }
-  const priorPaidBatchIds = ((priorPaidBatches || []) as Array<{ id: string }>).map((row) => String(row.id))
-  for (const batchPart of chunk(priorPaidBatchIds, BATCH_SIZE)) {
+    .order('end_date', { ascending: false })
+  if (priorBatchesError) throw new Error(priorBatchesError.message)
+  const priorBatchIds = ((priorBatches || []) as Array<{ id: string }>).map((b) => String(b.id))
+  for (const batchPart of chunk(priorBatchIds, BATCH_SIZE)) {
     if (!batchPart.length) continue
     const { data: ledgerRows, error: ledgerError } = await supabase
       .from('invoicing_call_center_ledger')
-      .select('call_center')
+      .select('call_center, batch_id')
       .in('batch_id', batchPart)
     if (ledgerError) throw new Error(ledgerError.message)
-    for (const row of (ledgerRows || []) as Array<{ call_center: string }>) {
-      centersWithPriorHistory.add(normalizeCallCenterName(row.call_center))
+    for (const row of (ledgerRows || []) as Array<{ call_center: string; batch_id: string }>) {
+      const cc = normalizeCallCenterName(row.call_center)
+      const batch = (priorBatches || []).find((b: { id: string | number }) => String(b.id) === row.batch_id)
+      if (!batch) continue
+      const existing = mostRecentBatchByCenter.get(cc)
+      if (!existing || batch.end_date > existing.end_date) {
+        mostRecentBatchByCenter.set(cc, {
+          start_date: batch.start_date,
+          end_date: batch.end_date,
+          paid_at: batch.paid_at,
+        })
+      }
     }
   }
 
-  const centersWithUnpaidPrevDraft = new Set<string>()
+  // Step 2: Find all unpaid drafts (paid_batch_id IS NULL) with end_date < startDate.
+  // Track the most recent draft per call center.
+  const mostRecentDraftByCenter = new Map<string, {
+    start_date: string
+    end_date: string
+  }>()
   const { data: unpaidDrafts, error: unpaidDraftsError } = await supabase
     .from('invoicing_drafts')
-    .select('call_center_filter, payload')
-    .eq('start_date', previousStartDate)
-    .eq('end_date', previousEndDate)
+    .select('call_center_filter, payload, start_date, end_date')
+    .lt('end_date', input.startDate)
     .is('paid_batch_id', null)
-  if (unpaidDraftsError) {
-    throw new Error(unpaidDraftsError.message)
-  }
+  if (unpaidDraftsError) throw new Error(unpaidDraftsError.message)
   for (const row of (unpaidDrafts || []) as Array<{
     call_center_filter: string | null
     payload: InvoiceDraftSnapshot | null
+    start_date: string
+    end_date: string
   }>) {
     for (const center of extractCallCentersFromDraftRow(row)) {
-      centersWithUnpaidPrevDraft.add(center)
+      const existing = mostRecentDraftByCenter.get(center)
+      if (!existing || row.end_date > existing.end_date) {
+        mostRecentDraftByCenter.set(center, {
+          start_date: row.start_date,
+          end_date: row.end_date,
+        })
+      }
     }
   }
 
+  // Step 3: Build the set of call centers with any prior history.
+  const centersWithPriorHistory = new Set<string>([
+    ...mostRecentBatchByCenter.keys(),
+    ...mostRecentDraftByCenter.keys(),
+  ])
+  const centersFromUnpaidDrafts = new Set(mostRecentDraftByCenter.keys())
+
+  // Step 4: Resolve which centers to validate.
   const centersToValidate = resolveCentersToValidateForPreviousSlab(
     input.callCenterFilter,
     centersWithPriorHistory,
-    centersWithUnpaidPrevDraft,
+    centersFromUnpaidDrafts,
   )
 
+  // Step 5: For each center, check if the most recent previous entry is paid.
   const blocked: UnpaidPreviousSlabCallCenter[] = []
-  const previousRangeLabel = formatInvoiceRangeLabel(previousStartDate, previousEndDate)
+  const paidCenterNames: string[] = []
   for (const center of centersToValidate) {
-    if (paidPreviousSlabCenters.has(center)) continue
-    if (!centersWithUnpaidPrevDraft.has(center) && !centersWithPriorHistory.has(center)) continue
+    const batchEntry = mostRecentBatchByCenter.get(center)
+    const draftEntry = mostRecentDraftByCenter.get(center)
+
+    const batchEnd = batchEntry?.end_date ?? ''
+    const draftEnd = draftEntry?.end_date ?? ''
+
+    if (!batchEnd && !draftEnd) continue
+
+    let periodStartDate: string
+    let periodEndDate: string
+    let isPaid: boolean
+
+    if (batchEnd >= draftEnd) {
+      periodStartDate = batchEntry!.start_date
+      periodEndDate = batchEntry!.end_date
+      isPaid = batchEntry!.paid_at !== null
+    } else {
+      periodStartDate = draftEntry!.start_date
+      periodEndDate = draftEntry!.end_date
+      isPaid = false
+    }
+
+    if (isPaid) {
+      paidCenterNames.push(center)
+      continue
+    }
+
     blocked.push({
       callCenter: center,
-      previousStartDate,
-      previousEndDate,
-      previousRangeLabel,
+      previousStartDate: periodStartDate,
+      previousEndDate: periodEndDate,
+      previousRangeLabel: formatInvoiceRangeLabel(periodStartDate, periodEndDate),
     })
   }
 
-  return blocked.sort((a, b) => a.callCenter.localeCompare(b.callCenter))
+  return {
+    blocked: blocked.sort((a, b) => a.callCenter.localeCompare(b.callCenter)),
+    paidCenterNames,
+  }
 }
 
 export async function getPreviousChargebackByCallCenter(callCenters: string[]): Promise<Record<string, number>> {

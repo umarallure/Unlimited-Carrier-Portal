@@ -139,9 +139,10 @@ export default function InvoicingPage() {
   const [showWeekScript, setShowWeekScript] = useState(false)
   const [weekScriptRowsFromDrafts, setWeekScriptRowsFromDrafts] = useState<Array<{ callCenter: string; payment: number }>>([])
   const [weekScriptLoading, setWeekScriptLoading] = useState(false)
-  /** When false, To is always start + 13 days (14-day slab). When true, To is editable. */
+  /** When false, To is always start + 13 days. When true, To is editable. */
   const [customEndDate, setCustomEndDate] = useState(false)
   const [unpaidPreviousSlabBlocked, setUnpaidPreviousSlabBlocked] = useState<UnpaidPreviousSlabCallCenter[]>([])
+  const [previousPeriodsPaidCenters, setPreviousPeriodsPaidCenters] = useState<string[]>([])
   const [checkingUnpaidPreviousSlab, setCheckingUnpaidPreviousSlab] = useState(false)
   const [unpaidPreviousSlabCheckError, setUnpaidPreviousSlabCheckError] = useState<string | null>(null)
   const [auditLine, setAuditLine] = useState<BpoInvoiceLine | null>(null)
@@ -222,10 +223,11 @@ export default function InvoicingPage() {
   const generateInvoiceBlocked =
     unpaidPreviousSlabBlocked.length > 0 || !!unpaidPreviousSlabCheckError
 
-  // Block invoice generation when the immediately previous slab is not marked paid.
+  // Block invoice generation when the most recent previous invoice period is not marked paid.
   useEffect(() => {
     if (!dateFrom) {
       setUnpaidPreviousSlabBlocked([])
+      setPreviousPeriodsPaidCenters([])
       setUnpaidPreviousSlabCheckError(null)
       return
     }
@@ -233,17 +235,23 @@ export default function InvoicingPage() {
     const run = async () => {
       setCheckingUnpaidPreviousSlab(true)
       setUnpaidPreviousSlabCheckError(null)
+      setPreviousPeriodsPaidCenters([])
       try {
-        const blocked = await getCallCentersWithUnpaidPreviousSlab({
+        const result = await getCallCentersWithUnpaidPreviousSlab({
           startDate: dateFrom,
           callCenterFilter: invoiceCallCenterFilter,
         })
-        if (!cancelled) setUnpaidPreviousSlabBlocked(blocked)
+        if (!cancelled) {
+          setUnpaidPreviousSlabBlocked(result.blocked)
+          if (result.blocked.length === 0 && result.paidCenterNames.length > 0) {
+            setPreviousPeriodsPaidCenters(result.paidCenterNames)
+          }
+        }
       } catch (error: unknown) {
         if (!cancelled) {
           setUnpaidPreviousSlabBlocked([])
           setUnpaidPreviousSlabCheckError(
-            error instanceof Error ? error.message : 'Failed to check previous slab payment status.',
+            error instanceof Error ? error.message : 'Failed to check previous invoice payment status.',
           )
         }
       } finally {
@@ -347,7 +355,7 @@ export default function InvoicingPage() {
     }
 
     try {
-      const blockedCenters = await getCallCentersWithUnpaidPreviousSlab({
+      const { blocked: blockedCenters } = await getCallCentersWithUnpaidPreviousSlab({
         startDate: dateFrom,
         callCenterFilter,
       })
@@ -355,17 +363,17 @@ export default function InvoicingPage() {
         const details = blockedCenters
           .map(
             (entry) =>
-              `${entry.callCenter}: mark the previous slab (${entry.previousRangeLabel}) as paid first`,
+              `${entry.callCenter}: mark the previous cycle (${entry.previousRangeLabel}) as paid first`,
           )
           .join('\n')
         alert(
-          `Cannot generate invoice. The previous slab invoice is not paid for the following call center(s):\n\n${details}`,
+          `Cannot generate invoice. The previous invoice is not paid for the following call center(s):\n\n${details}`,
         )
         return
       }
     } catch (error: unknown) {
       const message =
-        error instanceof Error ? error.message : 'Failed to validate previous slab payment status.'
+        error instanceof Error ? error.message : 'Failed to validate previous invoice payment status.'
       alert(message)
       return
     }
@@ -1617,14 +1625,36 @@ export default function InvoicingPage() {
             </div>
           </div>
           {checkingUnpaidPreviousSlab && dateFrom ? (
-            <p className="text-xs text-muted-foreground">Checking previous slab payment status…</p>
+            <p className="text-xs text-muted-foreground">Checking previous invoice payment status…</p>
           ) : null}
           {unpaidPreviousSlabCheckError ? (
             <div
               role="alert"
               className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-100"
             >
-              Could not verify previous slab payment: {unpaidPreviousSlabCheckError}
+              Could not verify previous invoice payment: {unpaidPreviousSlabCheckError}
+            </div>
+          ) : null}
+          {previousPeriodsPaidCenters.length > 0 && unpaidPreviousSlabBlocked.length === 0 ? (
+            <div
+              role="status"
+              className="rounded-lg border border-green-200 bg-green-50 px-3 py-2.5 text-sm text-green-950 dark:border-green-700 dark:bg-green-950/40 dark:text-green-100"
+            >
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 space-y-1.5">
+                  <p className="font-semibold text-green-900 dark:text-green-50">
+                    Previous invoices are paid — ready to generate
+                  </p>
+                  <ul className="list-disc space-y-0.5 pl-4 text-xs">
+                    {previousPeriodsPaidCenters.map((center) => (
+                      <li key={center}>
+                        <span className="font-medium">{center}</span>
+                        {' — all previous invoices paid'}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
             </div>
           ) : null}
           {unpaidPreviousSlabBlocked.length > 0 ? (
@@ -1639,13 +1669,13 @@ export default function InvoicingPage() {
                     Previous invoice cycle is not paid — new invoice generation is disabled
                   </p>
                   <p className="text-xs text-amber-900/90 dark:text-amber-100/90">
-                    Mark the previous 14-day slab as paid (or settle its draft) before starting this cycle.
+                    Mark the previous invoice cycle as paid before starting this cycle.
                   </p>
                   <ul className="list-disc space-y-0.5 pl-4 text-xs">
                     {unpaidPreviousSlabBlocked.map((entry) => (
                       <li key={entry.callCenter}>
                         <span className="font-medium">{entry.callCenter}</span>
-                        {' — previous slab '}
+                        {' — previous cycle '}
                         <span className="font-mono">{entry.previousRangeLabel}</span>
                       </li>
                     ))}
@@ -1708,7 +1738,7 @@ export default function InvoicingPage() {
               }
               title={
                 generateInvoiceBlocked
-                  ? 'Mark the previous slab invoice as paid before generating a new cycle'
+                  ? 'Mark the previous invoice as paid before generating a new cycle'
                   : undefined
               }
               className="bg-orange-500 text-black hover:bg-orange-400 disabled:opacity-50"
