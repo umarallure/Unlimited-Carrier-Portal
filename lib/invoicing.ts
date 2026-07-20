@@ -2774,6 +2774,14 @@ export async function getCallCentersWithUnpaidPreviousSlab(input: {
     start_date: string
     end_date: string
   }>) {
+    const payload = row.payload
+    const hasBillableContent = (payload?.draft?.groups ?? []).some(
+      (g) => (g.policies ?? []).length > 0,
+    ) || (payload?.bpoDetail?.groups ?? []).some(
+      (g) => (g.salesLines ?? []).length > 0 || (g.chargebackLines ?? []).length > 0,
+    )
+    if (!hasBillableContent) continue
+
     for (const center of extractCallCentersFromDraftRow(row)) {
       const existing = mostRecentDraftByCenter.get(center)
       if (!existing || row.end_date > existing.end_date) {
