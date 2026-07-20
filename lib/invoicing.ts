@@ -2672,26 +2672,6 @@ export type UnpaidPreviousSlabCallCenter = {
 }
 
 
-function extractCallCentersFromDraftRow(row: {
-  call_center_filter: string | null
-  payload: InvoiceDraftSnapshot | null
-}): string[] {
-  const centers = new Set<string>()
-  const filter = String(row.call_center_filter ?? '').trim()
-  if (filter && filter !== PRESET_ALL_CALL_CENTERS_FILTER) {
-    centers.add(normalizeCallCenterName(filter))
-  }
-  const payload = row.payload
-  if (payload?.selectedCallCenter) {
-    const selected = String(payload.selectedCallCenter).trim()
-    if (selected) centers.add(normalizeCallCenterName(selected))
-  }
-  for (const group of payload?.draft?.groups ?? []) {
-    if (group.callCenter) centers.add(normalizeCallCenterName(group.callCenter))
-  }
-  return Array.from(centers)
-}
-
 function resolveCentersToValidateForPreviousSlab(
   filterCallCenter: string | string[] | null | undefined,
   centersWithPriorHistory: Set<string>,
@@ -2775,14 +2755,26 @@ export async function getCallCentersWithUnpaidPreviousSlab(input: {
     end_date: string
   }>) {
     const payload = row.payload
-    const hasBillableContent = (payload?.draft?.groups ?? []).some(
-      (g) => (g.policies ?? []).length > 0,
-    ) || (payload?.bpoDetail?.groups ?? []).some(
-      (g) => (g.salesLines ?? []).length > 0 || (g.chargebackLines ?? []).length > 0,
-    )
-    if (!hasBillableContent) continue
 
-    for (const center of extractCallCentersFromDraftRow(row)) {
+    const centersWithContent = new Set<string>()
+    for (const group of payload?.draft?.groups ?? []) {
+      if ((group.policies ?? []).length > 0 && group.callCenter) {
+        centersWithContent.add(normalizeCallCenterName(group.callCenter))
+      }
+    }
+    for (const group of payload?.bpoDetail?.groups ?? []) {
+      if (
+        (group.salesLines ?? []).length > 0 || (group.chargebackLines ?? []).length > 0
+      ) {
+        if (group.callCenter) {
+          centersWithContent.add(normalizeCallCenterName(group.callCenter))
+        }
+      }
+    }
+
+    if (centersWithContent.size === 0) continue
+
+    for (const center of centersWithContent) {
       const existing = mostRecentDraftByCenter.get(center)
       if (!existing || row.end_date > existing.end_date) {
         mostRecentDraftByCenter.set(center, {
