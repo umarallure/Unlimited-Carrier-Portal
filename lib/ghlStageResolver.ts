@@ -93,6 +93,19 @@ const MANUAL_STAGE_SAFE_PARENT: Record<string, string> = {
 }
 
 /**
+ * Auditor determined the policy has a first-draft payment issue. Carriers often keep
+ * reporting a generic "Pending" status afterward, which auto-maps to "Pending Approval" —
+ * that must never silently undo the audit. Any other stage change (Active, Chargeback,
+ * Declined, etc.) still flows through normally; see applyNonRegressiveGhlClamp.
+ */
+const FDPF_FAMILY_STAGES = new Set([
+  'FDPF Pending Reason',
+  'FDPF Insufficient Funds',
+  'FDPF Unauthorized Draft',
+  'FDPF Incorrect Banking Info',
+])
+
+/**
  * Existing stages auto-mapping must never overwrite — auditor-only.
  * FDPF / Pending Lapse sub-reasons and Active milestones are NOT in this set:
  * within-family regression is blocked by applyNonRegressiveGhlClamp + stageProgressRank,
@@ -495,6 +508,11 @@ function applyNonRegressiveGhlClamp(
   existing = normalizeStageLabel(existing)
   candidate = normalizeStageLabel(candidate)
   if (candidate == null) return existing ?? null
+
+  // Never let an FDPF determination be reset to Pending Approval by auto-mapping.
+  if (existing && FDPF_FAMILY_STAGES.has(existing) && candidate === 'Pending Approval') {
+    return existing
+  }
 
   const ex = ghlStageOrderIndex(existing)
   const ca = ghlStageOrderIndex(candidate)

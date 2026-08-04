@@ -3857,6 +3857,27 @@ export async function saveDealTrackerEntries(
   const attribution = await buildDealTrackerAttribution(options?.triggerFileId ?? null)
   cleanEntries = cleanEntries.map(e => ({ ...e, ...attribution }))
 
+  // Snapshot each existing row's ghl_stage before saving, so we can log stage
+  // movement (deal_tracker_status_history) for whatever the upsert actually changes.
+  const ghlHistoryKeys = cleanEntries.filter(e => e.agency_carrier_id && e.policy_number)
+  const existingGhlStageForHistory = new Map<string, { id: string; ghl_stage: string | null; carrier: string | null }>()
+  {
+    const agencyCarrierIds = [...new Set(ghlHistoryKeys.map(e => e.agency_carrier_id))]
+    const CHUNK = 100
+    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
+      const ids = agencyCarrierIds.slice(i, i + CHUNK)
+      const { data: rows } = await supabase
+        .from('deal_tracker')
+        .select('id, agency_carrier_id, policy_number, ghl_stage, carrier')
+        .in('agency_carrier_id', ids)
+      if (rows) {
+        for (const row of rows as any[]) {
+          existingGhlStageForHistory.set(`${row.agency_carrier_id}\0${row.policy_number}`, row)
+        }
+      }
+    }
+  }
+
   const BATCH_SIZE = 500
   let saved = 0
   let failed = 0
@@ -3879,6 +3900,37 @@ export async function saveDealTrackerEntries(
     } else {
       saved += batch.length
       log(`Saved ${saved.toLocaleString()}/${cleanEntries.length.toLocaleString()} rows`)
+
+      const historyRows = batch
+        .filter((e: any) => e.agency_carrier_id && e.policy_number)
+        .map((e: any) => {
+          const existingRow = existingGhlStageForHistory.get(`${e.agency_carrier_id}\0${e.policy_number}`)
+          if (!existingRow) return null // new policy row: no prior stage to move from
+          const prevStage = existingRow.ghl_stage ?? null
+          const nextStage = e.ghl_stage ?? null
+          if (valueEqual(prevStage, nextStage)) return null
+          return {
+            deal_tracker_id: existingRow.id,
+            agency_carrier_id: e.agency_carrier_id,
+            carrier: e.carrier ?? existingRow.carrier ?? null,
+            policy_number: e.policy_number,
+            previous_ghl_stage: prevStage,
+            new_ghl_stage: nextStage,
+            source: 'upload',
+            file_id: e.last_changed_by_file_id ?? null,
+            file_name: e.last_changed_by_file_name ?? null,
+            changed_by_user_id: e.last_changed_by_user_id ?? null,
+            changed_by_user_email: e.last_changed_by_user_email ?? null,
+          }
+        })
+        .filter((row): row is NonNullable<typeof row> => row != null)
+
+      if (historyRows.length > 0) {
+        const { error: historyError } = await supabase.from('deal_tracker_status_history').insert(historyRows)
+        if (historyError) {
+          console.error('[Deal Tracker] Failed to insert ghl_stage history:', historyError)
+        }
+      }
     }
   }
 
