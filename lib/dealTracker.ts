@@ -5,7 +5,7 @@
 
 import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
-import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll, isBlockedGhlStageRegression } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview, extractYmdFromDbValue } from './calendarDate'
 import { getDdfClient } from './ddfSource'
 import { buildDealTrackerAttribution } from './dealTrackerAttribution'
@@ -3876,6 +3876,33 @@ export async function saveDealTrackerEntries(
         }
       }
     }
+  }
+
+  // Final save-time guard, independent of carrier or how ghl_stage was computed
+  // (auto-mapped from any carrier's status text, or hand-edited in the verification
+  // dialog): never let a save actually persist a regression away from an
+  // auditor-only stage (FDPF family -> Pending Approval / FDPF Pending Reason,
+  // Pending Manual Action -> Pending Approval). Revert just that field and keep
+  // saving the rest of the row.
+  const blockedGhlStageRegressions: { policy_number: string; from: string | null; attempted: string | null }[] = []
+  cleanEntries = cleanEntries.map(e => {
+    if (!e.agency_carrier_id || !e.policy_number) return e
+    const existingRow = existingGhlStageForHistory.get(`${e.agency_carrier_id}\0${e.policy_number}`)
+    if (!existingRow) return e
+    if (!isBlockedGhlStageRegression(existingRow.ghl_stage, e.ghl_stage)) return e
+    blockedGhlStageRegressions.push({
+      policy_number: e.policy_number,
+      from: existingRow.ghl_stage,
+      attempted: e.ghl_stage,
+    })
+    return { ...e, ghl_stage: existingRow.ghl_stage }
+  })
+  if (blockedGhlStageRegressions.length > 0) {
+    log(
+      `Kept GHL Stage unchanged for ${blockedGhlStageRegressions.length.toLocaleString()} polic${blockedGhlStageRegressions.length === 1 ? 'y' : 'ies'} ` +
+      `(blocked: ${blockedGhlStageRegressions.slice(0, 5).map(r => `${r.policy_number} "${r.attempted}" -> stays "${r.from}"`).join(', ')}` +
+      `${blockedGhlStageRegressions.length > 5 ? `, +${blockedGhlStageRegressions.length - 5} more` : ''})`
+    )
   }
 
   const BATCH_SIZE = 500
