@@ -86,11 +86,77 @@ export async function syncReviewNoteToLeadNotes(
     }
   }
 
+  const inserted = await insertLeadNote({
+    leadId,
+    body,
+    dealTrackerReviewNoteId,
+    createdBy: input.createdBy,
+  })
+
+  if (!inserted.ok) {
+    return {
+      synced: false,
+      reason: 'insert_failed',
+      message: `Lead note save failed: ${inserted.message}`,
+    }
+  }
+
+  return {
+    synced: true,
+    leadId,
+    leadNoteId: inserted.leadNoteId,
+  }
+}
+
+export type InsertLeadNoteInput = {
+  leadId: string
+  body: string
+  dealTrackerReviewNoteId: string
+  /**
+   * CRM user id. `lead_notes.created_by` is a uuid column, so anything that is
+   * not a UUID (an email address, for instance) is dropped rather than sent —
+   * Postgres would reject the whole insert. Portal users have no CRM user id, so
+   * this is normally null and authorship is carried in the note body.
+   */
+  createdBy?: string | null
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function uuidOrNull(value: unknown): string | null {
+  const raw = String(value ?? '').trim()
+  return UUID_RE.test(raw) ? raw : null
+}
+
+export type InsertLeadNoteResult =
+  | { ok: true; leadNoteId: string }
+  | { ok: false; message: string }
+
+/**
+ * Insert one row into the CRM `lead_notes` table against an already-resolved lead.
+ *
+ * Split out of syncReviewNoteToLeadNotes so callers that have already located the
+ * lead (e.g. a stage change that just updated it) can write the note without
+ * repeating the lookup — which would otherwise miss leads matched by decrypting
+ * `tracking_id` rather than by `policy_id`.
+ */
+export async function insertLeadNote(input: InsertLeadNoteInput): Promise<InsertLeadNoteResult> {
+  const leadId = trimPolicy(input.leadId)
+  const body = trimPolicy(input.body)
+  const dealTrackerReviewNoteId = trimPolicy(input.dealTrackerReviewNoteId)
+
+  if (!leadId || !body) {
+    return { ok: false, message: 'leadId and body are required.' }
+  }
+
+  const { client: ddf } = getDdfClient('new')
+
   const payload = {
     lead_id: leadId,
     body,
-    deal_tracker_review_note_id: dealTrackerReviewNoteId,
-    created_by: input.createdBy?.trim() || null,
+    // Both are uuid columns; a non-UUID here fails the whole insert.
+    deal_tracker_review_note_id: uuidOrNull(dealTrackerReviewNoteId),
+    created_by: uuidOrNull(input.createdBy),
   }
 
   const { data: inserted, error: insertError } = await ddf
@@ -99,21 +165,10 @@ export async function syncReviewNoteToLeadNotes(
     .select('id')
     .single()
 
-  if (insertError) {
-    return {
-      synced: false,
-      reason: 'insert_failed',
-      message: `Lead note save failed: ${insertError.message}`,
-    }
-  }
+  if (insertError) return { ok: false, message: insertError.message }
 
   const insertedRow = inserted as Record<string, unknown> | null
-
-  return {
-    synced: true,
-    leadId,
-    leadNoteId: String(insertedRow?.id ?? ''),
-  }
+  return { ok: true, leadNoteId: String(insertedRow?.id ?? '') }
 }
 
 export type DdfStatusStageSync = {
