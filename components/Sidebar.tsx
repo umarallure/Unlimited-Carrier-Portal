@@ -22,6 +22,7 @@ import {
     ClipboardCheck,
     AlertTriangle,
     ScrollText,
+    Mail,
     type LucideIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -170,6 +171,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Deal Tracker Compare"
           icon={FileText}
           active={navActive('/deal-tracker-compare')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/amam-correspondence"
+          label="AMAM Correspondence"
+          icon={Mail}
+          active={navActive('/amam-correspondence')}
           collapsed={collapsed}
         />
         <NavRow href="/ghl-stages" label="GHL Stages" icon={LayoutGrid} active={navActive('/ghl-stages')} collapsed={collapsed} />
