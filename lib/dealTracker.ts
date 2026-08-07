@@ -540,8 +540,6 @@ type DailyDealFlowInfo = {
   phone_number: string | null
   draft_date: string | null
   lead_name: string | null
-  /** daily_deal_flow.submission_id — used to match the CRM lead when it has no policy_id/tracking_id yet (a brand-new lead). */
-  submission_id: string | null
 }
 
 /**
@@ -950,13 +948,12 @@ async function fetchDdfViaApi(
     const results = data.results || {}
     Object.entries(results).forEach(([k, v]) => {
       const val =
-        (v as { call_center?: string | null; phone_number?: string | null; draft_date?: string | null; lead_name?: string | null; submission_id?: string | null }) || {}
+        (v as { call_center?: string | null; phone_number?: string | null; draft_date?: string | null; lead_name?: string | null }) || {}
       allResults.set(normalizeNameForSearch(k), {
         call_center: val.call_center ?? null,
         phone_number: val.phone_number ?? null,
         draft_date: val.draft_date ?? null,
         lead_name: val.lead_name ?? null,
-        submission_id: val.submission_id ?? null,
       })
     })
     const withData = Object.values(results).filter((v: any) => v?.call_center || v?.phone_number).length
@@ -1014,7 +1011,6 @@ export async function getDdfRecordsForCarrier(
   draft_date?: string | null
   tracking_id?: string | null
   status?: string | null
-  submission_id?: string | null
 }[]> {
   const carrierUpper = (carrier || '').toUpperCase()
   const isAmam = carrierUpper === 'AMAM' || carrierUpper === 'ANAM' || carrierUpper.includes('AMERICAN AMICABLE')
@@ -1045,7 +1041,6 @@ export async function getDdfRecordsForCarrier(
     draft_date?: string | null
     tracking_id?: string | null
     status?: string | null
-    submission_id?: string | null
   }[]
 }
 
@@ -1061,7 +1056,6 @@ export function matchDdfNamesToRecords(
     phone_number?: string | null
     draft_date?: string | null
     tracking_id?: string | null
-    submission_id?: string | null
   }[],
   insuredNames: string[],
   policyNumbers?: (string | null | undefined)[]
@@ -1141,7 +1135,6 @@ export function matchDdfNamesToRecords(
           phone_number: getPhone(tidMatch) ?? null,
           draft_date: tidMatch.draft_date != null ? String(tidMatch.draft_date).trim() : null,
           lead_name: tidMatch.insured_name != null ? String(tidMatch.insured_name).trim() : null,
-          submission_id: tidMatch.submission_id != null ? String(tidMatch.submission_id).trim() : null,
         })
         continue
       }
@@ -1210,11 +1203,6 @@ export function matchDdfNamesToRecords(
         phone_number: getPhone(bestMatch) ?? null,
         draft_date: bestMatch.draft_date != null ? String(bestMatch.draft_date).trim() : null,
         lead_name: bestMatch.insured_name != null ? String(bestMatch.insured_name).trim() : null,
-        // Only propagate submission_id from a high-confidence name match (exact full name, or
-        // exact first+last — score >= 80): a wrong low-confidence match (fuzzy, or matched on a
-        // single name field alone) propagating the wrong submission_id would silently move the
-        // wrong lead's CRM stage, unlike call_center/phone which are just reporting fields.
-        submission_id: bestScore >= 80 && bestMatch.submission_id != null ? String(bestMatch.submission_id).trim() : null,
       })
     }
   }
@@ -1386,7 +1374,6 @@ export async function doBulkFetchDailyDealFlowInfo(
           phone_number: getPhone(bestMatch) ?? null,
           draft_date: bestMatch.draft_date != null ? String(bestMatch.draft_date).trim() : null,
           lead_name: bestMatch.insured_name != null ? String(bestMatch.insured_name).trim() : null,
-          submission_id: null,
         })
       }
     }

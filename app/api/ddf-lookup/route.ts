@@ -1,12 +1,8 @@
 /**
  * Server-side DDF lookup – avoids CORS by having the browser call this instead of external Supabase.
  * POST body: { carrier: string, names: string[] }
- * Returns: { results: Record<string, { call_center: string | null, phone_number: string | null, draft_date: string | null, lead_name: string | null, submission_id: string | null }> }
+ * Returns: { results: Record<string, { call_center: string | null, phone_number: string | null, draft_date: string | null, lead_name: string | null }> }
  * Caches DDF rows per carrier for 90s so chunked client requests only hit external DB once.
- *
- * submission_id is only populated from a high-confidence match (exact tracking_id/policy match,
- * or exact name match — see matchDdfNamesToRecords) so callers can use it as a reliable join key
- * for syncing the CRM lead's stage (e.g. a brand-new lead with no policy_id/tracking_id yet).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -71,7 +67,7 @@ export async function POST(request: NextRequest) {
 
   // Log when Liberty (or other) DDF returns no/low matches so we can debug empty Call Center/Phone
   const carrierUpper = (carrier || '').toUpperCase()
-  const resolvedResults = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null; submission_id: string | null }>()
+  const resolvedResults = new Map<string, { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }>()
   try {
     const source = 'new'
     const sourceItems = normalizedItems
@@ -102,7 +98,6 @@ export async function POST(request: NextRequest) {
         phone_number: ((m.client_phone_number ?? m.phone_number ?? null) != null ? String(m.client_phone_number ?? m.phone_number ?? '').trim() : null) || null,
         draft_date: m.draft_date != null ? String(m.draft_date).trim() : null,
         lead_name: m.insured_name != null ? String(m.insured_name).trim() : null,
-        submission_id: m.submission_id ? String(m.submission_id).trim() : null,
       })
       trackingIdResolvedKeys.add(it.key)
       // Link policy_id to the lead. Stage is intentionally NOT driven from the DDF
@@ -139,7 +134,6 @@ export async function POST(request: NextRequest) {
           phone_number: matched.phone_number ?? null,
           draft_date: matched.draft_date ?? null,
           lead_name: matched.lead_name ?? null,
-          submission_id: matched.submission_id ?? null,
         })
       }
     })
@@ -165,7 +159,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 })
   }
 
-  const results: Record<string, { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null; submission_id: string | null }> = {}
+  const results: Record<string, { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }> = {}
   normalizedItems.forEach((it) => {
     const v = resolvedResults.get(it.key)
     if (!v) return

@@ -12,8 +12,6 @@ import {
   processAmamCommissionsForDealTrackerFromRows,
   saveDealTrackerEntries,
   isInvalidGhlStageForSave,
-  bulkFetchDailyDealFlowInfo,
-  normalizeNameForSearch,
   type DealTrackerPreviewEntry,
 } from './dealTracker'
 import {
@@ -284,53 +282,21 @@ async function syncEditedEntriesToCommissionTracker(
 /**
  * Push ghl_stage → leads.stage_id for every saved row, in one batched server call.
  * Best-effort: never blocks or fails the deal_tracker save. The server matches each
- * policy_number to its lead by submission_id, then policy_id, then decrypting tracking_id.
- *
- * submission_id is looked up here via the same DDF name-matching used for call_center/phone
- * (see bulkFetchDailyDealFlowInfo) so a brand-new lead — one with no policy_id/tracking_id yet,
- * because the policy didn't exist when the lead was created — can still be matched and moved.
+ * policy_number to its lead (via tracking_id) and applies the ghl_stage as the stage.
  */
 async function syncLeadStagesForSavedEntries(entries: DealTrackerPreviewEntry[]): Promise<void> {
   try {
     const seen = new Set<string>()
-    const rows: { policyNumber: string; ghlStage: string; name: string | null; carrier: string }[] = []
+    const updates: { policyNumber: string; ghlStage: string }[] = []
     for (const e of entries) {
       const policyNumber = String(e.policy_number ?? '').trim()
       const ghlStage = String(e.ghl_stage ?? '').trim()
       if (!policyNumber || !ghlStage || isInvalidGhlStageForSave(ghlStage)) continue
       if (seen.has(policyNumber)) continue
       seen.add(policyNumber)
-      rows.push({ policyNumber, ghlStage, name: e.name ?? null, carrier: e.carrier || '' })
+      updates.push({ policyNumber, ghlStage })
     }
-    if (rows.length === 0) return
-
-    const submissionIdByPolicy = new Map<string, string | null>()
-    const rowsByCarrier = new Map<string, typeof rows>()
-    for (const r of rows) {
-      if (!r.name) continue
-      const list = rowsByCarrier.get(r.carrier) ?? []
-      list.push(r)
-      rowsByCarrier.set(r.carrier, list)
-    }
-    for (const [carrier, carrierRows] of rowsByCarrier.entries()) {
-      try {
-        const names = carrierRows.map(r => r.name as string)
-        const ddfMap = await bulkFetchDailyDealFlowInfo(names, carrier)
-        for (const r of carrierRows) {
-          const info = ddfMap.get(normalizeNameForSearch(r.name as string))
-          if (info?.submission_id) submissionIdByPolicy.set(r.policyNumber, info.submission_id)
-        }
-      } catch (error) {
-        console.error('[deal-tracker] submission_id DDF lookup failed for carrier', carrier, error instanceof Error ? error.message : error)
-      }
-    }
-
-    const updates = rows.map(r => ({
-      policyNumber: r.policyNumber,
-      ghlStage: r.ghlStage,
-      submissionId: submissionIdByPolicy.get(r.policyNumber) ?? null,
-    }))
-
+    if (updates.length === 0) return
     const res = await fetch('/api/deal-tracker/sync-lead-stages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

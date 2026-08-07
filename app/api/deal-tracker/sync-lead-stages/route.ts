@@ -3,16 +3,11 @@
  *
  * Called from the browser after a deal tracker file is confirmed/saved (hundreds of
  * rows per file). For each { policyNumber, ghlStage } pair the matching lead is found
- * (by submission_id, then policy_id, then decrypting leads.tracking_id — see
- * syncLeadStagesFromDdfStatus) and its stage/stage_id is set from the ghl_stage name.
- * The DDF `status` column is intentionally NOT used here — the pipeline stage comes
- * from the carrier-portal ghl_stage only.
+ * (by decrypting leads.tracking_id — see syncLeadStagesFromDdfStatus) and its
+ * stage/stage_id is set from the ghl_stage name. The DDF `status` column is intentionally
+ * NOT used here — the pipeline stage comes from the carrier-portal ghl_stage only.
  *
- * submissionId, when provided, comes from a DDF name-match made at save time (see
- * syncLeadStagesForSavedEntries) — it's the only reliable join key for a brand-new
- * lead that has no policy_id/tracking_id yet.
- *
- * POST body: { updates: { policyNumber: string; ghlStage: string; submissionId?: string | null }[] }
+ * POST body: { updates: { policyNumber: string; ghlStage: string }[] }
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -20,7 +15,7 @@ import { getDdfClient } from '@/lib/ddfSource'
 import { syncLeadStagesFromDdfStatus, type DdfStatusStageSync } from '@/lib/leadNotesSync'
 
 export async function POST(request: NextRequest) {
-  let body: { updates?: { policyNumber?: string; ghlStage?: string; submissionId?: string | null }[] }
+  let body: { updates?: { policyNumber?: string; ghlStage?: string }[] }
   try {
     body = await request.json()
   } catch {
@@ -28,12 +23,14 @@ export async function POST(request: NextRequest) {
   }
 
   // trackingId = plaintext policy number; status = ghl_stage name (looked up in pipeline_stages).
+  // submissionId is null: entries carry no DDF submission id, so the sync falls back to
+  // decrypting leads.tracking_id — a single scan handles the whole batch.
   const seen = new Set<string>()
   const updates: DdfStatusStageSync[] = (Array.isArray(body.updates) ? body.updates : [])
     .map((u) => ({
       trackingId: String(u?.policyNumber ?? '').trim(),
       status: String(u?.ghlStage ?? '').trim(),
-      submissionId: u?.submissionId ? String(u.submissionId).trim() : null,
+      submissionId: null,
     }))
     .filter((u) => {
       if (!u.trackingId || !u.status) return false
