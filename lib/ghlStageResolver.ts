@@ -93,6 +93,20 @@ const MANUAL_STAGE_SAFE_PARENT: Record<string, string> = {
 }
 
 /**
+ * Auditor determined the policy has a first-draft payment issue. Carriers often keep
+ * reporting a generic "Pending" status afterward, which auto-maps to "Pending Approval"
+ * or the generic "FDPF Pending Reason" — neither should silently undo a specific FDPF
+ * sub-reason determination. Any other stage change (Active, Chargeback, Declined, etc.)
+ * still flows through normally; see applyNonRegressiveGhlClamp.
+ */
+const FDPF_FAMILY_STAGES = new Set([
+  'FDPF Pending Reason',
+  'FDPF Insufficient Funds',
+  'FDPF Unauthorized Draft',
+  'FDPF Incorrect Banking Info',
+])
+
+/**
  * Existing stages auto-mapping must never overwrite — auditor-only.
  * FDPF / Pending Lapse sub-reasons and Active milestones are NOT in this set:
  * within-family regression is blocked by applyNonRegressiveGhlClamp + stageProgressRank,
@@ -487,6 +501,34 @@ function stageProgressRank(stage: string | null): { family: string; rank: number
  * is the source of truth. Auditor-only stages are short-circuited earlier in resolveGhlStageRaw
  * via EXISTING_STAGES_NEVER_AUTO_OVERWRITE.
  */
+/**
+ * True when moving from `existing` to `candidate` would undo an auditor-only
+ * determination: an FDPF stage (generic or specific sub-reason) collapsing back
+ * to Pending Approval / generic FDPF Pending Reason, or Pending Manual Action
+ * reverting to Pending Approval.
+ *
+ * Carrier-agnostic and independent of *how* `candidate` was produced (auto-mapping
+ * from any carrier's status text, or a manual edit) — callers that persist a GHL
+ * stage next to a known prior value should run this as a final save-time check,
+ * not just rely on resolveGhlStage() having been in the computation path.
+ */
+export function isBlockedGhlStageRegression(
+  existing: string | null,
+  candidate: string | null
+): boolean {
+  const ex = normalizeStageLabel(existing)
+  const ca = normalizeStageLabel(candidate)
+  if (!ex || !ca) return false
+
+  if (FDPF_FAMILY_STAGES.has(ex) && (ca === 'Pending Approval' || ca === 'FDPF Pending Reason')) {
+    return true
+  }
+  if (ex === 'Pending Manual Action' && ca === 'Pending Approval') {
+    return true
+  }
+  return false
+}
+
 function applyNonRegressiveGhlClamp(
   existing: string | null,
   candidate: string | null,
@@ -495,6 +537,10 @@ function applyNonRegressiveGhlClamp(
   existing = normalizeStageLabel(existing)
   candidate = normalizeStageLabel(candidate)
   if (candidate == null) return existing ?? null
+
+  if (isBlockedGhlStageRegression(existing, candidate)) {
+    return existing
+  }
 
   const ex = ghlStageOrderIndex(existing)
   const ca = ghlStageOrderIndex(candidate)
