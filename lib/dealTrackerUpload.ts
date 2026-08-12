@@ -29,6 +29,7 @@ import { processSentinelFilesForDealTracker, processSentinelCommissionsForDealTr
 import { processAflacFilesForDealTracker, processAflacCommissionsForDealTracker } from './dealTracker.aflac'
 import { processAhlFilesForDealTracker, processAhlCommissionsForDealTracker } from './dealTracker.ahl'
 import { supabase } from './supabaseClient'
+import { fetchExceptionIndex, partitionByException } from './policyExceptions'
 
 /** In-memory commission/policy rows + target table + file id when DB insert is deferred until Commission Report Save. */
 export interface PendingRowsPayload {
@@ -314,7 +315,7 @@ async function syncLeadStagesForSavedEntries(entries: DealTrackerPreviewEntry[])
 export async function saveDealTrackerAfterConfirmation(
   entries: DealTrackerPreviewEntry[],
   options?: SaveDealTrackerAfterConfirmationOptions
-): Promise<{ success: boolean; inserted: number; updated: number; failed: number; error?: string }> {
+): Promise<{ success: boolean; inserted: number; updated: number; failed: number; skipped?: number; error?: string }> {
   const onProgress = options?.onProgress
   try {
     const badGhl = entries.find((e) => isInvalidGhlStageForSave(e.ghl_stage))
@@ -331,10 +332,17 @@ export async function saveDealTrackerAfterConfirmation(
 
     const triggerFileId = options?.triggerFileId ?? options?.pendingRows?.fileId ?? null
 
+    // Read the freeze list once and reuse it: saveDealTrackerEntries enforces it
+    // for deal_tracker, and we apply it again below so commission_tracker and the
+    // CRM lead sync skip the same policies. Throws if the list can't be read.
+    const exceptionIndex = await fetchExceptionIndex()
+    const unfrozen = <T extends { policy_number: string }>(rows: T[]): T[] =>
+      partitionByException(exceptionIndex, rows, (r) => r.policy_number).kept
+
     if (options?.dealTrackerOnly) {
       try {
-        const result = await saveDealTrackerEntries(entries, { onProgress, triggerFileId })
-        await syncLeadStagesForSavedEntries(entries)
+        const result = await saveDealTrackerEntries(entries, { onProgress, triggerFileId, exceptionIndex })
+        await syncLeadStagesForSavedEntries(unfrozen(entries))
         return {
           success: true,
           ...result,
@@ -424,14 +432,17 @@ export async function saveDealTrackerAfterConfirmation(
         })
       }
     }
-    const result = await saveDealTrackerEntries(entriesToSave, { onProgress, triggerFileId })
+    const result = await saveDealTrackerEntries(entriesToSave, { onProgress, triggerFileId, exceptionIndex })
     const pendingTarget = options?.pendingRows?.targetTable ?? ''
     const isCommissionPendingFlow = pendingTarget.endsWith('_commissions')
+    // Frozen policies are excluded from the downstream syncs too, so an upload
+    // leaves commission_tracker and the CRM lead untouched for them.
+    const syncableEntries = unfrozen(entriesToSave)
     // Commission uploads: commission_tracker must be written only by Commission Report Save.
     if (!isCommissionPendingFlow) {
-      await syncEditedEntriesToCommissionTracker(entriesToSave, onProgress)
+      await syncEditedEntriesToCommissionTracker(syncableEntries, onProgress)
     }
-    await syncLeadStagesForSavedEntries(entriesToSave)
+    await syncLeadStagesForSavedEntries(syncableEntries)
     return {
       success: true,
       ...result,
