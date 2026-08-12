@@ -116,12 +116,17 @@ export async function processSentinelFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildSentinelInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   console.log('[Deal Tracker] Sentinel: policies needing DDF:', policiesNeedingDdf.length, '| unique insured names:', uniqueNames.length, '| sample:', uniqueNames.slice(0, 5))
 
   const dailyDealFlowMap =
     uniqueNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -386,8 +391,13 @@ export async function processSentinelCommissionsForDealTracker(
     const policyNamesForDDF = Array.from(policiesMap.values())
       .map((p: any) => p.client_name)
       .filter((name: string) => name && name.trim().length > 0)
+    const policyNumberByNameComm = new Map<string, string>()
+    policiesMap.forEach((p: any, pn: string) => {
+      const normalized = normalizeNameForSearch((p.client_name || '').trim())
+      if (normalized && pn) policyNumberByNameComm.set(normalized, pn)
+    })
     if (policyNamesForDDF.length > 0) {
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, carrierName)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, carrierName, undefined, policyNumberByNameComm)
     }
   }
 

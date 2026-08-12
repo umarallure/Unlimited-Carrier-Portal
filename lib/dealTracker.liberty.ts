@@ -116,12 +116,17 @@ export async function processLibertyFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildLibertyInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   console.log('[Deal Tracker] Liberty: policies needing DDF:', policiesNeedingDdf.length, '| unique insured names:', uniqueNames.length, '| sample:', uniqueNames.slice(0, 5))
 
   const dailyDealFlowMap =
     uniqueNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }

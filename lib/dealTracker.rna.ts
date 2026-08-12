@@ -180,10 +180,15 @@ export async function processRNAFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildRnaInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -466,9 +471,15 @@ let dailyDealFlowMap = new Map<
         return buildRnaInsuredName(policy)
       })
       .filter((n: string) => n.length > 0)
-
+    const policyNumberByNameComm = new Map<string, string>()
+    allPolicyNumbersNeedingDDF.forEach(pn => {
+      const policy = policiesMap.get(pn)
+      const name = policy ? buildRnaInsuredName(policy) : (commissionMap.get(pn)?.insured_name ?? '').trim()
+      const normalized = normalizeNameForSearch(name)
+      if (normalized && pn) policyNumberByNameComm.set(normalized, pn)
+    })
     if (policyNamesForDDF.length > 0) {
-        dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier)
+        dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier, undefined, policyNumberByNameComm)
     } else {
       const namesFromComm = allPolicyNumbersNeedingDDF
         .map(pn => {
@@ -477,7 +488,7 @@ let dailyDealFlowMap = new Map<
         })
         .filter((n: string) => n.length > 0)
       if (namesFromComm.length > 0) {
-        dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(namesFromComm, ddfCarrier)
+        dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(namesFromComm, ddfCarrier, undefined, policyNumberByNameComm)
       }
     }
   }

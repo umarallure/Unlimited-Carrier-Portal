@@ -20,6 +20,8 @@ import {
   policyNeedsDdfLookup,
   calculateCcValue,
   resolveCommissionPreviewDealValue,
+  policyFinancialsFromAetnaStylePolicy,
+  resolvePolicyFinancialsForDealTracker,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -108,9 +110,14 @@ export async function processAflacFilesForDealTracker(
   const uniqueInsuredNames = Array.from(
     new Set(policiesNeedingDdf.map(p => (p.insuredname || '').trim()).filter(n => n.length > 0))
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch((p.insuredname || '').trim())
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, carrierName)
+      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, carrierName, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -209,6 +216,7 @@ export async function processAflacFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromAetnaStylePolicy(policy),
       charge_back: chargeBackForEntry,
       notes: existing?.notes ?? null,
       status: statusForEntry,
@@ -379,8 +387,13 @@ export async function processAflacCommissionsForDealTracker(
     const policyNamesForDDF = Array.from(policiesMap.values())
       .map((p: any) => p.insuredname)
       .filter((name: string) => name && name.trim().length > 0)
+    const policyNumberByNameComm = new Map<string, string>()
+    policiesMap.forEach((p: any, pn: string) => {
+      const normalized = normalizeNameForSearch((p.insuredname || '').trim())
+      if (normalized && pn) policyNumberByNameComm.set(normalized, pn)
+    })
     if (policyNamesForDDF.length > 0) {
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, carrierName)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, carrierName, undefined, policyNumberByNameComm)
     }
   }
 
@@ -439,12 +452,14 @@ export async function processAflacCommissionsForDealTracker(
         existingGhlStage: existing.ghl_stage ?? null,
         carrierCode,
       })
+      const policyFinancials = resolvePolicyFinancialsForDealTracker(policy, existing, 'aetna')
       const entry: DealTrackerPreviewEntry = {
         ...existing,
         ghl_stage: mappedGhlStage ?? existing.ghl_stage,
         carrier_status: carrierStatusForGhl,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         policy_status: policyStatusResolved,
         status: derivedStatus,
@@ -461,6 +476,7 @@ export async function processAflacCommissionsForDealTracker(
         ...existing,
         deal_value: dealValue,
         cc_value: ccValue,
+        ...policyFinancials,
         charge_back: effectiveChargeBack,
         status: derivedStatus,
         sales_agent: commission.writingagentname || existing.sales_agent,
@@ -521,6 +537,7 @@ export async function processAflacCommissionsForDealTracker(
           carrier_id: carrier.id,
           deal_value: dealValue,
           cc_value: ccValue,
+          ...policyFinancialsFromAetnaStylePolicy(policy),
           charge_back: effectiveChargeBack,
           notes: null,
           status: derivedStatus,

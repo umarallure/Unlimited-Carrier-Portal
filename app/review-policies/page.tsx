@@ -11,7 +11,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Check, ChevronDown, ClipboardCheck, Loader2, Pencil, RefreshCw, Search, X } from 'lucide-react'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Badge } from '@/components/ui/badge'
+import { Check, ChevronDown, ClipboardCheck, Loader2, RefreshCw, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   adminCardHeaderBar,
@@ -28,7 +37,7 @@ import {
   adminTdStrong,
   adminThPlain,
 } from '@/lib/adminFieldClasses'
-import { formatStoredDateForDisplay } from '@/lib/calendarDate'
+import { extractYmdFromDbValue, formatStoredDateForDisplay } from '@/lib/calendarDate'
 
 type ReviewDealRow = {
   id: string
@@ -90,6 +99,13 @@ const REVIEW_GHL_STAGES = [
   'Pending Manual Action',
 ] as const
 const REVIEW_STAGE_PAGE_SIZE = 1000
+const REVIEW_NOTES_IN_CHUNK = 200
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
 
 const FDPF_REASON_OPTIONS = [
   'FDPF Unauthorized Draft',
@@ -117,21 +133,50 @@ function splitMultiFilter(value: string): string[] {
     .filter(Boolean)
 }
 
+function compareEffectiveDates(a: string | null, b: string | null, direction: 'asc' | 'desc'): number {
+  const aYmd = extractYmdFromDbValue(a)
+  const bYmd = extractYmdFromDbValue(b)
+  if (!aYmd && !bYmd) return 0
+  if (!aYmd) return 1
+  if (!bYmd) return -1
+  const cmp = aYmd.localeCompare(bYmd)
+  return direction === 'asc' ? cmp : -cmp
+}
+
+function appendReviewNoteToDealTrackerNotes(
+  existingNotes: string | null,
+  note: string,
+  reviewer: string | null
+): string {
+  const stamp = formatStoredDateForDisplay(new Date().toISOString())
+  const reviewerLabel = reviewer?.trim() || 'Unknown reviewer'
+  const entry = `[Review ${stamp}] ${reviewerLabel}: ${note}`
+  const prior = existingNotes?.trim()
+  return prior ? `${prior}\n\n${entry}` : entry
+}
+
+type PersistReviewResult = {
+  leadNoteSynced: boolean
+  leadNoteMessage?: string
+}
+
 export default function ReviewPoliciesPage() {
   const [rows, setRows] = useState<ReviewDealRow[]>([])
   const [notesByPolicyId, setNotesByPolicyId] = useState<Record<string, ReviewNoteRow[]>>({})
   const [loading, setLoading] = useState(true)
   const [savingId, setSavingId] = useState<string | null>(null)
-  const [draftNoteById, setDraftNoteById] = useState<Record<string, string>>({})
-  const [nextStageById, setNextStageById] = useState<Record<string, string>>({})
+  const [reviewDialogRow, setReviewDialogRow] = useState<ReviewDealRow | null>(null)
+  const [dialogNote, setDialogNote] = useState('')
+  const [dialogNextStage, setDialogNextStage] = useState('')
+  const [effectiveDateSort, setEffectiveDateSort] = useState<'asc' | 'desc'>('desc')
   const [reviewerName, setReviewerName] = useState('')
   const [selectedStages, setSelectedStages] = useState<string[]>([...REVIEW_GHL_STAGES])
   const [notesJoinKey, setNotesJoinKey] = useState<'policy_id' | 'deal_tracker_id'>('policy_id')
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
-  const [editingById, setEditingById] = useState<Record<string, boolean>>({})
   const [importing, setImporting] = useState(false)
   const importInputRef = useRef<HTMLInputElement>(null)
+  const fetchSeqRef = useRef(0)
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
   const [carrierFilter, setCarrierFilter] = useState<string>('all')
@@ -219,6 +264,22 @@ export default function ReviewPoliciesPage() {
     })
   }, [rows, debouncedSearchTerm, carrierFilter, agentFilter])
 
+  const sortedRows = useMemo(() => {
+    const copy = [...filteredRows]
+    copy.sort((a, b) => compareEffectiveDates(a.effective_date, b.effective_date, effectiveDateSort))
+    return copy
+  }, [filteredRows, effectiveDateSort])
+
+  const reviewStats = useMemo(() => {
+    let reviewed = 0
+    let pending = 0
+    for (const row of filteredRows) {
+      if ((notesByPolicyId[row.id] || []).length > 0) reviewed++
+      else pending++
+    }
+    return { reviewed, pending }
+  }, [filteredRows, notesByPolicyId])
+
   const activeFilterCount =
     (debouncedSearchTerm.trim() ? 1 : 0) +
     (selectedCarriers.length ? 1 : 0) +
@@ -230,16 +291,20 @@ export default function ReviewPoliciesPage() {
     setAgentFilter('all')
   }
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize))
-  const pageStart = filteredRows.length === 0 ? 0 : (currentPage - 1) * pageSize
-  const pageEndExclusive = Math.min(pageStart + pageSize, filteredRows.length)
-  const paginatedRows = filteredRows.slice(pageStart, pageEndExclusive)
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize))
+  const pageStart = sortedRows.length === 0 ? 0 : (currentPage - 1) * pageSize
+  const pageEndExclusive = Math.min(pageStart + pageSize, sortedRows.length)
+  const paginatedRows = sortedRows.slice(pageStart, pageEndExclusive)
   const selectedStagesKey = selectedStages.join('|')
 
   const fetchRows = useCallback(async () => {
+    const fetchSeq = ++fetchSeqRef.current
+    const isStale = () => fetchSeq !== fetchSeqRef.current
+
     setLoading(true)
     try {
       if (selectedStages.length === 0) {
+        if (isStale()) return
         setRows([])
         setNotesByPolicyId({})
         return
@@ -255,11 +320,11 @@ export default function ReviewPoliciesPage() {
             'id, name, policy_number, carrier, ghl_stage, policy_status, deal_creation_date, effective_date, notes, updated_at, last_updated, sales_agent, writing_number, call_center, policy_type, phone_number'
           )
           .in('ghl_stage', selectedStages)
-          .order('updated_at', { ascending: false })
+          .order('effective_date', { ascending: false, nullsFirst: false })
           .order('id', { ascending: false })
           .range(from, to)
 
-        if (error) throw error
+        if (error) throw new Error(extractErrorMessage(error, 'Failed to load policies for review.'))
         const chunk = (data || []) as ReviewDealRow[]
         if (chunk.length === 0) break
         allRows.push(...chunk.filter((r) => Boolean(r.id)))
@@ -274,6 +339,7 @@ export default function ReviewPoliciesPage() {
         seen.add(r.id)
         return true
       })
+      if (isStale()) return
       setRows(reviewRows)
 
       if (reviewRows.length === 0) {
@@ -282,34 +348,61 @@ export default function ReviewPoliciesPage() {
       }
 
       const dealIds = reviewRows.map((r) => r.id)
+      const idChunks = chunkArray(dealIds, REVIEW_NOTES_IN_CHUNK)
 
       let fetchedNotes: ReviewNoteRow[] = []
       let joinKey: 'policy_id' | 'deal_tracker_id' = 'policy_id'
-      const policyAttempt = await supabase
-        .from('deal_tracker_review_notes')
-        .select('*')
-        .in('policy_id', dealIds)
-        .order('created_at', { ascending: false })
+      let notesSchemaError: string | null = null
 
-      if (policyAttempt.error) {
-        const legacyAttempt = await supabase
+      const fetchNotesChunk = async (
+        column: 'policy_id' | 'deal_tracker_id',
+        ids: string[]
+      ) => {
+        const { data, error } = await supabase
           .from('deal_tracker_review_notes')
           .select('*')
-          .in('deal_tracker_id', dealIds)
+          .in(column, ids)
           .order('created_at', { ascending: false })
-
-        if (legacyAttempt.error) {
-          // Keep page usable even with partial/legacy schemas; avoid noisy banner.
-          console.warn('Review notes table schema mismatch:', legacyAttempt.error.message)
-          setNotesByPolicyId({})
-          return
+        return {
+          error,
+          notes: ((data || []) as Record<string, unknown>[]).map(normalizeRawNote),
         }
-        fetchedNotes = ((legacyAttempt.data || []) as Record<string, unknown>[]).map(normalizeRawNote)
-        joinKey = 'deal_tracker_id'
-      } else {
-        fetchedNotes = ((policyAttempt.data || []) as Record<string, unknown>[]).map(normalizeRawNote)
-        joinKey = 'policy_id'
       }
+
+      if (idChunks.length > 0) {
+        const firstAttempt = await fetchNotesChunk('policy_id', idChunks[0])
+        if (firstAttempt.error) {
+          const legacyAttempt = await fetchNotesChunk('deal_tracker_id', idChunks[0])
+          if (legacyAttempt.error) {
+            notesSchemaError = legacyAttempt.error.message
+          } else {
+            joinKey = 'deal_tracker_id'
+            fetchedNotes.push(...legacyAttempt.notes)
+          }
+        } else {
+          fetchedNotes.push(...firstAttempt.notes)
+        }
+
+        if (!notesSchemaError) {
+          for (let i = 1; i < idChunks.length; i++) {
+            const attempt = await fetchNotesChunk(joinKey, idChunks[i])
+            if (attempt.error) {
+              notesSchemaError = attempt.error.message
+              break
+            }
+            fetchedNotes.push(...attempt.notes)
+          }
+        }
+      }
+
+      if (isStale()) return
+
+      if (notesSchemaError) {
+        console.warn('Review notes table schema mismatch:', notesSchemaError)
+        setNotesByPolicyId({})
+        return
+      }
+
       setNotesJoinKey(joinKey)
 
       const grouped: Record<string, ReviewNoteRow[]> = {}
@@ -324,10 +417,10 @@ export default function ReviewPoliciesPage() {
       }
       setNotesByPolicyId(grouped)
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to load policies for review.'
-      alert(message)
+      if (isStale()) return
+      alert(extractErrorMessage(err, 'Failed to load policies for review.'))
     } finally {
-      setLoading(false)
+      if (!isStale()) setLoading(false)
     }
   }, [selectedStages])
 
@@ -337,7 +430,7 @@ export default function ReviewPoliciesPage() {
 
   useEffect(() => {
     setCurrentPage(1)
-  }, [selectedStagesKey, pageSize, debouncedSearchTerm, carrierFilter, agentFilter])
+  }, [selectedStagesKey, pageSize, debouncedSearchTerm, carrierFilter, agentFilter, effectiveDateSort])
 
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages)
@@ -349,24 +442,36 @@ export default function ReviewPoliciesPage() {
     )
   }
 
-  const persistReview = async (row: ReviewDealRow, noteRaw: string, nextStageRaw: string) => {
+  const persistReview = async (
+    row: ReviewDealRow,
+    noteRaw: string,
+    nextStageRaw: string
+  ): Promise<PersistReviewResult> => {
     const note = String(noteRaw || '').trim()
     const nextStage = String(nextStageRaw || '').trim()
     if (!note && !nextStage) {
       throw new Error('Please add a note or choose a stage before saving.')
     }
 
+    const result: PersistReviewResult = { leadNoteSynced: true }
+
     try {
+      const now = new Date().toISOString()
+      const reviewer = reviewerName.trim() || null
+      let needsDealTrackerUpdate = false
+      const dealTrackerUpdate: {
+        ghl_stage?: string
+        notes?: string
+        updated_at: string
+        last_updated: string
+      } = {
+        updated_at: now,
+        last_updated: now,
+      }
+
       if (nextStage && nextStage !== row.ghl_stage) {
-        const { error: stageError } = await supabase
-          .from('deal_tracker')
-          .update({
-            ghl_stage: nextStage,
-            updated_at: new Date().toISOString(),
-            last_updated: new Date().toISOString(),
-          })
-          .eq('id', row.id)
-        if (stageError) throw new Error(`Stage update failed: ${stageError.message}`)
+        dealTrackerUpdate.ghl_stage = nextStage
+        needsDealTrackerUpdate = true
       }
 
       if (note) {
@@ -377,8 +482,8 @@ export default function ReviewPoliciesPage() {
                 previous_ghl_stage: row.ghl_stage,
                 next_ghl_stage: nextStage || null,
                 note,
-                reviewer_name: reviewerName.trim() || null,
-                created_at: new Date().toISOString(),
+                reviewer_name: reviewer,
+                created_at: now,
               }
             : {
                 deal_tracker_id: row.id,
@@ -386,46 +491,116 @@ export default function ReviewPoliciesPage() {
                 previous_ghl_stage: row.ghl_stage,
                 next_ghl_stage: nextStage || null,
                 note,
-                reviewer_name: reviewerName.trim() || null,
-                created_at: new Date().toISOString(),
+                reviewer_name: reviewer,
+                created_at: now,
               }
 
-        let { error: noteError } = await supabase.from('deal_tracker_review_notes').insert(notePayload)
+        let reviewNoteId: string | null = null
+        let noteError: { message: string } | null = null
 
-        // Fallback for tables that only have core columns (no stage/reviewer metadata yet).
-        if (noteError) {
+        const initialInsert = await supabase
+          .from('deal_tracker_review_notes')
+          .insert(notePayload)
+          .select('id')
+          .single()
+
+        if (initialInsert.error) {
           const minimalPayload =
             notesJoinKey === 'policy_id'
               ? {
                   policy_id: row.id,
                   note,
-                  created_at: new Date().toISOString(),
+                  created_at: now,
                 }
               : {
                   deal_tracker_id: row.id,
                   policy_number: row.policy_number,
                   note,
-                  created_at: new Date().toISOString(),
+                  created_at: now,
                 }
-          const retry = await supabase.from('deal_tracker_review_notes').insert(minimalPayload)
+          const retry = await supabase
+            .from('deal_tracker_review_notes')
+            .insert(minimalPayload)
+            .select('id')
+            .single()
           noteError = retry.error
+          reviewNoteId = retry.data?.id != null ? String(retry.data.id) : null
+        } else {
+          noteError = null
+          reviewNoteId = initialInsert.data?.id != null ? String(initialInsert.data.id) : null
         }
+
         if (noteError) throw new Error(`Note save failed: ${noteError.message}`)
+        if (!reviewNoteId) throw new Error('Note save failed: missing review note id.')
+
+        const syncRes = await fetch('/api/review-policies/sync-lead-note', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            policyNumber: row.policy_number,
+            note,
+            dealTrackerReviewNoteId: reviewNoteId,
+          }),
+        })
+
+        const syncPayload = (await syncRes.json().catch(() => null)) as
+          | { synced?: boolean; message?: string }
+          | null
+
+        if (!syncRes.ok) {
+          throw new Error(
+            syncPayload?.message || 'Note saved to Deal Tracker, but lead note sync failed.'
+          )
+        }
+
+        if (!syncPayload?.synced) {
+          result.leadNoteSynced = false
+          result.leadNoteMessage =
+            syncPayload?.message ||
+            'Note saved to Deal Tracker, but no matching lead was found for this policy number. Attach policy in CRM to sync lead notes.'
+        }
+
+        dealTrackerUpdate.notes = appendReviewNoteToDealTrackerNotes(row.notes, note, reviewer)
+        needsDealTrackerUpdate = true
       }
+
+      if (needsDealTrackerUpdate) {
+        const { error: dealTrackerError } = await supabase
+          .from('deal_tracker')
+          .update(dealTrackerUpdate)
+          .eq('id', row.id)
+        if (dealTrackerError) {
+          throw new Error(`Deal tracker update failed: ${dealTrackerError.message}`)
+        }
+      }
+
+      return result
     } catch (err) {
       throw err
     }
   }
 
+  const openReviewDialog = (row: ReviewDealRow) => {
+    setReviewDialogRow(row)
+    setDialogNote('')
+    setDialogNextStage('')
+  }
+
+  const closeReviewDialog = () => {
+    setReviewDialogRow(null)
+    setDialogNote('')
+    setDialogNextStage('')
+  }
+
   const saveReview = async (row: ReviewDealRow) => {
     setSavingId(row.id)
     try {
-      await persistReview(row, draftNoteById[row.id] || '', nextStageById[row.id] || '')
-
-      setDraftNoteById((prev) => ({ ...prev, [row.id]: '' }))
-      setNextStageById((prev) => ({ ...prev, [row.id]: '' }))
-      setEditingById((prev) => ({ ...prev, [row.id]: false }))
+      const result = await persistReview(row, dialogNote, dialogNextStage)
+      closeReviewDialog()
       await fetchRows()
+      if (dialogNote.trim() && !result.leadNoteSynced && result.leadNoteMessage) {
+        alert(result.leadNoteMessage)
+      }
     } catch (err: unknown) {
       const message = extractErrorMessage(err, 'Failed to save review.')
       alert(message)
@@ -494,6 +669,7 @@ export default function ReviewPoliciesPage() {
 
       const rowMap = new Map(rows.map((r) => [r.id, r]))
       let saved = 0
+      let attachPolicyWarnings = 0
       for (const raw of rowsIn) {
         const id = String(raw['Row ID'] ?? '').trim()
         if (!id) continue
@@ -505,12 +681,17 @@ export default function ReviewPoliciesPage() {
 
         const prevReviewer = reviewerName
         if (reviewer && reviewer !== reviewerName) setReviewerName(reviewer)
-        await persistReview(row, note, nextStage)
+        const result = await persistReview(row, note, nextStage)
+        if (note && !result.leadNoteSynced) attachPolicyWarnings++
         if (reviewer && reviewer !== prevReviewer) setReviewerName(prevReviewer)
         saved++
       }
       await fetchRows()
-      alert(`Imported and saved ${saved} row(s).`)
+      const importMessage =
+        attachPolicyWarnings > 0
+          ? `Imported and saved ${saved} row(s). ${attachPolicyWarnings} note(s) could not sync to CRM — attach policy for those policies.`
+          : `Imported and saved ${saved} row(s).`
+      alert(importMessage)
     } catch (err: unknown) {
       alert(extractErrorMessage(err, 'Failed to import file.'))
     } finally {
@@ -800,11 +981,28 @@ export default function ReviewPoliciesPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+            >
+              Reviewed: {reviewStats.reviewed}
+            </Badge>
+            <Badge
+              variant="outline"
+              className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+            >
+              Pending: {reviewStats.pending}
+            </Badge>
+            <span className="text-xs text-muted-foreground">
+              Sorted by effective date ({effectiveDateSort === 'desc' ? 'newest first' : 'oldest first'})
+            </span>
+          </div>
           <div className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
             <span>
-              Showing {filteredRows.length === 0 ? 0 : pageStart + 1}-{pageEndExclusive} of{' '}
-              {filteredRows.length} policies
-              {filteredRows.length !== rows.length ? ` (filtered from ${rows.length})` : ''}
+              Showing {sortedRows.length === 0 ? 0 : pageStart + 1}-{pageEndExclusive} of{' '}
+              {sortedRows.length} policies
+              {sortedRows.length !== rows.length ? ` (filtered from ${rows.length})` : ''}
             </span>
             <div className="flex items-center gap-2">
               <span>Rows per page:</span>
@@ -826,29 +1024,40 @@ export default function ReviewPoliciesPage() {
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border bg-muted/30 hover:bg-transparent odd:bg-transparent even:bg-transparent dark:border-slate-800 dark:bg-slate-900/40">
-                  <TableHead className={cn(adminThPlain, 'w-[64px] text-center')}>Edit</TableHead>
+                  <TableHead className={cn(adminThPlain, 'w-[110px]')}>Status</TableHead>
                   <TableHead className={cn(adminThPlain, 'min-w-[180px]')}>Name</TableHead>
                   <TableHead className={adminThPlain}>Policy #</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[150px]')}>Carrier</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[160px]')}>Agent</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[150px]')}>Call Center</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[120px]')}>Effective</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[220px]')}>Current GHL Stage</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[190px]')}>Manual Move</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[260px]')}>Review Note</TableHead>
-                  <TableHead className={cn(adminThPlain, 'min-w-[280px]')}>Review Notes (All)</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[140px]')}>Carrier</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[140px]')}>Agent</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[130px]')}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEffectiveDateSort((prev) => (prev === 'desc' ? 'asc' : 'desc'))
+                      }
+                      className="inline-flex items-center gap-1 font-medium text-foreground transition-colors hover:text-orange-400"
+                    >
+                      Effective Date
+                      <span className="text-[10px] text-muted-foreground">
+                        {effectiveDateSort === 'desc' ? '↓' : '↑'}
+                      </span>
+                    </button>
+                  </TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[200px]')}>GHL Stage</TableHead>
+                  <TableHead className={cn(adminThPlain, 'min-w-[160px]')}>Last Review</TableHead>
+                  <TableHead className={cn(adminThPlain, 'w-[100px] text-right')}>Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={11} className="py-8 text-center">
+                    <TableCell colSpan={9} className="py-8 text-center">
                       <Loader2 className="mx-auto h-8 w-8 animate-spin text-orange-400" />
                     </TableCell>
                   </TableRow>
-                ) : filteredRows.length === 0 ? (
+                ) : sortedRows.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={11} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
                       {rows.length === 0
                         ? 'No policies currently in review scope.'
                         : 'No policies match the current search and filters.'}
@@ -856,144 +1065,75 @@ export default function ReviewPoliciesPage() {
                   </TableRow>
                 ) : (
                   paginatedRows.map((row) => {
-                    const isEditing = !!editingById[row.id]
-                    const actionOptions = stageActionOptions(row.ghl_stage)
                     const noteList = notesByPolicyId[row.id] || []
+                    const isReviewed = noteList.length > 0
+                    const latestNote = noteList[0]
                     return (
-                      <TableRow key={row.id} className={adminTableRowInteractive}>
-                        <TableCell className="w-[64px] px-2 align-middle">
-                          {!isEditing ? (
-                            <button
-                              type="button"
-                              title="Edit review"
-                              aria-label="Edit review"
-                              onClick={() => setEditingById((prev) => ({ ...prev, [row.id]: true }))}
-                              className="group inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-sm transition-all hover:-translate-y-0.5 hover:border-orange-500/50 hover:bg-orange-500/10 hover:text-orange-400 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/40"
-                            >
-                              <Pencil className="h-3.5 w-3.5 transition-transform group-hover:scale-110" />
-                            </button>
-                          ) : (
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                title="Save review"
-                                aria-label="Save review"
-                                onClick={() => saveReview(row)}
-                                disabled={savingId === row.id}
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white shadow-sm transition-all hover:bg-blue-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                              >
-                                {savingId === row.id ? (
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                ) : (
-                                  <Check className="h-4 w-4" />
-                                )}
-                              </button>
-                              <button
-                                type="button"
-                                title="Cancel"
-                                aria-label="Cancel edit"
-                                onClick={() => {
-                                  setEditingById((prev) => ({ ...prev, [row.id]: false }))
-                                  setDraftNoteById((prev) => ({ ...prev, [row.id]: '' }))
-                                  setNextStageById((prev) => ({ ...prev, [row.id]: '' }))
-                                }}
-                                disabled={savingId === row.id}
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-sm transition-all hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/30"
-                              >
-                                <X className="h-4 w-4" />
-                              </button>
-                            </div>
-                          )}
+                      <TableRow
+                        key={row.id}
+                        className={cn(adminTableRowInteractive, 'cursor-pointer')}
+                        onClick={() => openReviewDialog(row)}
+                      >
+                        <TableCell className={adminTdMuted}>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              'whitespace-nowrap',
+                              isReviewed
+                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                                : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                            )}
+                          >
+                            {isReviewed ? 'Reviewed' : 'Pending'}
+                          </Badge>
                         </TableCell>
                         <TableCell className={cn(adminTdStrong, 'min-w-[180px]')}>{row.name || '-'}</TableCell>
                         <TableCell className={cn(adminTdMuted, 'font-mono text-sm')}>{row.policy_number}</TableCell>
                         <TableCell className={adminTdMuted}>
-                          <span className="block max-w-[150px] truncate" title={row.carrier || '-'}>
+                          <span className="block max-w-[140px] truncate" title={row.carrier || '-'}>
                             {row.carrier || '-'}
                           </span>
                         </TableCell>
                         <TableCell className={adminTdMuted}>
-                          <span className="block max-w-[160px] truncate" title={row.sales_agent || '-'}>
+                          <span className="block max-w-[140px] truncate" title={row.sales_agent || '-'}>
                             {row.sales_agent || '-'}
                           </span>
                         </TableCell>
-                        <TableCell className={adminTdMuted}>
-                          <span className="block max-w-[150px] truncate" title={row.call_center || '-'}>
-                            {row.call_center || '-'}
-                          </span>
-                        </TableCell>
-                        <TableCell className={cn(adminTdMuted, 'whitespace-nowrap text-xs')}>
+                        <TableCell className={cn(adminTdMuted, 'whitespace-nowrap text-xs font-medium')}>
                           {row.effective_date ? formatStoredDateForDisplay(row.effective_date) : '-'}
                         </TableCell>
-                        <TableCell className={adminTdMuted}>{row.ghl_stage || '-'}</TableCell>
                         <TableCell className={adminTdMuted}>
-                          {actionOptions.length > 0 ? (
-                            <Select
-                              value={nextStageById[row.id] || '__none__'}
-                              onValueChange={(v) =>
-                                setNextStageById((prev) => ({ ...prev, [row.id]: v === '__none__' ? '' : v }))
-                              }
-                              disabled={!isEditing}
-                            >
-                              <SelectTrigger className={cn('h-9 w-[220px]', adminSelectTrigger)}>
-                                <SelectValue placeholder="Keep current stage" />
-                              </SelectTrigger>
-                              <SelectContent className={adminSelectContent}>
-                                <SelectItem value="__none__" className={adminSelectItem}>
-                                  Keep current stage
-                                </SelectItem>
-                                {actionOptions.map((opt) => (
-                                  <SelectItem key={opt} value={opt} className={adminSelectItem}>
-                                    {opt}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">Notes only</span>
-                          )}
+                          <span className="block max-w-[200px] truncate" title={row.ghl_stage || '-'}>
+                            {row.ghl_stage || '-'}
+                          </span>
                         </TableCell>
                         <TableCell className={adminTdMuted}>
-                          <div className="space-y-2">
-                            <textarea
-                              value={draftNoteById[row.id] || ''}
-                              onChange={(e) =>
-                                setDraftNoteById((prev) => ({
-                                  ...prev,
-                                  [row.id]: e.target.value,
-                                }))
-                              }
-                              disabled={!isEditing}
-                              placeholder="Write review note..."
-                              className={cn(
-                                'min-h-[62px] w-full min-w-[240px] rounded-md border border-input bg-background p-2 text-sm text-foreground',
-                                'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                                !isEditing && 'cursor-not-allowed opacity-70'
-                              )}
-                            />
-                          </div>
-                        </TableCell>
-                        <TableCell className={adminTdMuted}>
-                          {noteList.length > 0 ? (
-                            <div className="max-h-40 min-w-[260px] space-y-2 overflow-y-auto pr-1 text-xs">
-                              {noteList.map((n) => (
-                                <div key={n.id} className="rounded-md border border-border p-2">
-                                  <p className="font-medium text-foreground">{n.note}</p>
-                                  <p className="mt-1 text-muted-foreground">
-                                    {n.reviewer_name ? `${n.reviewer_name} • ` : ''}
-                                    {formatStoredDateForDisplay(n.created_at)}
-                                  </p>
-                                  {(n.previous_ghl_stage || n.next_ghl_stage) && (
-                                    <p className="mt-1 text-muted-foreground">
-                                      {n.previous_ghl_stage || '-'} → {n.next_ghl_stage || '-'}
-                                    </p>
-                                  )}
-                                </div>
-                              ))}
+                          {latestNote ? (
+                            <div className="text-xs">
+                              <p className="font-medium text-foreground">
+                                {formatStoredDateForDisplay(latestNote.created_at)}
+                              </p>
+                              <p className="text-muted-foreground">
+                                {latestNote.reviewer_name || 'Unknown reviewer'}
+                              </p>
                             </div>
                           ) : (
-                            <span className="text-xs text-muted-foreground">No review yet</span>
+                            <span className="text-xs text-muted-foreground">Not reviewed yet</span>
                           )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className={adminOutlineBtn}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openReviewDialog(row)
+                            }}
+                          >
+                            Review
+                          </Button>
                         </TableCell>
                       </TableRow>
                     )
@@ -1003,7 +1143,166 @@ export default function ReviewPoliciesPage() {
             </Table>
           </div>
 
-          {filteredRows.length > 0 && (
+          <Dialog
+            open={reviewDialogRow != null}
+            onOpenChange={(open) => {
+              if (!open) closeReviewDialog()
+            }}
+          >
+            <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto sm:max-w-2xl">
+              {reviewDialogRow ? (
+                <>
+                  <DialogHeader>
+                    <DialogTitle className="flex flex-wrap items-center gap-2">
+                      Review Policy
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          (notesByPolicyId[reviewDialogRow.id] || []).length > 0
+                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                            : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                        )}
+                      >
+                        {(notesByPolicyId[reviewDialogRow.id] || []).length > 0 ? 'Reviewed' : 'Pending'}
+                      </Badge>
+                    </DialogTitle>
+                    <DialogDescription>
+                      Update stage and add a review note for this policy.
+                    </DialogDescription>
+                  </DialogHeader>
+
+                  <div className="grid gap-3 rounded-lg border border-border bg-muted/20 p-4 text-sm dark:border-slate-800">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <p className="text-xs text-muted-foreground">Name</p>
+                        <p className="font-medium">{reviewDialogRow.name || '-'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Policy #</p>
+                        <p className="font-mono font-medium">{reviewDialogRow.policy_number}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Carrier</p>
+                        <p>{reviewDialogRow.carrier || '-'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Agent</p>
+                        <p>{reviewDialogRow.sales_agent || '-'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Effective Date</p>
+                        <p>
+                          {reviewDialogRow.effective_date
+                            ? formatStoredDateForDisplay(reviewDialogRow.effective_date)
+                            : '-'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Call Center</p>
+                        <p>{reviewDialogRow.call_center || '-'}</p>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Current GHL Stage</p>
+                      <p className="font-medium">{reviewDialogRow.ghl_stage || '-'}</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Manual Stage Move</label>
+                      {stageActionOptions(reviewDialogRow.ghl_stage).length > 0 ? (
+                        <Select
+                          value={dialogNextStage || '__none__'}
+                          onValueChange={(v) => setDialogNextStage(v === '__none__' ? '' : v)}
+                        >
+                          <SelectTrigger className={cn('h-10 w-full', adminSelectTrigger)}>
+                            <SelectValue placeholder="Keep current stage" />
+                          </SelectTrigger>
+                          <SelectContent className={adminSelectContent}>
+                            <SelectItem value="__none__" className={adminSelectItem}>
+                              Keep current stage
+                            </SelectItem>
+                            {stageActionOptions(reviewDialogRow.ghl_stage).map((opt) => (
+                              <SelectItem key={opt} value={opt} className={adminSelectItem}>
+                                {opt}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">Notes only for this stage.</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Review Note</label>
+                      <textarea
+                        value={dialogNote}
+                        onChange={(e) => setDialogNote(e.target.value)}
+                        placeholder="Write your review note..."
+                        className={cn(
+                          'min-h-[120px] w-full rounded-md border border-input bg-background p-3 text-sm text-foreground',
+                          'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+                        )}
+                      />
+                    </div>
+
+                    {(notesByPolicyId[reviewDialogRow.id] || []).length > 0 ? (
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">Previous Reviews</p>
+                        <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-border p-2 dark:border-slate-800">
+                          {(notesByPolicyId[reviewDialogRow.id] || []).map((n) => (
+                            <div key={n.id} className="rounded-md border border-border/70 bg-muted/30 p-2 text-xs">
+                              <p className="font-medium text-foreground">{n.note}</p>
+                              <p className="mt-1 text-muted-foreground">
+                                {n.reviewer_name ? `${n.reviewer_name} • ` : ''}
+                                {formatStoredDateForDisplay(n.created_at)}
+                              </p>
+                              {(n.previous_ghl_stage || n.next_ghl_stage) && (
+                                <p className="mt-1 text-muted-foreground">
+                                  {n.previous_ghl_stage || '-'} → {n.next_ghl_stage || '-'}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <DialogFooter className="gap-2 sm:gap-0">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className={adminOutlineBtn}
+                      onClick={closeReviewDialog}
+                      disabled={savingId === reviewDialogRow.id}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      onClick={() => saveReview(reviewDialogRow)}
+                      disabled={savingId === reviewDialogRow.id}
+                      className="bg-orange-600 text-white hover:bg-orange-700"
+                    >
+                      {savingId === reviewDialogRow.id ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        'Save Review'
+                      )}
+                    </Button>
+                  </DialogFooter>
+                </>
+              ) : null}
+            </DialogContent>
+          </Dialog>
+
+          {sortedRows.length > 0 && (
             <div className={cn('flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800/80', adminPaginationBar)}>
               <div className="text-sm text-muted-foreground">
                 Page {currentPage} of {totalPages}

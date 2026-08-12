@@ -16,6 +16,8 @@ import {
   calculateCcValue,
   resolveCommissionPreviewDealValue,
   pickAgentNamePreservingExisting,
+  policyFinancialsFromMohPolicy,
+  resolvePolicyFinancialsForDealTracker,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -187,6 +189,11 @@ export async function processMohFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildMohInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   const skipCountMoh = policies.length - policiesNeedingDdf.length
   console.log('[Deal Tracker] MOH: carrier=', carrierName, '| names to DDF=', uniqueInsuredNamesMoh.length, '| skip (already have DDF)=', skipCountMoh)
@@ -196,7 +203,7 @@ export async function processMohFilesForDealTracker(
 
   const dailyDealFlowMap =
     uniqueInsuredNamesMoh.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNamesMoh, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNamesMoh, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -341,6 +348,7 @@ export async function processMohFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromMohPolicy(policy),
       charge_back: chargeBack,
       notes: (commission?.comments != null && String(commission.comments).trim() !== '') ? commission.comments : (existing?.notes ?? null),
       status: (existing && financialsUnchanged(existing, dealValue, chargeBack)) ? (existing.status ?? (derivedStatus ?? statusFromDealValue(dealValue))) : (derivedStatus ?? statusFromDealValue(dealValue)),
@@ -535,10 +543,16 @@ export async function processMohCommissionsForDealTracker(
         return buildMohInsuredName(policy)
       })
       .filter((n: string) => n.length > 0)
-
+    const policyNumberByNameComm = new Map<string, string>()
+    allPolicyNumbersNeedingDDF.forEach(pn => {
+      const policy = policiesMap.get(pn)
+      if (!policy) return
+      const normalized = normalizeNameForSearch(buildMohInsuredName(policy))
+      if (normalized && pn) policyNumberByNameComm.set(normalized, pn)
+    })
     if (policyNamesForDDF.length > 0) {
       console.log('[Deal Tracker] MOH commissions: fetching DDF for', policyNamesForDDF.length, 'names | sample:', policyNamesForDDF.slice(0, 5))
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDDF, ddfCarrier, undefined, policyNumberByNameComm)
       console.log('[Deal Tracker] MOH commissions: DDF map size:', dailyDealFlowMap.size, 'of', policyNamesForDDF.length)
     } else {
       console.log('[Deal Tracker] MOH commissions: no policy names for DDF – upload policy file first so moh_policies has rows for these policy numbers')
@@ -700,6 +714,7 @@ export async function processMohCommissionsForDealTracker(
       policyStatusResolved,
     )
 
+    const policyFinancials = resolvePolicyFinancialsForDealTracker(policy, existing, 'moh')
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       name: insuredName || null,
@@ -713,6 +728,7 @@ export async function processMohCommissionsForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancials,
       charge_back: chargeBack,
       notes: (comm.comments != null && String(comm.comments).trim() !== '') ? comm.comments : (existing?.notes ?? null),
       status: derivedStatus ?? statusFromDealValue(dealValue),

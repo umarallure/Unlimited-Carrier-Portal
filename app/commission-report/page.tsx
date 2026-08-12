@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Calendar, Loader2, Search } from 'lucide-react'
 import { Plus } from 'lucide-react'
+import { MultiSelectFilter } from '@/components/filters/MultiSelectFilter'
 import { type AgencyCarrierOption } from '@/components/DealTrackerPolicyDialog'
 import { CommissionTransactionDialog, type CommissionTransactionForm } from '@/components/CommissionTransactionDialog'
 import {
@@ -109,7 +110,11 @@ export default function CommissionReportPage() {
   const [allRows, setAllRows] = useState<CommissionRow[]>([])
   const [rawRows, setRawRows] = useState<CommissionRow[]>([])
   const [loading, setLoading] = useState(true)
-  const [carrierCode, setCarrierCode] = useState<string>('ALL')
+  const [carrierCode, setCarrierCode] = useState<string[]>([])
+  const [agentFilter, setAgentFilter] = useState<string[]>([])
+  const [agencyFilter, setAgencyFilter] = useState<string[]>([])
+  const [agencyByAcId, setAgencyByAcId] = useState<Map<string, string>>(new Map())
+  const [agencyOptions, setAgencyOptions] = useState<string[]>([])
   const [sourceFilter, setSourceFilter] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
   const [dateFrom, setDateFrom] = useState('')
@@ -252,6 +257,18 @@ export default function CommissionReportPage() {
         carrierId: row.carriers?.id || row.carrier_id || null,
       }))
       setAgencyCarrierOptions(options)
+
+      const acAgencyMap = new Map<string, string>()
+      const agencyNameSet = new Set<string>()
+      for (const row of (agencyCarrierRows || [])) {
+        const name = (row as any).agencies?.name
+        if (name) {
+          acAgencyMap.set(row.id, name)
+          agencyNameSet.add(name)
+        }
+      }
+      setAgencyByAcId(acAgencyMap)
+      setAgencyOptions(Array.from(agencyNameSet).sort())
     } catch (err) {
       console.error('Error loading commission report:', err)
       setRows([])
@@ -285,16 +302,22 @@ export default function CommissionReportPage() {
   }, [allRows])
 
   const carrierCodeOptions = useMemo(() => {
-    const codes = new Set<string>()
+    const names = new Set<string>()
     for (const r of allRows) {
-      const code =
-        (r.carrier_id && carrierCodeById.get(r.carrier_id)) ??
-        carrierCodeByName.get(r.carrier) ??
-        (r.carrier ? String(r.carrier).trim().toUpperCase() : '')
-      if (code) codes.add(String(code).toUpperCase())
+      const name = r.carrier?.trim()
+      if (name) names.add(name)
     }
-    return Array.from(codes).sort()
-  }, [allRows, carrierCodeById, carrierCodeByName])
+    return Array.from(names).sort()
+  }, [allRows])
+
+  const agentOptions = useMemo(() => {
+    const agents = new Set<string>()
+    for (const r of allRows) {
+      const a = r.sales_agent?.trim()
+      if (a) agents.add(a)
+    }
+    return Array.from(agents).sort()
+  }, [allRows])
 
   const normalizeDate = (value: any): Date | null => {
     if (!value) return null
@@ -332,14 +355,12 @@ export default function CommissionReportPage() {
       if (!dt || dt > to) return false
     }
 
-    const code = String(
-      (row.carrier_id && carrierCodeById.get(row.carrier_id)) ??
-        carrierCodeByName.get(row.carrier) ??
-        row.carrier ??
-        ''
-    ).toUpperCase()
-
-    if (carrierCode !== 'ALL' && code !== carrierCode.toUpperCase()) return false
+    if (carrierCode.length > 0 && !carrierCode.includes(row.carrier?.trim() ?? '')) return false
+    if (agentFilter.length > 0 && !agentFilter.includes(row.sales_agent?.trim() ?? '')) return false
+    if (agencyFilter.length > 0) {
+      const rowAgency = agencyByAcId.get(row.agency_carrier_id)
+      if (!rowAgency || !agencyFilter.includes(rowAgency)) return false
+    }
 
     if (sourceFilter !== 'all') {
       const set = sourcesByPolicyKey.get(policyGroupKey(row))
@@ -359,7 +380,19 @@ export default function CommissionReportPage() {
   useEffect(() => {
     setCurrentPage(1)
     setExpandedKey(null)
-  }, [carrierCode, sourceFilter, searchTerm, dateFrom, dateTo])
+  }, [carrierCode, agentFilter, agencyFilter, sourceFilter, searchTerm, dateFrom, dateTo])
+
+  const filteredStats = useMemo(() => {
+    const policyKeys = new Set(filtered.map((r) => policyGroupKey(r)))
+    let totalAdvance = 0
+    let totalChargeback = 0
+    for (const r of allRows) {
+      if (!policyKeys.has(policyGroupKey(r))) continue
+      totalAdvance += r.advance_amount ?? 0
+      totalChargeback += r.charge_back_amount ?? 0
+    }
+    return { totalAdvance, totalChargeback, net: totalAdvance + totalChargeback }
+  }, [filtered, allRows])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const startIndex = (currentPage - 1) * pageSize
@@ -417,11 +450,13 @@ export default function CommissionReportPage() {
   const filterActiveCount = useMemo(() => {
     let n = 0
     if (searchTerm.trim()) n++
-    if (carrierCode !== 'ALL') n++
+    if (carrierCode.length > 0) n++
+    if (agentFilter.length > 0) n++
+    if (agencyFilter.length > 0) n++
     if (sourceFilter !== 'all') n++
     if (dateFrom || dateTo) n++
     return n
-  }, [searchTerm, carrierCode, sourceFilter, dateFrom, dateTo])
+  }, [searchTerm, carrierCode, agentFilter, sourceFilter, dateFrom, dateTo])
 
   const activeChips = useMemo(() => {
     const items: { key: string; label: string; onRemove: () => void }[] = []
@@ -431,11 +466,23 @@ export default function CommissionReportPage() {
         label: `Search: ${searchTerm.trim()}`,
         onRemove: () => setSearchTerm(''),
       })
-    if (carrierCode !== 'ALL')
-             items.push({
+    if (carrierCode.length > 0)
+      items.push({
         key: 'car',
-        label: `Carrier: ${carrierCode}`,
-        onRemove: () => setCarrierCode('ALL'),
+        label: `Carrier: ${carrierCode.join(', ')}`,
+        onRemove: () => setCarrierCode([]),
+      })
+    if (agentFilter.length > 0)
+      items.push({
+        key: 'agent',
+        label: `Agent: ${agentFilter.join(', ')}`,
+        onRemove: () => setAgentFilter([]),
+      })
+    if (agencyFilter.length > 0)
+      items.push({
+        key: 'agency',
+        label: `Agency: ${agencyFilter.join(', ')}`,
+        onRemove: () => setAgencyFilter([]),
       })
     if (sourceFilter !== 'all')
       items.push({
@@ -453,11 +500,13 @@ export default function CommissionReportPage() {
         },
       })
     return items
-  }, [searchTerm, carrierCode, sourceFilter, dateFrom, dateTo])
+  }, [searchTerm, carrierCode, agentFilter, agencyFilter, sourceFilter, dateFrom, dateTo])
 
   const clearAllFilters = () => {
     setSearchTerm('')
-    setCarrierCode('ALL')
+    setCarrierCode([])
+    setAgentFilter([])
+    setAgencyFilter([])
     setSourceFilter('all')
     setDateFrom('')
     setDateTo('')
@@ -618,21 +667,32 @@ export default function CommissionReportPage() {
               />
             </div>
 
-            <Select value={carrierCode} onValueChange={setCarrierCode}>
-              <SelectTrigger className={cn(adminSelectTrigger, 'h-9 w-[min(100%,200px)] text-sm')}>
-                <SelectValue placeholder="Carrier" />
-              </SelectTrigger>
-              <SelectContent className={cn(adminSelectContent, 'max-h-72')}>
-                <SelectItem value="ALL" className={adminSelectItem}>
-                  All carriers
-                </SelectItem>
-                {carrierCodeOptions.map((c) => (
-                  <SelectItem key={c} value={c} className={adminSelectItem}>
-                    {c}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <MultiSelectFilter
+              label="Carrier"
+              options={carrierCodeOptions}
+              selected={carrierCode}
+              onChange={setCarrierCode}
+              allLabel="All carriers"
+              triggerClassName="w-[min(100%,220px)]"
+            />
+
+            <MultiSelectFilter
+              label="Agent"
+              options={agentOptions}
+              selected={agentFilter}
+              onChange={setAgentFilter}
+              allLabel="All agents"
+              triggerClassName="w-[min(100%,200px)]"
+            />
+
+            <MultiSelectFilter
+              label="Agency"
+              options={agencyOptions}
+              selected={agencyFilter}
+              onChange={setAgencyFilter}
+              allLabel="All agencies"
+              triggerClassName="w-[min(100%,200px)]"
+            />
 
             <Select value={sourceFilter} onValueChange={setSourceFilter}>
               <SelectTrigger className={cn(adminSelectTrigger, 'h-9 w-[min(100%,220px)] text-sm')}>
@@ -692,6 +752,47 @@ export default function CommissionReportPage() {
           <ActiveFilterChips items={activeChips} />
         </CardContent>
       </Card>
+
+      {/* Quick stats */}
+      {!loading && (
+        <div className="grid grid-cols-3 gap-4">
+          {[
+            {
+              label: 'Total Advance',
+              value: filteredStats.totalAdvance,
+              positive: true,
+              color: 'text-teal-600 dark:text-teal-400',
+              bg: 'bg-teal-50 dark:bg-teal-950/20 border-teal-200 dark:border-teal-900/40',
+            },
+            {
+              label: 'Total Chargeback',
+              value: filteredStats.totalChargeback,
+              positive: false,
+              color: 'text-rose-600 dark:text-rose-400',
+              bg: 'bg-rose-50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/40',
+            },
+            {
+              label: 'Net',
+              value: filteredStats.net,
+              positive: filteredStats.net >= 0,
+              color: filteredStats.net >= 0 ? 'text-teal-600 dark:text-teal-400' : 'text-rose-600 dark:text-rose-400',
+              bg: filteredStats.net >= 0
+                ? 'bg-teal-50 dark:bg-teal-950/20 border-teal-200 dark:border-teal-900/40'
+                : 'bg-rose-50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/40',
+            },
+          ].map(({ label, value, color, bg }) => {
+            const abs = Math.abs(value)
+            const formatted = abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+            return (
+              <div key={label} className={`rounded-lg border px-5 py-4 ${bg}`}>
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</p>
+                <p className={`text-2xl font-bold tabular-nums ${color}`}>{sign}${formatted}</p>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       <Card>
         <CardHeader className={cn('flex flex-row items-center justify-between pb-5', adminCardHeaderBar)}>

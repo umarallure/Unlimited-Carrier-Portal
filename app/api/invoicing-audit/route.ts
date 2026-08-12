@@ -4,7 +4,8 @@
  * `deal_tracker` table.
  *
  * Flow:
- *  1. Pull every DDF lead whose `date` falls inside the invoice period.
+ *  1. Pull every DDF lead whose `date` falls inside the invoice period and
+ *     whose `status` is Pending Approval.
  *  2. Resolve each lead's real policy id via the `leads` table (same NEW DDF
  *     project): join daily_deal_flow.submission_id -> leads.submission_id and
  *     read leads.policy_id. DDF's own policy_number is unreliable.
@@ -26,6 +27,7 @@ const DDF_MAX_ROWS = 100_000
 const DEAL_TRACKER_IN_CHUNK = 200
 const LEADS_IN_CHUNK = 200
 const LEADS_TABLE = process.env.NEW_DDF_LEADS_TABLE || 'leads'
+const DDF_AUDIT_STATUS = 'Pending Approval'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -121,6 +123,7 @@ export async function GET(request: NextRequest) {
       const { data, error } = await ddf
         .from(table)
         .select('lead_vendor')
+        .eq('status', DDF_AUDIT_STATUS)
         .gte('date', dateFrom)
         .lte('date', dateTo)
         .order('lead_vendor', { ascending: true })
@@ -187,6 +190,7 @@ export async function POST(request: NextRequest) {
         .select(
           'submission_id, date, insured_name, lead_vendor, agent, buffer_agent, licensed_agent_account, carrier, product_type, monthly_premium, face_amount, status, call_result, placement_status, draft_date'
         )
+        .eq('status', DDF_AUDIT_STATUS)
         .gte('date', dateFrom)
         .lte('date', dateTo)
       if (scopeVendor) query = query.eq('lead_vendor', scopeVendor)

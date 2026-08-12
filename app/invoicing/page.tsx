@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { Calendar, Loader2, Shield } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AlertTriangle, Calendar, ChevronLeft, ChevronRight, ClipboardList, Loader2, Shield } from 'lucide-react'
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import * as XLSX from 'xlsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -17,6 +18,7 @@ import {
   buildBpoInvoiceLines,
   formatInvoicingStatusLabel,
   getPreviousChargebackByCallCenter,
+  getCallCentersWithUnpaidPreviousSlab,
   markInvoiceBatchPaid,
   saveInvoiceDraftSnapshot,
   loadInvoiceDraftSnapshot,
@@ -27,11 +29,46 @@ import {
   type InvoicingStatus,
   type InvoiceDraftResult,
   type BpoInvoiceDetailResult,
+  type UnpaidPreviousSlabCallCenter,
 } from '@/lib/invoicing'
+import { policyLookupCandidates } from '@/lib/leadNotesSync'
 import { cn } from '@/lib/utils'
 
 function formatMoney(value: number): string {
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+type AuditCommRow = { date: string; advance_amount: number | null; charge_back_amount: number | null; carrier: string }
+type AuditInvHistRow = { invoicing_status: string; effective_date: string; week_of: string | null; lead_value: number | null }
+type AuditDetails = { loading: boolean; commHistory: AuditCommRow[]; invHistory: AuditInvHistRow[] }
+
+function auditStatusMeta(status: InvoicingStatus): { headline: string; isChargeback: boolean } {
+  switch (status) {
+    case 'new_sale': return { headline: 'New Sale', isChargeback: false }
+    case 'repay': return { headline: 'Repay — Reinstated after Chargeback', isChargeback: false }
+    case 'cb_repay': return { headline: 'CB Repay', isChargeback: false }
+    case 'New Charge Back': return { headline: 'New Chargeback', isChargeback: true }
+    case 'rechargeback': return { headline: 'Re-Chargeback', isChargeback: true }
+    case 'cb_never_paid': return { headline: 'Chargeback — Never Invoiced', isChargeback: true }
+    default: return { headline: formatInvoicingStatusLabel(status), isChargeback: false }
+  }
+}
+
+function auditSourceLabel(lineId: string): string {
+  if (lineId.startsWith('stage-cb-')) return 'Chargeback pipeline stage (no commission received)'
+  if (lineId.startsWith('stage-repay-')) return 'Customer pipeline stage (stage-triggered repay)'
+  if (lineId.startsWith('cp-deal-')) return 'Customer pipeline (no commission statement in period)'
+  return 'Commission statement'
+}
+
+function auditMonthsActive(effectiveDate: string | null | undefined, referenceDate: string): number {
+  if (!effectiveDate) return 0
+  const eff = new Date(effectiveDate)
+  const ref = new Date(referenceDate)
+  if (isNaN(eff.getTime()) || isNaN(ref.getTime()) || ref < eff) return 0
+  let m = (ref.getFullYear() - eff.getFullYear()) * 12 + (ref.getMonth() - eff.getMonth())
+  if (ref.getDate() < eff.getDate()) m -= 1
+  return Math.max(0, m)
 }
 
 function normalizePolicyNumberForMatch(policyNumber: string | null | undefined): string {
@@ -104,6 +141,120 @@ export default function InvoicingPage() {
   const [weekScriptLoading, setWeekScriptLoading] = useState(false)
   /** When false, To is always start + 13 days (14-day slab). When true, To is editable. */
   const [customEndDate, setCustomEndDate] = useState(false)
+  const [unpaidPreviousSlabBlocked, setUnpaidPreviousSlabBlocked] = useState<UnpaidPreviousSlabCallCenter[]>([])
+  const [checkingUnpaidPreviousSlab, setCheckingUnpaidPreviousSlab] = useState(false)
+  const [unpaidPreviousSlabCheckError, setUnpaidPreviousSlabCheckError] = useState<string | null>(null)
+  const [auditLine, setAuditLine] = useState<BpoInvoiceLine | null>(null)
+  const [mergePickFrom, setMergePickFrom] = useState('')
+  const [mergePickTo, setMergePickTo] = useState('')
+  const [mergePickLoading, setMergePickLoading] = useState(false)
+  const [mergePickError, setMergePickError] = useState<string | null>(null)
+  const [mergingCallCenter, setMergingCallCenter] = useState<string | null>(null)
+  const [mergePreview, setMergePreview] = useState<{
+    callCenter: string
+    slabs: Array<{ rangeLabel: string; salesLines: BpoInvoiceLine[]; chargebackLines: BpoInvoiceLine[] }>
+    allSalesLines: BpoInvoiceLine[]
+    allChargebackLines: BpoInvoiceLine[]
+    newBusinessTotal: number
+    chargebacksTotal: number
+    subtotal: number
+  } | null>(null)
+  const [mergePreviewPrevNeg, setMergePreviewPrevNeg] = useState('0')
+  const [auditDetails, setAuditDetails] = useState<AuditDetails | null>(null)
+  const [auditAllLines, setAuditAllLines] = useState<BpoInvoiceLine[]>([])
+  const auditFetchRef = useRef(0)
+
+  useEffect(() => {
+    if (!auditLine) { setAuditDetails(null); return }
+    const seq = ++auditFetchRef.current
+    setAuditDetails({ loading: true, commHistory: [], invHistory: [] })
+    const candidates = policyLookupCandidates(auditLine.policyNumber)
+    ;(async () => {
+      const [commRes, histRes] = await Promise.all([
+        supabase.from('commission_tracker')
+          .select('date, advance_amount, charge_back_amount, carrier')
+          .in('policy_number', candidates)
+          .order('date', { ascending: false })
+          .limit(50),
+        supabase.from('invoicing_status_history')
+          .select('invoicing_status, effective_date, week_of, lead_value')
+          .in('policy_number', candidates)
+          .order('effective_date', { ascending: false })
+          .limit(30),
+      ])
+      if (seq !== auditFetchRef.current) return
+      setAuditDetails({
+        loading: false,
+        commHistory: (commRes.data || []) as AuditCommRow[],
+        invHistory: (histRes.data || []) as AuditInvHistRow[],
+      })
+    })().catch(() => {
+      if (seq !== auditFetchRef.current) return
+      setAuditDetails((p) => p ? { ...p, loading: false } : null)
+    })
+  }, [auditLine, supabase])
+
+  const openAudit = (line: BpoInvoiceLine, groupLines: BpoInvoiceLine[]) => {
+    setAuditLine(line)
+    setAuditAllLines(groupLines)
+  }
+
+  const auditLineIdx = auditAllLines.findIndex((l) => l.id === auditLine?.id)
+
+  const goAudit = (dir: 1 | -1) => {
+    const next = auditAllLines[auditLineIdx + dir]
+    if (next) setAuditLine(next)
+  }
+
+  useEffect(() => {
+    if (!auditLine) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); goAudit(1) }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); goAudit(-1) }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  })
+
+  const invoiceCallCenterFilter =
+    selectedCenters.length === 0 ? PRESET_ALL_CALL_CENTERS_FILTER : selectedCenters
+
+  const generateInvoiceBlocked =
+    unpaidPreviousSlabBlocked.length > 0 || !!unpaidPreviousSlabCheckError
+
+  // Block invoice generation when the immediately previous slab is not marked paid.
+  useEffect(() => {
+    if (!dateFrom) {
+      setUnpaidPreviousSlabBlocked([])
+      setUnpaidPreviousSlabCheckError(null)
+      return
+    }
+    let cancelled = false
+    const run = async () => {
+      setCheckingUnpaidPreviousSlab(true)
+      setUnpaidPreviousSlabCheckError(null)
+      try {
+        const blocked = await getCallCentersWithUnpaidPreviousSlab({
+          startDate: dateFrom,
+          callCenterFilter: invoiceCallCenterFilter,
+        })
+        if (!cancelled) setUnpaidPreviousSlabBlocked(blocked)
+      } catch (error: unknown) {
+        if (!cancelled) {
+          setUnpaidPreviousSlabBlocked([])
+          setUnpaidPreviousSlabCheckError(
+            error instanceof Error ? error.message : 'Failed to check previous slab payment status.',
+          )
+        }
+      } finally {
+        if (!cancelled) setCheckingUnpaidPreviousSlab(false)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [dateFrom, invoiceCallCenterFilter])
 
   // Load call-center options from live deal_tracker data, collapsing variant
   // spellings to their canonical name (handles the "different versions" problem).
@@ -192,6 +343,30 @@ export default function InvoicingPage() {
     }
     if (new Date(dateFrom).getTime() > new Date(dateTo).getTime()) {
       alert('From date must be before or equal to To date.')
+      return
+    }
+
+    try {
+      const blockedCenters = await getCallCentersWithUnpaidPreviousSlab({
+        startDate: dateFrom,
+        callCenterFilter,
+      })
+      if (blockedCenters.length > 0) {
+        const details = blockedCenters
+          .map(
+            (entry) =>
+              `${entry.callCenter}: mark the previous slab (${entry.previousRangeLabel}) as paid first`,
+          )
+          .join('\n')
+        alert(
+          `Cannot generate invoice. The previous slab invoice is not paid for the following call center(s):\n\n${details}`,
+        )
+        return
+      }
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to validate previous slab payment status.'
+      alert(message)
       return
     }
 
@@ -1022,8 +1197,397 @@ export default function InvoicingPage() {
     URL.revokeObjectURL(url)
   }
 
+  const loadAndMergeSecondSlab = async () => {
+    if (!mergingCallCenter || !mergePickFrom || !mergePickTo) return
+    setMergePickLoading(true)
+    setMergePickError(null)
+
+    // Slab 1: the currently loaded visibleBpoDetail group for this call center
+    const currentGroup = visibleBpoDetail?.groups.find(
+      (g) => normalizeCallCenterName(g.callCenter) === normalizeCallCenterName(mergingCallCenter) ||
+             g.callCenter.toLowerCase() === mergingCallCenter.toLowerCase(),
+    )
+    if (!currentGroup) {
+      setMergePickError('Current loaded draft has no data for this call center.')
+      setMergePickLoading(false)
+      return
+    }
+
+    try {
+      // Slab 2: load from invoicing_drafts — match same call center and date range
+      const { data, error } = await supabase
+        .from('invoicing_drafts')
+        .select('payload, updated_at')
+        .eq('start_date', mergePickFrom)
+        .eq('end_date', mergePickTo)
+        .eq('call_center_filter', mergingCallCenter)
+        .is('locked_at', null)
+        .is('paid_batch_id', null)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+      if (error) throw new Error(error.message)
+      if (!data || data.length === 0) {
+        throw new Error(`No saved draft for "${mergingCallCenter}" in ${mergePickFrom} → ${mergePickTo}. Save a draft for that period first.`)
+      }
+      const snap = (data[0] as { payload: InvoiceDraftSnapshot }).payload
+      if (!snap?.bpoDetail) throw new Error('Draft has no invoice data.')
+
+      // Apply exclusions / edits from the second draft
+      const pkMap = new Map<string, string>()
+      for (const dg of snap.draft?.groups || []) {
+        for (const p of dg.policies || []) {
+          pkMap.set(`${dg.callCenter}::${p.policyNumber}`, p.policyKey)
+          const norm = normalizePolicyNumberForMatch(p.policyNumber)
+          if (norm && norm !== p.policyNumber) pkMap.set(`${dg.callCenter}::${norm}`, p.policyKey)
+        }
+      }
+      const resolveKey2 = (cc: string, pn: string) => {
+        const direct = pkMap.get(`${cc}::${pn}`)
+        if (direct) return direct
+        const norm = normalizePolicyNumberForMatch(pn)
+        return norm ? pkMap.get(`${cc}::${norm}`) : undefined
+      }
+      const excPolicies2 = snap.excludedPolicyKeys || {}
+      const excLines2 = snap.excludedLineIds || {}
+      const edits2 = snap.lineEdits || {}
+      const applyEdit2 = (line: BpoInvoiceLine): BpoInvoiceLine => {
+        const edit = edits2[line.id]
+        return edit ? { ...line, ...edit } : line
+      }
+
+      const normCC = normalizeCallCenterName(mergingCallCenter).toLowerCase()
+      const secondGroup = snap.bpoDetail.groups.find(
+        (g) =>
+          normalizeCallCenterName(g.callCenter).toLowerCase() === normCC ||
+          g.callCenter.toLowerCase() === mergingCallCenter.toLowerCase(),
+      )
+      if (!secondGroup) {
+        const available = snap.bpoDetail.groups.map((g) => g.callCenter).join(', ')
+        throw new Error(`"${mergingCallCenter}" not in the second draft. Available: ${available || 'none'}`)
+      }
+
+      const slab2Sales = secondGroup.salesLines
+        .filter((l) => {
+          if (excLines2[l.id]) return false
+          const key = resolveKey2(secondGroup.callCenter, l.policyNumber)
+          return !key || !excPolicies2[key]
+        })
+        .map(applyEdit2)
+      const slab2Chargebacks = secondGroup.chargebackLines
+        .filter((l) => {
+          if (excLines2[l.id]) return false
+          const key = resolveKey2(secondGroup.callCenter, l.policyNumber)
+          return !key || !excPolicies2[key]
+        })
+        .map(applyEdit2)
+
+      const slab1Label = visibleBpoDetail?.rangeLabel ?? dateFrom
+      const slab2Label = snap.bpoDetail.rangeLabel
+
+      const allSalesLines = [...currentGroup.salesLines, ...slab2Sales]
+      const allChargebackLines = [...currentGroup.chargebackLines, ...slab2Chargebacks]
+      const newBusinessTotal = round2(allSalesLines.reduce((s, l) => s + l.leadValue, 0))
+      const chargebacksTotal = round2(allChargebackLines.reduce((s, l) => s + l.leadValue, 0))
+
+      setMergePreview({
+        callCenter: mergingCallCenter,
+        slabs: [
+          { rangeLabel: slab1Label, salesLines: currentGroup.salesLines, chargebackLines: currentGroup.chargebackLines },
+          { rangeLabel: slab2Label, salesLines: slab2Sales, chargebackLines: slab2Chargebacks },
+        ],
+        allSalesLines,
+        allChargebackLines,
+        newBusinessTotal,
+        chargebacksTotal,
+        subtotal: round2(newBusinessTotal + chargebacksTotal),
+      })
+      setMergingCallCenter(null)
+    } catch (err: unknown) {
+      setMergePickError(err instanceof Error ? err.message : 'Failed to load draft.')
+    } finally {
+      setMergePickLoading(false)
+    }
+  }
+
+  const exportMergedPreviewPdf = () => {
+    if (!mergePreview) return
+    const prev = Number.parseFloat(mergePreviewPrevNeg)
+    const prevNeg = Number.isNaN(prev) ? 0 : prev
+    const balanceDue = round2(mergePreview.subtotal - prevNeg)
+    const esc = (v: string) =>
+      v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+    const money = (n: number | null | undefined) => (n == null ? '—' : `$${formatMoney(n)}`)
+    const buildRows = (lines: BpoInvoiceLine[]) =>
+      lines.map((line) => `<tr>
+        <td>${esc(line.insuredName)}</td>
+        <td style="text-align:right;">${money(line.leadValue)}</td>
+        <td>${esc(line.carrier)}</td>
+        <td>${esc(line.product ?? '—')}</td>
+        <td>${esc(line.agentAccount)}</td>
+        <td>${esc(line.draftDate)}</td>
+        <td style="text-align:right;">${money(line.monthlyPremium)}</td>
+        <td style="text-align:right;">${money(line.coverageAmount)}</td>
+        <td style="text-align:right;">${esc(line.comPct ?? '—')}</td>
+        <td>${esc(line.comType)}</td>
+      </tr>`).join('')
+    const salesRows = mergePreview.slabs.map((slab) => buildRows(slab.salesLines)).join('')
+    const chargeRows = mergePreview.slabs.map((slab) => buildRows(slab.chargebackLines)).join('')
+    const firstStart = mergePreview.slabs[0].rangeLabel.split(' – ')[0] ?? ''
+    const lastEnd = mergePreview.slabs[mergePreview.slabs.length - 1].rangeLabel.split(' – ')[1] ?? ''
+    const combinedRange = `${esc(firstStart)} – ${esc(lastEnd)}`
+    const html = `<!doctype html><html><head><meta charset="utf-8"/>
+    <title>${esc(mergePreview.callCenter)} — Combined Invoice</title>
+    <style>
+      :root{--bg:#020922;--panel:#071638;--text:#e5ecff;--muted:#9fb2de;--line:#1f376f;--sales:#00c2b2;--chargebacks:#ff5a1f;--summary:#2f3f76}
+      body{font-family:Arial,sans-serif;margin:18px;color:var(--text);background:var(--bg);-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .hw{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:linear-gradient(180deg,#071c47 0%,#051433 100%)}
+      h1{margin:0;font-size:20px;color:#fff}.sub{margin:4px 0 0;color:var(--muted);font-size:12px}
+      .st{margin:16px 0 0;color:#fff;font-size:13px;font-weight:700;padding:7px 10px;border-radius:6px 6px 0 0}
+      .st.s{background:var(--sales)}.st.c{background:var(--chargebacks)}
+      table{width:100%;border-collapse:collapse;font-size:10px;margin-bottom:10px;table-layout:fixed}
+      th,td{border:1px solid var(--line);padding:6px 7px;text-align:left}
+      thead th{background:#0a204f;color:#cfe0ff;font-size:10px;text-transform:uppercase}
+      tbody td{background:var(--panel)}
+      .sum{width:360px;margin-left:auto;border-collapse:collapse}
+      .sum td{border:1px solid var(--line);padding:8px;background:var(--panel)}
+      .sum td:first-child{background:var(--summary);font-weight:600}
+      @page{size:A4 landscape;margin:8mm}
+    </style></head><body>
+    <div class="hw"><h1>${esc(mergePreview.callCenter)}</h1><div class="sub">Combined Invoice — ${combinedRange}</div></div>
+    <div class="st s">Sales</div>
+    <table><thead><tr><th>Name</th><th>Lead value (50%)</th><th>Carrier</th><th>Product</th><th>Agent</th><th>Draft Date</th><th>Monthly Premium</th><th>Coverage</th><th>Com%</th><th>Type</th></tr></thead>
+    <tbody>${salesRows || '<tr><td colspan="10">No sales.</td></tr>'}</tbody></table>
+    <div class="st c">Chargebacks</div>
+    <table><thead><tr><th>Name</th><th>Lead value (50%)</th><th>Carrier</th><th>Product</th><th>Agent</th><th>Draft Date</th><th>Monthly Premium</th><th>Coverage</th><th>Com%</th><th>Type</th></tr></thead>
+    <tbody>${chargeRows || '<tr><td colspan="10">No chargebacks.</td></tr>'}</tbody></table>
+    <table class="sum"><tbody>
+      <tr><td>New Business Total</td><td style="text-align:right;">${money(mergePreview.newBusinessTotal)}</td></tr>
+      <tr><td>Chargebacks Total</td><td style="text-align:right;">${money(mergePreview.chargebacksTotal)}</td></tr>
+      <tr><td>Negative Balance (Prior)</td><td style="text-align:right;">-${money(Math.abs(prevNeg))}</td></tr>
+      <tr><td>Balance Due</td><td style="text-align:right;">${money(balanceDue)}</td></tr>
+    </tbody></table>
+    </body></html>`
+    const w = window.open('', '_blank')
+    if (w) { w.document.open(); w.document.write(html); w.document.close(); setTimeout(() => { w.focus(); w.print() }, 250) }
+    else window.alert('Popup blocked. Please allow popups.')
+  }
+
+
   return (
     <div className="admin-page space-y-6 print:space-y-4">
+      {/* Policy audit popup */}
+      <Dialog open={auditLine != null} onOpenChange={(open) => { if (!open) setAuditLine(null) }}>
+        <DialogContent hideClose className="flex max-h-[90vh] max-w-3xl flex-col gap-0 overflow-hidden p-0">
+          {auditLine && (() => {
+            const { headline, isChargeback } = auditStatusMeta(auditLine.invoicingStatus)
+            const grossAmt = Math.abs(auditLine.leadValue) * 2
+            const isStageSource = auditLine.id.startsWith('stage-cb-') || auditLine.id.startsWith('stage-repay-') || auditLine.id.startsWith('cp-deal-')
+            const refDate = bpoDetail?.endDate ?? dateTo
+            const monthsActv = auditLine.effectiveDate ? auditMonthsActive(auditLine.effectiveDate, refDate) : null
+            const remaining = monthsActv !== null ? Math.max(0, 9 - monthsActv) : null
+            const dealValue = auditLine.dealValue ?? null
+            const ccValue = dealValue != null ? dealValue / 2 : null
+            const monthlyCC = ccValue != null ? ccValue / 9 : null
+            const totalLines = auditAllLines.length
+            const pos = auditLineIdx >= 0 ? auditLineIdx + 1 : null
+
+            const FR = (label: string, value: React.ReactNode) => (
+              <div className="flex items-start justify-between gap-3 py-[3px] text-xs">
+                <span className="shrink-0 text-slate-500 dark:text-slate-400">{label}</span>
+                <span className="text-right font-medium text-slate-800 dark:text-slate-200">{value}</span>
+              </div>
+            )
+
+            const SH = (title: string) => (
+              <p className="mb-1.5 text-[9px] font-extrabold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">{title}</p>
+            )
+
+            const Divider = () => <div className="my-3 border-t border-slate-100 dark:border-slate-800" />
+
+            const HistTable = ({ loading, empty, children }: { loading?: boolean; empty?: boolean; children?: React.ReactNode }) =>
+              loading ? (
+                <div className="flex items-center gap-1.5 py-1 text-xs text-slate-400"><Loader2 className="h-3 w-3 animate-spin" />Loading…</div>
+              ) : empty ? (
+                <p className="py-0.5 text-xs italic text-slate-400">None found.</p>
+              ) : (
+                <div className="overflow-hidden rounded border border-slate-200 dark:border-slate-700">{children}</div>
+              )
+
+            return (
+              <>
+                <DialogTitle className="sr-only">Policy Audit — {auditLine.policyNumber}</DialogTitle>
+                {/* ── Single header bar: title + nav + close ── */}
+                <div className="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
+                  <ClipboardList className="h-4 w-4 shrink-0 text-slate-400" />
+                  <div className="min-w-0 flex-1">
+                    <span className="text-sm font-semibold text-slate-900 dark:text-white">Policy Audit</span>
+                    <span className="ml-2 font-mono text-xs text-slate-500 dark:text-slate-400">{auditLine.policyNumber}</span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {pos !== null && totalLines > 1 && (
+                      <span className="mr-1 text-xs tabular-nums text-slate-400">{pos} / {totalLines}</span>
+                    )}
+                    <button type="button" disabled={auditLineIdx <= 0} onClick={() => goAudit(-1)} title="← Previous"
+                      className="flex h-7 w-7 items-center justify-center rounded border border-slate-200 text-slate-500 hover:bg-slate-100 disabled:opacity-25 dark:border-slate-700 dark:hover:bg-slate-800">
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                    </button>
+                    <button type="button" disabled={auditLineIdx < 0 || auditLineIdx >= totalLines - 1} onClick={() => goAudit(1)} title="→ Next"
+                      className="flex h-7 w-7 items-center justify-center rounded border border-slate-200 text-slate-500 hover:bg-slate-100 disabled:opacity-25 dark:border-slate-700 dark:hover:bg-slate-800">
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                    <DialogClose className="ml-1 flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">
+                      <span className="text-base leading-none">×</span>
+                    </DialogClose>
+                  </div>
+                </div>
+
+                {/* ── Coloured status strip ── */}
+                <div className={cn(
+                  'flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2',
+                  isChargeback
+                    ? 'border-orange-200 bg-orange-50 dark:border-orange-900/40 dark:bg-orange-950/20'
+                    : 'border-teal-200 bg-teal-50 dark:border-teal-900/40 dark:bg-teal-950/20',
+                )}>
+                  <span className={cn('text-xs font-bold', isChargeback ? 'text-orange-800 dark:text-orange-300' : 'text-teal-800 dark:text-teal-300')}>
+                    {headline}
+                  </span>
+                  <div className="flex items-center gap-1.5 text-xs font-semibold tabular-nums">
+                    <span className={cn('rounded px-2 py-0.5',
+                      isChargeback ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' : 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300')}>
+                      Gross {isChargeback ? '-' : '+'}${formatMoney(grossAmt)}
+                    </span>
+                    <span className={cn('rounded px-2 py-0.5',
+                      isChargeback ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300' : 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300')}>
+                      Lead {isChargeback ? '-' : '+'}${formatMoney(Math.abs(auditLine.leadValue))}
+                    </span>
+                  </div>
+                </div>
+
+                {/* ── Two-column body: left=facts, right=history ── */}
+                <div className="flex min-h-0 flex-1 overflow-hidden">
+
+                  {/* Left panel — policy facts, this entry, 9-month */}
+                  <div className="flex w-[42%] shrink-0 flex-col overflow-y-auto border-r border-slate-100 p-4 dark:border-slate-800">
+                    {SH('Policy Info')}
+                    {FR('Insured', auditLine.insuredName)}
+                    {FR('Carrier', auditLine.carrier)}
+                    {FR('Agent', auditLine.agentAccount)}
+                    {FR('Effective', <span className="font-mono">{auditLine.effectiveDate || '—'}</span>)}
+                    {auditLine.ghlStage && FR('GHL Stage',
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] leading-tight dark:bg-slate-800">{auditLine.ghlStage}</span>
+                    )}
+                    {auditLine.monthlyPremium != null && FR('Premium', <span className="font-mono">${formatMoney(auditLine.monthlyPremium)}/mo</span>)}
+                    {auditLine.coverageAmount != null && FR('Coverage', <span className="font-mono">${formatMoney(auditLine.coverageAmount)}</span>)}
+                    {FR('Com %', auditLine.comPct || '—')}
+                    {FR('Com type', auditLine.comType)}
+
+                    <Divider />
+                    {SH('This Entry')}
+                    {FR('Source', <span className="text-slate-500 dark:text-slate-400 text-[11px]">{auditSourceLabel(auditLine.id).split(' (')[0]}</span>)}
+                    {FR(isChargeback ? 'CB date' : 'Comm date', <span className="font-mono">{auditLine.draftDate}</span>)}
+                    {FR('Gross', <span className={cn('font-mono font-semibold', isChargeback ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>{isChargeback ? '-' : '+'}${formatMoney(grossAmt)}</span>)}
+                    {FR('Lead (50%)', <span className={cn('font-mono font-semibold', isChargeback ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>{isChargeback ? '-' : '+'}${formatMoney(Math.abs(auditLine.leadValue))}</span>)}
+
+                    {isStageSource && dealValue != null && dealValue > 0 && ccValue != null && monthlyCC != null && (
+                      <>
+                        <Divider />
+                        {SH('9-Month Rule')}
+                        <div className="rounded border border-blue-200/60 bg-blue-50/40 px-3 py-2 dark:border-blue-900/30 dark:bg-blue-950/15">
+                          {FR('Deal value', <span className="font-mono">${formatMoney(dealValue)}</span>)}
+                          {FR('CC (50%)', <span className="font-mono">${formatMoney(ccValue)}</span>)}
+                          {FR('Monthly ÷9', <span className="font-mono">${formatMoney(monthlyCC)}</span>)}
+                          {FR('Ref date', <span className="font-mono">{refDate || '—'}</span>)}
+                          {monthsActv !== null && FR('Months active', <span className="font-mono">{monthsActv} mo</span>)}
+                          {remaining !== null && FR('Remaining',
+                            <span className={cn('font-mono font-bold', remaining > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400')}>{remaining} mo</span>
+                          )}
+                          {remaining !== null && FR(
+                            isChargeback ? 'Chargeback' : 'Repay',
+                            <span className={cn('font-mono font-bold', isChargeback ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>
+                              {isChargeback ? '-' : '+'}${formatMoney(monthlyCC * remaining)}
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Right panel — histories */}
+                  <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-4">
+                    {SH('Invoice Cycle History')}
+                    <HistTable loading={auditDetails?.loading} empty={!auditDetails?.invHistory.length}>
+                      {auditDetails?.invHistory.length ? (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 dark:bg-slate-900/60">
+                              <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Period</th>
+                              <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Status</th>
+                              <th className="px-2 py-1.5 text-right font-semibold text-slate-500">Lead</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {auditDetails.invHistory.map((row, i) => {
+                              const isCb = row.invoicing_status === 'New Charge Back' || row.invoicing_status === 'rechargeback'
+                              return (
+                                <tr key={i} className="hover:bg-slate-50/50">
+                                  <td className="px-2 py-1.5 font-mono text-slate-600 dark:text-slate-400">{row.week_of || row.effective_date}</td>
+                                  <td className="px-2 py-1.5">
+                                    <span className={cn('rounded-full px-1.5 py-0.5 text-[10px] font-semibold',
+                                      isCb ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+                                        : 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400')}>
+                                      {formatInvoicingStatusLabel(row.invoicing_status as InvoicingStatus)}
+                                    </span>
+                                  </td>
+                                  <td className={cn('px-2 py-1.5 text-right font-mono font-semibold tabular-nums',
+                                    isCb ? 'text-rose-600 dark:text-rose-400' : 'text-teal-600 dark:text-teal-400')}>
+                                    {row.lead_value != null ? `${isCb ? '-' : '+'}$${formatMoney(Math.abs(row.lead_value))}` : '—'}
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      ) : null}
+                    </HistTable>
+
+                    <Divider />
+
+                    {SH('Commission Statement History')}
+                    <HistTable loading={auditDetails?.loading} empty={!auditDetails?.commHistory.length}>
+                      {auditDetails?.commHistory.length ? (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 dark:bg-slate-900/60">
+                              <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Date</th>
+                              <th className="px-2 py-1.5 text-right font-semibold text-slate-500">Advance</th>
+                              <th className="px-2 py-1.5 text-right font-semibold text-slate-500">Chargeback</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {auditDetails.commHistory.map((row, i) => (
+                              <tr key={i} className="hover:bg-slate-50/50">
+                                <td className="px-2 py-1.5 font-mono text-slate-600 dark:text-slate-400">{row.date}</td>
+                                <td className="px-2 py-1.5 text-right font-mono font-semibold tabular-nums text-teal-600 dark:text-teal-400">
+                                  {row.advance_amount && row.advance_amount > 0 ? `+$${formatMoney(row.advance_amount)}` : <span className="text-slate-300 dark:text-slate-700">—</span>}
+                                </td>
+                                <td className="px-2 py-1.5 text-right font-mono font-semibold tabular-nums text-rose-600 dark:text-rose-400">
+                                  {row.charge_back_amount && row.charge_back_amount !== 0 ? `-$${formatMoney(Math.abs(row.charge_back_amount))}` : <span className="text-slate-300 dark:text-slate-700">—</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : null}
+                    </HistTable>
+                  </div>
+
+                </div>
+              </>
+            )
+          })()}
+        </DialogContent>
+      </Dialog>
+
       <PageHeader
         title="Invoicing"
         description="Generate BPO (call center) invoices: sales first, then chargebacks. Lead value shows 50% of the underlying commission amount (not gross). Use Mark paid when the batch is settled."
@@ -1052,6 +1616,44 @@ export default function InvoicingPage() {
               </span>
             </div>
           </div>
+          {checkingUnpaidPreviousSlab && dateFrom ? (
+            <p className="text-xs text-muted-foreground">Checking previous slab payment status…</p>
+          ) : null}
+          {unpaidPreviousSlabCheckError ? (
+            <div
+              role="alert"
+              className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-100"
+            >
+              Could not verify previous slab payment: {unpaidPreviousSlabCheckError}
+            </div>
+          ) : null}
+          {unpaidPreviousSlabBlocked.length > 0 ? (
+            <div
+              role="alert"
+              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <div className="min-w-0 space-y-1.5">
+                  <p className="font-semibold text-amber-900 dark:text-amber-50">
+                    Previous invoice cycle is not paid — new invoice generation is disabled
+                  </p>
+                  <p className="text-xs text-amber-900/90 dark:text-amber-100/90">
+                    Mark the previous 14-day slab as paid (or settle its draft) before starting this cycle.
+                  </p>
+                  <ul className="list-disc space-y-0.5 pl-4 text-xs">
+                    {unpaidPreviousSlabBlocked.map((entry) => (
+                      <li key={entry.callCenter}>
+                        <span className="font-medium">{entry.callCenter}</span>
+                        {' — previous slab '}
+                        <span className="font-mono">{entry.previousRangeLabel}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">From</span>
@@ -1096,18 +1698,30 @@ export default function InvoicingPage() {
               </Button>
             </div>
             <Button
-              onClick={() =>
-                void generateInvoice(
-                  selectedCenters.length === 0 ? PRESET_ALL_CALL_CENTERS_FILTER : selectedCenters,
-                )
+              onClick={() => void generateInvoice(invoiceCallCenterFilter)}
+              disabled={
+                loading ||
+                checkingUnpaidPreviousSlab ||
+                !dateFrom ||
+                !dateTo ||
+                generateInvoiceBlocked
               }
-              disabled={loading}
-              className="bg-orange-500 text-black hover:bg-orange-400"
+              title={
+                generateInvoiceBlocked
+                  ? 'Mark the previous slab invoice as paid before generating a new cycle'
+                  : undefined
+              }
+              className="bg-orange-500 text-black hover:bg-orange-400 disabled:opacity-50"
             >
               {loading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Generating...
+                </>
+              ) : checkingUnpaidPreviousSlab ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Checking…
                 </>
               ) : (
                 'Generate Invoice'
@@ -1153,6 +1767,171 @@ export default function InvoicingPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ── Pick second slab dialog ───────────────────────────────────────────── */}
+      <Dialog open={mergingCallCenter !== null} onOpenChange={(open) => { if (!open) { setMergingCallCenter(null); setMergePickError(null) } }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Merge with another slab</DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            Merging <span className="font-medium text-foreground">{mergingCallCenter}</span> with a second saved draft.
+            Pick the date range of the draft you want to merge in.
+          </p>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="w-8 shrink-0 text-xs text-muted-foreground">From</span>
+              <Input
+                type="date"
+                value={mergePickFrom}
+                onChange={(e) => {
+                  const from = e.target.value
+                  setMergePickFrom(from)
+                  if (from) setMergePickTo(addDays(from, INVOICE_SLAB_DAYS - 1))
+                  setMergePickError(null)
+                }}
+                className="h-8 flex-1"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-8 shrink-0 text-xs text-muted-foreground">To</span>
+              <Input
+                type="date"
+                value={mergePickTo}
+                onChange={(e) => setMergePickTo(e.target.value)}
+                className="h-8 flex-1"
+              />
+            </div>
+          </div>
+          {mergePickError && (
+            <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-700 dark:bg-red-950/40 dark:text-red-300">
+              {mergePickError}
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button size="sm" variant="outline" onClick={() => { setMergingCallCenter(null); setMergePickError(null) }}>Cancel</Button>
+            <Button size="sm" onClick={() => void loadAndMergeSecondSlab()} disabled={mergePickLoading || !mergePickFrom || !mergePickTo} className="bg-orange-500 text-black hover:bg-orange-400">
+              {mergePickLoading ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Loading…</> : 'Load & Merge'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Merged invoice preview dialog ────────────────────────────────────── */}
+      <Dialog open={mergePreview !== null} onOpenChange={(open) => { if (!open) { setMergePreview(null); setMergePreviewPrevNeg('0') } }}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          {mergePreview && (() => {
+            const prevParsed = Number.parseFloat(mergePreviewPrevNeg)
+            const prevNeg = Number.isNaN(prevParsed) ? 0 : prevParsed
+            const balanceDue = round2(mergePreview.subtotal - prevNeg)
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center justify-between gap-3">
+                    <span>{mergePreview.callCenter} — Combined Invoice</span>
+                    <Button size="sm" className="bg-orange-500 text-black hover:bg-orange-400 print:hidden" onClick={exportMergedPreviewPdf}>
+                      Export PDF
+                    </Button>
+                  </DialogTitle>
+                </DialogHeader>
+                <p className="text-xs text-muted-foreground">
+                  {mergePreview.slabs[0].rangeLabel.split(' – ')[0]} – {mergePreview.slabs[mergePreview.slabs.length - 1].rangeLabel.split(' – ')[1]}
+                </p>
+
+                {/* Sales */}
+                <div>
+                  <p className="mb-1 rounded-t bg-teal-600 px-3 py-1.5 text-xs font-bold text-white">
+                    Sales — {mergePreview.allSalesLines.length} line{mergePreview.allSalesLines.length !== 1 ? 's' : ''}
+                  </p>
+                  <div className="overflow-x-auto rounded-b border border-slate-200 dark:border-slate-700">
+                    <table className="w-full border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 dark:bg-slate-900">
+                          {['Name', 'Lead Value (50%)', 'Carrier', 'Product', 'Agent', 'Draft Date'].map((h) => (
+                            <th key={h} className={invoiceTableHead}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mergePreview.allSalesLines.length === 0 ? (
+                          <tr><td colSpan={6} className="px-3 py-4 text-center text-slate-400">No sales</td></tr>
+                        ) : mergePreview.slabs.map((slab) =>
+                          slab.salesLines.map((line, li) => (
+                            <tr key={`s-${slab.rangeLabel}-${li}`} className="border-b border-slate-100 dark:border-slate-800">
+                              <td className={invoiceCell}>{line.insuredName}</td>
+                              <td className={cn(invoiceCell, 'text-right tabular-nums text-emerald-700 dark:text-emerald-400')}>${formatMoney(line.leadValue)}</td>
+                              <td className={invoiceCell}>{line.carrier}</td>
+                              <td className={invoiceCell}>{line.product ?? '—'}</td>
+                              <td className={invoiceCell}>{line.agentAccount}</td>
+                              <td className={invoiceCell}>{line.draftDate}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Chargebacks */}
+                <div>
+                  <p className="mb-1 rounded-t bg-orange-500 px-3 py-1.5 text-xs font-bold text-white">
+                    Chargebacks — {mergePreview.allChargebackLines.length} line{mergePreview.allChargebackLines.length !== 1 ? 's' : ''}
+                  </p>
+                  <div className="overflow-x-auto rounded-b border border-slate-200 dark:border-slate-700">
+                    <table className="w-full border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 dark:bg-slate-900">
+                          {['Name', 'Lead Value (50%)', 'Carrier', 'Product', 'Agent', 'Draft Date'].map((h) => (
+                            <th key={h} className={invoiceTableHead}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mergePreview.allChargebackLines.length === 0 ? (
+                          <tr><td colSpan={6} className="px-3 py-4 text-center text-slate-400">No chargebacks</td></tr>
+                        ) : mergePreview.slabs.map((slab) =>
+                          slab.chargebackLines.map((line, li) => (
+                            <tr key={`cb-${slab.rangeLabel}-${li}`} className="border-b border-slate-100 dark:border-slate-800">
+                              <td className={invoiceCell}>{line.insuredName}</td>
+                              <td className={cn(invoiceCell, 'text-right tabular-nums text-rose-600 dark:text-rose-400')}>${formatMoney(line.leadValue)}</td>
+                              <td className={invoiceCell}>{line.carrier}</td>
+                              <td className={invoiceCell}>{line.product ?? '—'}</td>
+                              <td className={invoiceCell}>{line.agentAccount}</td>
+                              <td className={invoiceCell}>{line.draftDate}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Summary */}
+                <div className="flex flex-col items-end gap-2 border-t border-slate-200 pt-3 dark:border-slate-700">
+                  <div className="flex w-full max-w-xs flex-col gap-1.5 text-xs">
+                    <div className="flex justify-between rounded bg-emerald-50 px-3 py-2 dark:bg-emerald-950/40">
+                      <span className="text-slate-600">New Business Total</span>
+                      <span className="font-semibold tabular-nums text-emerald-700 dark:text-emerald-300">${formatMoney(mergePreview.newBusinessTotal)}</span>
+                    </div>
+                    <div className="flex justify-between rounded bg-rose-50 px-3 py-2 dark:bg-rose-950/40">
+                      <span className="text-slate-600">Chargebacks Total</span>
+                      <span className="font-semibold tabular-nums text-rose-700 dark:text-rose-400">${formatMoney(mergePreview.chargebacksTotal)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 rounded border border-slate-200 px-3 py-2 dark:border-slate-700">
+                      <span className="text-slate-500">Prior negative balance</span>
+                      <Input type="number" value={mergePreviewPrevNeg} onChange={(e) => setMergePreviewPrevNeg(e.target.value)} className="h-7 w-[90px] text-right font-mono text-xs" placeholder="0.00" />
+                    </div>
+                    <div className="flex justify-between rounded bg-slate-900 px-3 py-2.5 text-white dark:bg-black">
+                      <span className="font-medium">Balance Due</span>
+                      <span className="text-sm font-bold tabular-nums">${formatMoney(balanceDue)}</span>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )
+          })()}
+        </DialogContent>
+      </Dialog>
 
       {visibleDraft && visibleDraft.groups.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4 print:hidden dark:border-slate-800">
@@ -1282,6 +2061,13 @@ export default function InvoicingPage() {
                 <Button size="sm" variant="outline" onClick={() => void exportPdfForGroup(group)}>
                   Export PDF
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { setMergingCallCenter(group.callCenter); setMergePickFrom(''); setMergePickTo(''); setMergePickError(null) }}
+                >
+                  Merge Slab
+                </Button>
                 <Button size="sm" variant="outline" onClick={() => addManualRow(group.callCenter, 'sales')}>
                   Add Sales Row
                 </Button>
@@ -1336,11 +2122,21 @@ export default function InvoicingPage() {
                         group.salesLines.map((line) => (
                           <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
                             <TableCell className={cn(invoiceCell, 'font-mono print:hidden')}>
-                              <Input
-                                value={line.policyNumber}
-                                onChange={(e) => updateLineField(line.id, 'policyNumber', e.target.value)}
-                                className="h-8 min-w-[120px]"
-                              />
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  value={line.policyNumber}
+                                  onChange={(e) => updateLineField(line.id, 'policyNumber', e.target.value)}
+                                  className="h-8 min-w-[120px]"
+                                />
+                                <button
+                                  type="button"
+                                  title="View audit details"
+                                  onClick={() => openAudit(line, [...group.salesLines, ...group.chargebackLines])}
+                                  className="shrink-0 rounded p-1 text-slate-400 hover:bg-teal-50 hover:text-teal-600 dark:hover:bg-teal-950 dark:hover:text-teal-400"
+                                >
+                                  <ClipboardList className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </TableCell>
                             <TableCell className={invoiceCell}>
                               <Input
@@ -1491,11 +2287,21 @@ export default function InvoicingPage() {
                         group.chargebackLines.map((line) => (
                           <TableRow key={line.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/50">
                             <TableCell className={cn(invoiceCell, 'font-mono print:hidden')}>
-                              <Input
-                                value={line.policyNumber}
-                                onChange={(e) => updateLineField(line.id, 'policyNumber', e.target.value)}
-                                className="h-8 min-w-[120px]"
-                              />
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  value={line.policyNumber}
+                                  onChange={(e) => updateLineField(line.id, 'policyNumber', e.target.value)}
+                                  className="h-8 min-w-[120px]"
+                                />
+                                <button
+                                  type="button"
+                                  title="View audit details"
+                                  onClick={() => openAudit(line, [...group.salesLines, ...group.chargebackLines])}
+                                  className="shrink-0 rounded p-1 text-slate-400 hover:bg-orange-50 hover:text-orange-600 dark:hover:bg-orange-950 dark:hover:text-orange-400"
+                                >
+                                  <ClipboardList className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </TableCell>
                             <TableCell className={invoiceCell}>
                               <Input

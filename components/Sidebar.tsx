@@ -20,6 +20,8 @@ import {
     Sun,
     Moon,
     ClipboardCheck,
+    AlertTriangle,
+    ScrollText,
     type LucideIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -146,6 +148,7 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
         <NavRow href="/agencies" label="Agencies" icon={Briefcase} active={navActive('/agencies')} collapsed={collapsed} />
         <NavRow href="/carriers" label="Carriers" icon={FileText} active={navActive('/carriers')} collapsed={collapsed} />
         <NavRow href="/agents" label="Agents" icon={Users} active={navActive('/agents')} collapsed={collapsed} />
+        <NavRow href="/users" label="Users" icon={Shield} active={navActive('/users')} collapsed={collapsed} />
         <NavRow href="/records" label="Records" icon={FileText} active={navActive('/records')} collapsed={collapsed} />
         <NavRow href="/deal-tracker" label="Deal Tracker" icon={TrendingUp} active={navActive('/deal-tracker')} collapsed={collapsed} />
         <NavRow
@@ -153,6 +156,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Review Policies"
           icon={ClipboardCheck}
           active={navActive('/review-policies')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/policy-audit"
+          label="Policy Audit"
+          icon={AlertTriangle}
+          active={navActive('/policy-audit')}
           collapsed={collapsed}
         />
         <NavRow
@@ -182,6 +192,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Invoicing Audit"
           icon={FileSearch}
           active={navActive('/invoicing-audit')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/invoicing-ledger"
+          label="Invoices Ledger"
+          icon={ScrollText}
+          active={navActive('/invoicing-ledger')}
           collapsed={collapsed}
         />
         <NavRow href="/upload-tree" label="Org tree upload" icon={Upload} active={navActive('/upload-tree')} collapsed={collapsed} />

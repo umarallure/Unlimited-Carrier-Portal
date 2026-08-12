@@ -15,6 +15,8 @@ import {
   resolvePolicyStatusFromCarrierMapping,
   calculateCcValue,
   resolveCommissionPreviewDealValue,
+  policyFinancialsFromCorebridgePolicy,
+  resolvePolicyFinancialsForDealTracker,
 } from './dealTracker'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
 import { effectiveDateForThreeMonthRuleFromPreview } from './calendarDate'
@@ -118,12 +120,17 @@ export async function processCorebridgeFilesForDealTracker(
         .filter(n => n.length > 0)
     )
   )
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch(buildCorebridgeInsuredName(p))
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   console.log('[Deal Tracker] Corebridge: policies needing DDF:', policiesNeedingDdf.length, '| unique insured names:', uniqueNames.length, '| sample:', uniqueNames.slice(0, 5))
 
   const dailyDealFlowMap =
     uniqueNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -213,6 +220,7 @@ export async function processCorebridgeFilesForDealTracker(
       carrier_id: carrier.id,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancialsFromCorebridgePolicy(policy),
       notes: existing?.notes ?? null,
       status: (existing && financialsUnchanged(existing, dealValue, null)) ? (existing.status ?? statusFromDealValue(dealValue)) : statusFromDealValue(dealValue),
       last_updated: new Date().toISOString(),
@@ -360,6 +368,18 @@ export async function processCorebridgeCommissionsForDealTracker(
 
   console.log('[Deal Tracker Corebridge] Policies passing filter:', Array.from(latestRowByPolicy.keys()).join(', '))
 
+  let policiesMap = new Map<string, any>()
+  if (policyNumbers.length > 0) {
+    const policies = await fetchAllPaginated(() =>
+      supabase
+        .from('corebridge_policies')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', policyNumbers)
+    )
+    policies?.forEach((p: any) => policiesMap.set(p.policy_number, p))
+  }
+
   const policyNumbersNeedingDdf = Array.from(latestRowByPolicy.keys()).filter(policyNum =>
     policyNeedsDdfLookup(existingMap.get(policyNum))
   )
@@ -375,8 +395,13 @@ export async function processCorebridgeCommissionsForDealTracker(
           .filter((name: string) => name.length > 0)
       )
     )
+    const policyNumberByNameComm = new Map<string, string>()
+    policyNumbersNeedingDdf.forEach(pn => {
+      const name = normalizeNameForSearch((latestRowByPolicy.get(pn)?.insured_name ?? '').toString().trim())
+      if (name && pn) policyNumberByNameComm.set(name, pn)
+    })
     if (policyNamesForDdf.length > 0) {
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDdf, carrierName)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(policyNamesForDdf, carrierName, undefined, policyNumberByNameComm)
     }
   }
 
@@ -444,6 +469,9 @@ export async function processCorebridgeCommissionsForDealTracker(
         ? existing.sales_agent
         : salesAgent
 
+    const policy = policiesMap.get(policyNum)
+    const policyFinancials = resolvePolicyFinancialsForDealTracker(policy, existing, 'corebridge')
+
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
       // For commissions, never overwrite existing name from policy/deal_tracker.
@@ -458,6 +486,7 @@ export async function processCorebridgeCommissionsForDealTracker(
       carrier_id: carrierId,
       deal_value: dealValue,
       cc_value: ccValue,
+      ...policyFinancials,
       notes: existing?.notes ?? null,
       // Status follows standard rules from deal value + chargeback; do not
       // overwrite when financials are unchanged.
@@ -475,8 +504,8 @@ export async function processCorebridgeCommissionsForDealTracker(
       policy_type: existing?.policy_type ?? null,
       daily_deal_flow_fetched: existing?.daily_deal_flow_fetched ?? false,
       daily_deal_flow_fetched_at: existing?.daily_deal_flow_fetched_at ?? null,
-      source_policy_table: existing?.source_policy_table ?? null,
-      source_policy_id: existing?.source_policy_id ?? null,
+      source_policy_table: policy ? 'corebridge_policies' : (existing?.source_policy_table ?? null),
+      source_policy_id: policy?.id ?? existing?.source_policy_id ?? null,
       source_commission_table: 'corebridge_commissions',
       source_commission_id: latest.id != null ? latest.id : null,
       isNew: !existing,
