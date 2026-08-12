@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { DealTrackerPolicyDialog, type AgencyCarrierOption, type DealTrackerPolicyForm } from '@/components/DealTrackerPolicyDialog'
+import { AGENCY_OPTIONS, resolveSalesAgentFilter } from '@/lib/agencyAgents'
 import Link from 'next/link'
 import { Loader2, Search, RefreshCw, Calendar, History, TrendingUp, Plus, ChevronDown, Check, X } from 'lucide-react'
 import {
@@ -167,52 +168,6 @@ async function loadCommissionSummariesForDeals(
 }
 
 export default function DealTrackerPage() {
-  const HARDCODED_AGENCY_AGENT_MAP: Record<string, string[]> = {
-    'Unlimited Insurance': [
-      'Benjamin Wunder',
-      'WUNDER, BENJAMIN',
-      'WUNDER/ BENJAMIN M',
-      'Claudia Tradardi',
-      'TRADARDI NAPOLETANO, CLAUDIA',
-      'TRADARDI NAPOLETANO/ CLAU',
-      'TRADARDI/ CLAUDIA',
-      'Erica Hicks',
-      'HICKS/ ERICA L',
-      'Lydia Sutton',
-      'SUTTON, LYDIA ROSE',
-      'SUTTON/ LYDIA R',
-    ],
-    'Heritage Insurance': [
-      '1227642',
-      'Abdul Ibrahim',
-      'ABDUL IBRAHIM',
-      'IBRAHIM, ABDUL',
-      'IBRAHIM/ ABDUL',
-      'Isaac Reed',
-      'ISAAC REED',
-      'REED/ ISAAC J',
-      'Trinity Queen',
-      'TRINITY QUEEN',
-      'QUEEN/ TRINITY',
-    ],
-    'Safe Harbor Insurance': [
-      'Andrea Munoz Bonilla',
-      'Aubrey Nichols',
-      'NICHOLS/ AUBREY',
-      'Brandon Flinchum',
-      'BRANDON FLINCHUM',
-      'FLINCHUM, BRANDON',
-      'FLINCHUM/ BRANDON',
-      'BROCK/ NOAH',
-      'Noah Brock',
-      'NOAH BROCK',
-      'COLEMAN, AIDAN',
-      'COLEMAN/ AIDAN',
-      'Maria Sanchez',
-      'SANCHEZ SANTIAGO/ MARIA',
-    ],
-  }
-  const HARDCODED_AGENCY_OPTIONS = Object.keys(HARDCODED_AGENCY_AGENT_MAP)
 
   const inlineEditInput = 'h-9 min-w-[100px] px-2 text-sm'
   const inlineEditInputWide = 'h-9 min-w-[140px] px-2 text-sm'
@@ -306,21 +261,10 @@ export default function DealTrackerPage() {
   const currentServerFilters = () => {
     const min = dealValueMin.trim() === '' ? undefined : Number.parseFloat(dealValueMin)
     const max = dealValueMax.trim() === '' ? undefined : Number.parseFloat(dealValueMax)
-    const selectedAgencies = splitMultiFilter(agencyFilter)
-    const explicitAgents = splitMultiFilter(agentFilter)
-    const agencyMappedAgents = Array.from(
-      new Set(selectedAgencies.flatMap((agency) => HARDCODED_AGENCY_AGENT_MAP[agency] || []))
+    const finalSalesAgentFilter = resolveSalesAgentFilter(
+      splitMultiFilter(agencyFilter),
+      splitMultiFilter(agentFilter)
     )
-    let finalSalesAgentFilter: string | string[] | undefined
-    if (agencyMappedAgents.length > 0 && explicitAgents.length > 0) {
-      const normalizedAgencyAgents = new Set(agencyMappedAgents.map((a) => a.toUpperCase().trim()))
-      const intersection = explicitAgents.filter((a) => normalizedAgencyAgents.has(a.toUpperCase().trim()))
-      finalSalesAgentFilter = intersection.length > 0 ? (intersection.length === 1 ? intersection[0] : intersection) : '__none__'
-    } else if (agencyMappedAgents.length > 0) {
-      finalSalesAgentFilter = agencyMappedAgents
-    } else if (explicitAgents.length > 0) {
-      finalSalesAgentFilter = explicitAgents.length === 1 ? explicitAgents[0] : explicitAgents
-    }
 
     return {
       search: debouncedSearchTerm.trim() || undefined,
@@ -367,7 +311,7 @@ export default function DealTrackerPage() {
         setCarriers(uniqueCarriers as string[])
       }
 
-      setAgencies(HARDCODED_AGENCY_OPTIONS)
+      setAgencies(AGENCY_OPTIONS)
 
       const { data: agencyCarrierRows } = await supabase
         .from('agency_carriers')

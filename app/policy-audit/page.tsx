@@ -49,6 +49,7 @@ import {
   adminTdStrong,
   adminThPlain,
 } from '@/lib/adminFieldClasses'
+import { AGENCY_OPTIONS, salesAgentMatchesAgencies } from '@/lib/agencyAgents'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -470,6 +471,7 @@ export default function PolicyAuditPage() {
   const [creationDateFrom, setCreationDateFrom] = useState('')
   const [creationDateTo, setCreationDateTo] = useState('')
   const [filterCarriers, setFilterCarriers] = useState<string[]>([])
+  const [filterAgencies, setFilterAgencies] = useState<string[]>([])
   const [filterAgents, setFilterAgents] = useState<string[]>([])
   const [filterGhlStages, setFilterGhlStages] = useState<string[]>([])
   const [auditStatusFilter, setAuditStatusFilter] = useState<'all' | 'audited' | 'not-audited'>('not-audited')
@@ -681,6 +683,12 @@ export default function PolicyAuditPage() {
       const s = new Set(filterCarriers)
       rows = rows.filter((r) => r.carrier && s.has(r.carrier))
     }
+    if (filterAgencies.length > 0) {
+      // No agency column on deal_tracker — an agency is its roster of sales
+      // agents. Combined with the Agent filter below this intersects, matching
+      // how Deal Tracker resolves the same pair server-side.
+      rows = rows.filter((r) => salesAgentMatchesAgencies(r.sales_agent, filterAgencies))
+    }
     if (filterAgents.length > 0) {
       const s = new Set(filterAgents)
       rows = rows.filter((r) => r.sales_agent && s.has(r.sales_agent))
@@ -714,7 +722,7 @@ export default function PolicyAuditPage() {
 
     return rows
   }, [
-    currentTabRows, debouncedSearch, filterCarriers, filterAgents, filterGhlStages,
+    currentTabRows, debouncedSearch, filterCarriers, filterAgencies, filterAgents, filterGhlStages,
     effDateFrom, effDateTo, creationDateFrom, creationDateTo, auditStatusFilter,
     sortField, sortDir, notesByPolicyId,
   ])
@@ -728,7 +736,7 @@ export default function PolicyAuditPage() {
 
   // Reset page on filter/tab/sort change
   useEffect(() => { setCurrentPage(1) }, [
-    activeTab, debouncedSearch, filterCarriers, filterAgents, filterGhlStages,
+    activeTab, debouncedSearch, filterCarriers, filterAgencies, filterAgents, filterGhlStages,
     effDateFrom, effDateTo, creationDateFrom, creationDateTo, auditStatusFilter,
     sortField, sortDir, pageSize,
   ])
@@ -784,6 +792,7 @@ export default function PolicyAuditPage() {
   const activeFilterCount =
     (debouncedSearch ? 1 : 0) +
     (filterCarriers.length ? 1 : 0) +
+    (filterAgencies.length ? 1 : 0) +
     (filterAgents.length ? 1 : 0) +
     (filterGhlStages.length ? 1 : 0) +
     (effDateFrom || effDateTo ? 1 : 0) +
@@ -797,6 +806,7 @@ export default function PolicyAuditPage() {
     setCreationDateFrom('')
     setCreationDateTo('')
     setFilterCarriers([])
+    setFilterAgencies([])
     setFilterAgents([])
     setFilterGhlStages([])
     setAuditStatusFilter('all')
@@ -1094,6 +1104,7 @@ export default function PolicyAuditPage() {
               </div>
             </div>
             <MultiSelectDropdown label="Carrier" options={carrierOptions} selected={filterCarriers} onChange={setFilterCarriers} />
+            <MultiSelectDropdown label="Agency" options={AGENCY_OPTIONS} selected={filterAgencies} onChange={setFilterAgencies} />
             <MultiSelectDropdown label="Agent" options={agentOptions} selected={filterAgents} onChange={setFilterAgents} />
             <MultiSelectDropdown label="GHL Stage" options={ghlStageOptions} selected={filterGhlStages} onChange={setFilterGhlStages} />
           </div>
