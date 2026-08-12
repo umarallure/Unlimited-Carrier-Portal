@@ -24,6 +24,7 @@ import {
     ScrollText,
     Mail,
     ShieldOff,
+    AlarmClock,
     type LucideIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -165,6 +166,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Policy Audit"
           icon={AlertTriangle}
           active={navActive('/policy-audit')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/lapse-risk"
+          label="Lapse Risk"
+          icon={AlarmClock}
+          active={navActive('/lapse-risk')}
           collapsed={collapsed}
         />
         <NavRow

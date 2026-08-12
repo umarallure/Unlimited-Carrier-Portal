@@ -151,7 +151,11 @@ export async function POST(request: NextRequest) {
     policyNumber?: string
     newStage?: string
     note?: string
-    correspondenceId?: string
+    /**
+     * Opaque id of the record the change was driven from (a correspondence memo,
+     * a lapse-risk row). Echoed back so the caller can correlate; never stored.
+     */
+    sourceRef?: string
   }
 
   try {
@@ -359,7 +363,7 @@ export async function POST(request: NextRequest) {
     policyNumber,
     previousStage,
     newStage: canonicalStage,
-    correspondenceId: String(body.correspondenceId ?? '').trim() || null,
+    sourceRef: String(body.sourceRef ?? '').trim() || null,
     reviewNote: {
       saved: reviewNoteId != null,
       id: reviewNoteId,
