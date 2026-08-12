@@ -687,6 +687,43 @@ export function buildSentinelPolicyRows(records: ParsedRecord[], agencyCarrierId
   })
 }
 
+/**
+ * Americo policy export: Policies -> Search grid, scraped via scripts/carrier/
+ * scrape-policies-americo(-gologin).js since the portal has no direct "download
+ * policies" button. Columns match that grid exactly: Policy #, Insured, Agent,
+ * Agent #, Product, Policy Status, Status Date, Received Date, Effective Date,
+ * Terminated Date, Annualized Premium. Dates come as "M/D/YY" (e.g. "8/10/26"),
+ * same as Transamerica's export, so we reuse parseUsShortDate to avoid 2-digit-
+ * year misparsing in the DATE columns.
+ */
+export function buildAmericoPolicyRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
+  return records.map((r, idx) => {
+    const d = r.data
+    return {
+      agency_carrier_id: agencyCarrierId,
+      file_id: fileId,
+      row_number: idx + 1,
+      policy_number: normalizePolicyNumber(d['Policy #'] ?? r.policyNumber),
+
+      insured: d['Insured'] ?? null,
+      agent_name: d['Agent'] ?? null,
+      agent_number: d['Agent #'] ?? null,
+      product: d['Product'] ?? null,
+      policy_status: d['Policy Status'] ?? null,
+      status_date: parseUsShortDate(d['Status Date']),
+      received_date: parseUsShortDate(d['Received Date']),
+      effective_date: parseUsShortDate(d['Effective Date']),
+      terminated_date: parseUsShortDate(d['Terminated Date']),
+      annualized_premium: parseNumber(d['Annualized Premium']),
+
+      original_status: d['Policy Status'] ?? null,
+      status_normalized: null,
+      source_file: fileName,
+      source_format: 'AMERICO_POLICY',
+    }
+  })
+}
+
 /** RNA policy Excel (Certificates By Agent): parser adds Agent_ID, Agent_Name; block headers: Insured Name, Owner Name, Certificate Number, Product ID, Current Contract Status, etc. */
 export function buildRNAPolicyRows(records: ParsedRecord[], agencyCarrierId: string, fileId: string, fileName: string) {
   return records.map((r, idx) => {
@@ -807,7 +844,7 @@ export function buildRNACommissionRows(records: ParsedRecord[], agencyCarrierId:
   }))
 }
 
-type TargetTable = 'aetna_policies' | 'aetna_commissions' | 'amam_policies' | 'amam_commissions' | 'transamerica_policies' | 'transamerica_commissions' | 'moh_policies' | 'moh_commissions' | 'corebridge_policies' | 'corebridge_commissions' | 'liberty_policies' | 'liberty_commissions' | 'rna_policies' | 'rna_commissions' | 'aflac_policies' | 'aflac_commissions' | 'sentinel_policies' | 'sentinel_commissions' | 'ahl_policies' | 'ahl_commissions'
+type TargetTable = 'aetna_policies' | 'aetna_commissions' | 'amam_policies' | 'amam_commissions' | 'transamerica_policies' | 'transamerica_commissions' | 'moh_policies' | 'moh_commissions' | 'corebridge_policies' | 'corebridge_commissions' | 'liberty_policies' | 'liberty_commissions' | 'rna_policies' | 'rna_commissions' | 'aflac_policies' | 'aflac_commissions' | 'sentinel_policies' | 'sentinel_commissions' | 'ahl_policies' | 'ahl_commissions' | 'americo_policies' | 'americo_commissions'
 
 export function resolveTargetTable(carrierCode: string, fileType: FileKind): TargetTable {
   if (carrierCode === 'AETNA' && fileType === 'Policy') return 'aetna_policies'
@@ -830,6 +867,8 @@ export function resolveTargetTable(carrierCode: string, fileType: FileKind): Tar
   if (carrierCode === 'SENTINEL' && fileType === 'Commission') return 'sentinel_commissions'
   if (carrierCode === 'AHL' && fileType === 'Policy') return 'ahl_policies'
   if (carrierCode === 'AHL' && fileType === 'Commission') return 'ahl_commissions'
+  if (carrierCode === 'AMERICO' && fileType === 'Policy') return 'americo_policies'
+  if (carrierCode === 'AMERICO' && fileType === 'Commission') return 'americo_commissions'
   throw new Error(`Unsupported carrier/file type combination: ${carrierCode} / ${fileType}`)
 }
 
@@ -854,6 +893,7 @@ export function resolveSourceFormat(carrierCode: string, fileType: FileKind): st
   if (carrierCode === 'SENTINEL' && fileType === 'Commission') return 'SENTINEL_COMMISSION'
   if (carrierCode === 'AHL' && fileType === 'Policy') return 'AHL_POLICY'
   if (carrierCode === 'AHL' && fileType === 'Commission') return 'AHL_COMMISSION'
+  if (carrierCode === 'AMERICO' && fileType === 'Policy') return 'AMERICO_POLICY'
   return null
 }
 
@@ -924,6 +964,7 @@ export async function executeUpload(
   const isRNACommissionExcel = carrierCode === 'RNA' && fileType === 'Commission' && (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls'))
   const isCorebridgeCommissionPdf = carrierCode === 'COREBRIDGE' && fileType === 'Commission' && fileNameLower.endsWith('.pdf')
   const isSentinelCommissionPdf = carrierCode === 'SENTINEL' && fileType === 'Commission' && fileNameLower.endsWith('.pdf')
+  const isAmericoCommissionPdf = carrierCode === 'AMERICO' && fileType === 'Commission' && fileNameLower.endsWith('.pdf')
 
   console.log('[Upload Logic] Parsing file:', {
     fileName: file.name,
@@ -934,17 +975,24 @@ export async function executeUpload(
     isRNACommissionExcel,
     isCorebridgeCommissionPdf,
     isSentinelCommissionPdf,
+    isAmericoCommissionPdf,
   })
 
-  // Corebridge and Sentinel commission PDFs are parsed server-side by dedicated API routes.
-  // Rows are returned without inserting until Commission Report Save (same as CSV commission defer).
-  if (isCorebridgeCommissionPdf || isSentinelCommissionPdf) {
-    const url =
-      isCorebridgeCommissionPdf
-        ? '/api/corebridge/commission-from-pdf'
-        : '/api/sentinel/commission-from-pdf'
+  // Corebridge, Sentinel, and Americo commission PDFs are parsed server-side by
+  // dedicated API routes. Rows are returned without inserting until Commission
+  // Report Save (same as CSV commission defer).
+  if (isCorebridgeCommissionPdf || isSentinelCommissionPdf || isAmericoCommissionPdf) {
+    const url = isCorebridgeCommissionPdf
+      ? '/api/corebridge/commission-from-pdf'
+      : isSentinelCommissionPdf
+        ? '/api/sentinel/commission-from-pdf'
+        : '/api/americo/commission-from-pdf'
 
-    const targetTable = isCorebridgeCommissionPdf ? 'corebridge_commissions' : 'sentinel_commissions'
+    const targetTable = isCorebridgeCommissionPdf
+      ? 'corebridge_commissions'
+      : isSentinelCommissionPdf
+        ? 'sentinel_commissions'
+        : 'americo_commissions'
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -962,7 +1010,13 @@ export async function executeUpload(
       const msg = await resp.text()
       return {
         success: false,
-        error: msg || (isCorebridgeCommissionPdf ? 'Failed to parse Corebridge commission PDF.' : 'Failed to parse Sentinel commission PDF.'),
+        error:
+          msg ||
+          (isCorebridgeCommissionPdf
+            ? 'Failed to parse Corebridge commission PDF.'
+            : isSentinelCommissionPdf
+              ? 'Failed to parse Sentinel commission PDF.'
+              : 'Failed to parse Americo commission PDF.'),
       }
     }
 
@@ -1038,6 +1092,7 @@ export async function executeUpload(
   else if (carrierCode === 'AHL' && fileType === 'Policy') rows = buildAflacPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name).map(r => ({ ...r, source_format: 'AHL_POLICY' }))
   else if (carrierCode === 'AHL' && fileType === 'Commission') rows = buildAflacCommissionRows(parseResult.records, agencyCarrierId, fileRow.id, file.name).map(r => ({ ...r, source_format: 'AHL_COMMISSION' }))
   else if (carrierCode === 'SENTINEL' && fileType === 'Policy') rows = buildSentinelPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
+  else if (carrierCode === 'AMERICO' && fileType === 'Policy') rows = buildAmericoPolicyRows(parseResult.records, agencyCarrierId, fileRow.id, file.name)
 
   // For backdated commission uploads, tag rows that support statement_date.
   if (fileType === 'Commission' && uploadDateYmd && /^\d{4}-\d{2}-\d{2}$/.test(uploadDateYmd)) {
@@ -1087,7 +1142,8 @@ export async function executeUpload(
     targetTable === 'rna_policies' ||
     targetTable === 'aflac_policies' ||
     targetTable === 'sentinel_policies' ||
-    targetTable === 'ahl_policies'
+    targetTable === 'ahl_policies' ||
+    targetTable === 'americo_policies'
   const isCommissionTable =
     targetTable === 'aetna_commissions' ||
     targetTable === 'amam_commissions' ||

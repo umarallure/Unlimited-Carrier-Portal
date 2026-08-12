@@ -19,6 +19,10 @@
     "carrier:scrape:local": "node scripts/carrier/scrape-policies-local.js",
     "carrier:aetna:excel": "node scripts/carrier/download-aetna-excel.js",
     "carrier:aetna:excel:attach": "node scripts/carrier/download-aetna-excel-attach.js",
+    "carrier:login:americo": "node scripts/carrier/login-once-americo.js",
+    "carrier:scrape:americo": "node scripts/carrier/scrape-policies-americo.js",
+    "carrier:scrape:americo:gologin": "node scripts/carrier/scrape-policies-americo-gologin.js",
+    "carrier:login:americo:gologin": "node scripts/carrier/login-once-americo-gologin.js",
     "invoicing:seed:legacy": "node scripts/seed-invoicing-status-history-from-master-csv.js"
   },
   "dependencies": {

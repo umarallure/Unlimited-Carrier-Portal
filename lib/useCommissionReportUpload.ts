@@ -275,11 +275,12 @@ function dbRowToDisplay(
   carrierCode: string,
   dealTrackerMap?: Map<string, DealTrackerRow>
 ): CommissionDisplayRow {
-  // For Corebridge, we intentionally do NOT take the name from the
-  // commission file. We always prefer the policy/deal_tracker name so
-  // commissions only influence deal value, cc value and status.
+  // For Corebridge and Americo, we intentionally do NOT take the name from the
+  // commission file (Americo's name_desc is just an abbreviated last name, e.g.
+  // "SHIROMA" - not a usable full name). We always prefer the policy/deal_tracker
+  // name so commissions only influence deal value, cc value and status.
   let name =
-    carrierCode === 'COREBRIDGE'
+    carrierCode === 'COREBRIDGE' || carrierCode === 'AMERICO'
       ? ''
       : row.client ??
         row.client_name ??
@@ -293,6 +294,7 @@ function dbRowToDisplay(
     row.writingagent ??
     row.writing_agent_name ??
     row.paid_producer ??
+    row.agent_name ??
     row['Sales Agent'] ??
     ''
   const policyNumber = String(row.policy_number ?? '')
@@ -330,7 +332,9 @@ function dbRowToDisplay(
         ? (row.commission_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
         : carrierCode === 'TRANSAMERICA'
           ? (row.comm_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
-          : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
+          : carrierCode === 'AMERICO'
+            ? row.amt
+            : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
   let advance = rawAdvanceVal != null && rawAdvanceVal !== '' ? String(rawAdvanceVal) : ''
   let chargeBack = ''
 
@@ -357,7 +361,9 @@ function dbRowToDisplay(
                 ? 'Corebridge'
                 : carrierCode === 'TRANSAMERICA'
                   ? 'Transamerica'
-                  : 'Aetna'
+                  : carrierCode === 'AMERICO'
+                    ? 'Americo'
+                    : 'Aetna'
   const effectiveCarrierLabel = carrierLabel
   return {
     id: row.id,
@@ -563,6 +569,23 @@ function displayToDbRow(
     if (!Number.isNaN(advNum) && advNum > 0) base.commission_amount = advNum
     else if (!Number.isNaN(cbNum) && cbNum < 0) base.commission_amount = cbNum
     if (display.date) base.statement_date = display.date
+  } else if (carrierCode === 'AMERICO') {
+    base.name_desc = name
+    base.agent_name = salesAgent
+    if (display.commission_rate != null && display.commission_rate !== '') {
+      const rateNum = parseFloat(String(display.commission_rate).replace(/,/g, ''))
+      if (!Number.isNaN(rateNum)) base.rate = rateNum
+    }
+    const advNum = display.advance ? parseFloat(String(display.advance).replace(/,/g, '')) : NaN
+    const cbNum = display.charge_back ? parseFloat(String(display.charge_back).replace(/,/g, '')) : NaN
+    if (!Number.isNaN(advNum) && advNum > 0) {
+      base.amt = advNum
+    } else if (!Number.isNaN(cbNum) && cbNum < 0) {
+      base.amt = cbNum
+    } else {
+      base.amt = raw.amt as number
+    }
+    if (display.date) base.statement_date = display.date
   } else if (carrierCode === 'TRANSAMERICA') {
     base.insured_name = name
     base.writing_agent_name = salesAgent
@@ -613,6 +636,7 @@ function commissionTableForCarrier(carrierCode: string): string | null {
   if (c === 'SENTINEL') return 'sentinel_commissions'
   if (c === 'AHL') return 'ahl_commissions'
   if (c === 'TRANSAMERICA') return 'transamerica_commissions'
+  if (c === 'AMERICO') return 'americo_commissions'
   return null
 }
 
@@ -716,7 +740,8 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         carrierCode !== 'AFLAC' &&
         carrierCode !== 'SENTINEL' &&
         carrierCode !== 'AHL' &&
-        carrierCode !== 'TRANSAMERICA'
+        carrierCode !== 'TRANSAMERICA' &&
+        carrierCode !== 'AMERICO'
       )
         return
       deleteCommissionRowsOnAbandonRef.current = openOpts?.deleteOnAbandon !== false
