@@ -6,6 +6,12 @@
 import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
 import { resolveGhlStage, mergeEffectiveDateWithPendingRoll, isBlockedGhlStageRegression } from './ghlStageResolver'
+import {
+  fetchExceptionIndex,
+  partitionByException,
+  describeSkipped,
+  type ExceptionIndex,
+} from './policyExceptions'
 import { effectiveDateForThreeMonthRuleFromPreview, extractYmdFromDbValue } from './calendarDate'
 import { getDdfClient } from './ddfSource'
 import { buildDealTrackerAttribution } from './dealTrackerAttribution'
@@ -3568,10 +3574,19 @@ export function statusFromDealValueAndChargeback(
  */
 export async function saveDealTrackerEntries(
   entries: DealTrackerEntry[] | DealTrackerPreviewEntry[],
-  options?: { onProgress?: (msg: string) => void; triggerFileId?: string | null }
-): Promise<{ inserted: number; updated: number; failed: number }> {
+  options?: {
+    onProgress?: (msg: string) => void
+    triggerFileId?: string | null
+    /**
+     * Pre-loaded freeze list. Pass this when the caller already read it (so one
+     * upload does a single read); omit to have it loaded here. Pass
+     * EMPTY_EXCEPTION_INDEX to deliberately save without the protection.
+     */
+    exceptionIndex?: ExceptionIndex
+  }
+): Promise<{ inserted: number; updated: number; failed: number; skipped: number }> {
   if (!entries || entries.length === 0) {
-    return { inserted: 0, updated: 0, failed: 0 }
+    return { inserted: 0, updated: 0, failed: 0, skipped: 0 }
   }
 
   const log = (msg: string) => {
@@ -3580,6 +3595,32 @@ export async function saveDealTrackerEntries(
   }
 
   log(`Starting batch save for ${entries.length.toLocaleString()} entries...`)
+
+  // Exception list ("freeze list") — drop protected policies before any work is
+  // done on them, so an upload cannot change deal_tracker for a policy someone
+  // has deliberately frozen. Applied here rather than per-carrier because this is
+  // the single funnel every upload path goes through.
+  //
+  // Deliberate human edits bypass this entirely: the Deal Tracker grid, Policy
+  // Audit, Review Policies and the stage-change API routes write to deal_tracker
+  // directly and are unaffected.
+  //
+  // fetchExceptionIndex throws if the list cannot be read — that aborts the save
+  // rather than silently overwriting protected policies.
+  const exceptionIndex = options?.exceptionIndex ?? (await fetchExceptionIndex())
+  const { kept: allowedEntries, skipped: frozenEntries } = partitionByException(
+    exceptionIndex,
+    entries as DealTrackerEntry[],
+    (e) => e.policy_number
+  )
+  if (frozenEntries.length > 0) {
+    log(describeSkipped(frozenEntries, (e) => e.policy_number)!)
+  }
+  if (allowedEntries.length === 0) {
+    log('Every entry in this batch is on the exception list — nothing to save.')
+    return { inserted: 0, updated: 0, failed: 0, skipped: frozenEntries.length }
+  }
+  entries = allowedEntries
 
   // Clean entries: remove preview-only and auto-managed fields
   const now = new Date().toISOString()
@@ -3964,7 +4005,7 @@ export async function saveDealTrackerEntries(
   log(`Batch save complete. Saved ${saved.toLocaleString()} rows, failed ${failed.toLocaleString()}.`)
 
   // We no longer distinguish inserted vs updated here; both are "saved".
-  return { inserted: saved, updated: 0, failed }
+  return { inserted: saved, updated: 0, failed, skipped: frozenEntries.length }
 }
 
 /**

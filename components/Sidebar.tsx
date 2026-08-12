@@ -23,6 +23,7 @@ import {
     AlertTriangle,
     ScrollText,
     Mail,
+    ShieldOff,
     type LucideIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -164,6 +165,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Policy Audit"
           icon={AlertTriangle}
           active={navActive('/policy-audit')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/policy-exceptions"
+          label="Policy Exceptions"
+          icon={ShieldOff}
+          active={navActive('/policy-exceptions')}
           collapsed={collapsed}
         />
         <NavRow
