@@ -204,7 +204,6 @@ export async function POST(req: NextRequest) {
     }
 
     if (deferWrite === true) {
-      console.log('[Americo PDF] deferWrite: returning rows without DB insert')
       return NextResponse.json({
         rowsInserted: 0,
         rows,
@@ -212,7 +211,6 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    console.log('[Americo PDF] Parse stats:', { totalRows: rows.length })
 
     const { error: insertError } = await supabase.from('americo_commissions').insert(rows)
 
@@ -221,7 +219,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: insertError.message }, { status: 500 })
     }
 
-    console.log('[Americo PDF] Inserted americo_commissions rows:', rows.length)
     return NextResponse.json({ rowsInserted: rows.length })
   } catch (e: any) {
     console.error('[Americo PDF] Error handling request:', e)

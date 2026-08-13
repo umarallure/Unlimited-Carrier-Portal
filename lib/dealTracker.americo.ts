@@ -72,10 +72,6 @@ export async function processAmericoFilesForDealTracker(
   agencyCarrierId: string,
   fileId: string
 ): Promise<DealTrackerPreviewEntry[]> {
-  console.log('[Deal Tracker] processAmericoFilesForDealTracker called', {
-    agencyCarrierId,
-    fileId,
-  })
 
   const { data: agencyCarrier, error: acError } = await supabase
     .from('agency_carriers')
@@ -193,8 +189,6 @@ export async function processAmericoFilesForDealTracker(
   })
 
   const skipCount = policies.length - policiesNeedingDdf.length
-  console.log('[Deal Tracker] Americo: carrier=', carrierName, '| names to DDF=', uniqueInsuredNames.length, '| skip (already have DDF)=', skipCount)
-
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
       ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier, undefined, policyNumberByName)
@@ -202,8 +196,6 @@ export async function processAmericoFilesForDealTracker(
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
         >()
-
-  console.log('[Deal Tracker] Americo: DDF map size after fetch:', dailyDealFlowMap.size, 'of', uniqueInsuredNames.length, 'names')
 
   const previewEntries: DealTrackerPreviewEntry[] = []
 
@@ -355,7 +347,6 @@ export async function processAmericoFilesForDealTracker(
     previewEntries.push(entry)
   }
 
-  console.log('[Deal Tracker] Americo policy processing complete. Total entries:', previewEntries.length)
   return previewEntries
 }
 
@@ -381,11 +372,6 @@ export async function processAmericoCommissionsForDealTracker(
   fileId: string,
   commissionsOverride?: ReadonlyArray<Record<string, unknown>>
 ): Promise<DealTrackerPreviewEntry[]> {
-  console.log('[Deal Tracker] processAmericoCommissionsForDealTracker called', {
-    agencyCarrierId,
-    fileId,
-    fromMemory: !!(commissionsOverride && commissionsOverride.length > 0),
-  })
 
   const { data: agencyCarrier, error: acError } = await supabase
     .from('agency_carriers')
@@ -526,10 +512,8 @@ export async function processAmericoCommissionsForDealTracker(
     })
 
     if (namesForDdf.length > 0) {
-      console.log('[Deal Tracker] Americo commissions: fetching DDF for', namesForDdf.length, 'names')
       dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(namesForDdf, ddfCarrier, undefined, policyNumberByName)
     } else {
-      console.log('[Deal Tracker] Americo commissions: no policy names for DDF - upload the policy file first so americo_policies has rows for these policy numbers')
     }
   }
 
@@ -711,6 +695,5 @@ export async function processAmericoCommissionsForDealTracker(
     previewEntries.push(entry)
   }
 
-  console.log('[Deal Tracker] Americo commissions processing complete. Total entries:', previewEntries.length)
   return previewEntries
 }
