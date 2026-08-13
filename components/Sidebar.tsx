@@ -22,6 +22,8 @@ import {
     ClipboardCheck,
     AlertTriangle,
     ScrollText,
+    Mail,
+    ShieldOff,
     type LucideIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -166,10 +168,24 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           collapsed={collapsed}
         />
         <NavRow
+          href="/policy-exceptions"
+          label="Policy Exceptions"
+          icon={ShieldOff}
+          active={navActive('/policy-exceptions')}
+          collapsed={collapsed}
+        />
+        <NavRow
           href="/deal-tracker-compare"
           label="Deal Tracker Compare"
           icon={FileText}
           active={navActive('/deal-tracker-compare')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/amam-correspondence"
+          label="AMAM Correspondence"
+          icon={Mail}
+          active={navActive('/amam-correspondence')}
           collapsed={collapsed}
         />
         <NavRow href="/ghl-stages" label="GHL Stages" icon={LayoutGrid} active={navActive('/ghl-stages')} collapsed={collapsed} />

@@ -8,7 +8,7 @@ import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Calendar, Loader2, Search } from 'lucide-react'
+import { Calendar, Loader2, Search, Trash2 } from 'lucide-react'
 import { Plus } from 'lucide-react'
 import { MultiSelectFilter } from '@/components/filters/MultiSelectFilter'
 import { type AgencyCarrierOption } from '@/components/DealTrackerPolicyDialog'
@@ -16,7 +16,6 @@ import { CommissionTransactionDialog, type CommissionTransactionForm } from '@/c
 import {
   ActiveFilterChips,
   FilterBarHeader,
-  QuickDateRangeChips,
 } from '@/components/filters/SmartFilters'
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/utils'
@@ -117,8 +116,7 @@ export default function CommissionReportPage() {
   const [agencyOptions, setAgencyOptions] = useState<string[]>([])
   const [sourceFilter, setSourceFilter] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
-  const [dateFrom, setDateFrom] = useState('')
-  const [dateTo, setDateTo] = useState('')
+  const [filterDate, setFilterDate] = useState('')
   const [carrierCodeById, setCarrierCodeById] = useState<Map<string, string | null>>(new Map())
   const [carrierCodeByName, setCarrierCodeByName] = useState<Map<string, string | null>>(new Map())
   const [currentPage, setCurrentPage] = useState(1)
@@ -132,6 +130,10 @@ export default function CommissionReportPage() {
   const [editMode, setEditMode] = useState(false)
   const [savingInlineEdits, setSavingInlineEdits] = useState(false)
   const [draftByTransactionId, setDraftByTransactionId] = useState<Record<string, any>>({})
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
+  const [deleting, setDeleting] = useState(false)
+  const [selectedTxIds, setSelectedTxIds] = useState<Set<string>>(new Set())
+  const [deletingTx, setDeletingTx] = useState(false)
 
   const fetchAllCommissionRows = async () => {
     setLoading(true)
@@ -344,16 +346,7 @@ export default function CommissionReportPage() {
     const policy = row.policy_number ?? ''
     const salesAgent = row.sales_agent ?? ''
 
-    const dt = normalizeDate(row.date)
-
-    if (dateFrom) {
-      const from = new Date(dateFrom)
-      if (!dt || dt < from) return false
-    }
-    if (dateTo) {
-      const to = new Date(dateTo)
-      if (!dt || dt > to) return false
-    }
+    if (filterDate && row.date !== filterDate) return false
 
     if (carrierCode.length > 0 && !carrierCode.includes(row.carrier?.trim() ?? '')) return false
     if (agentFilter.length > 0 && !agentFilter.includes(row.sales_agent?.trim() ?? '')) return false
@@ -368,11 +361,16 @@ export default function CommissionReportPage() {
     }
 
     if (!searchTerm) return true
-    const q = searchTerm.toLowerCase()
+    const q = searchTerm.trim()
+    if (q.includes(',')) {
+      const policies = q.split(',').map(s => s.trim()).filter(Boolean)
+      if (policies.length > 0) return policies.includes(row.policy_number)
+    }
+    const lc = q.toLowerCase()
     return (
-      String(name).toLowerCase().includes(q) ||
-      String(policy).toLowerCase().includes(q) ||
-      String(salesAgent).toLowerCase().includes(q)
+      String(name).toLowerCase().includes(lc) ||
+      String(policy).toLowerCase().includes(lc) ||
+      String(salesAgent).toLowerCase().includes(lc)
     )
   })
 
@@ -380,7 +378,7 @@ export default function CommissionReportPage() {
   useEffect(() => {
     setCurrentPage(1)
     setExpandedKey(null)
-  }, [carrierCode, agentFilter, agencyFilter, sourceFilter, searchTerm, dateFrom, dateTo])
+  }, [carrierCode, agentFilter, agencyFilter, sourceFilter, searchTerm, filterDate])
 
   const filteredStats = useMemo(() => {
     const policyKeys = new Set(filtered.map((r) => policyGroupKey(r)))
@@ -454,9 +452,9 @@ export default function CommissionReportPage() {
     if (agentFilter.length > 0) n++
     if (agencyFilter.length > 0) n++
     if (sourceFilter !== 'all') n++
-    if (dateFrom || dateTo) n++
+    if (filterDate) n++
     return n
-  }, [searchTerm, carrierCode, agentFilter, sourceFilter, dateFrom, dateTo])
+  }, [searchTerm, carrierCode, agentFilter, sourceFilter, filterDate])
 
   const activeChips = useMemo(() => {
     const items: { key: string; label: string; onRemove: () => void }[] = []
@@ -490,17 +488,14 @@ export default function CommissionReportPage() {
         label: `Source: ${sourceFilter}`,
         onRemove: () => setSourceFilter('all'),
       })
-    if (dateFrom || dateTo)
+    if (filterDate)
       items.push({
         key: 'd',
-        label: `Date: ${dateFrom || '…'} → ${dateTo || '…'}`,
-        onRemove: () => {
-          setDateFrom('')
-          setDateTo('')
-        },
+        label: `Date: ${filterDate}`,
+        onRemove: () => setFilterDate(''),
       })
     return items
-  }, [searchTerm, carrierCode, agentFilter, agencyFilter, sourceFilter, dateFrom, dateTo])
+  }, [searchTerm, carrierCode, agentFilter, agencyFilter, sourceFilter, filterDate])
 
   const clearAllFilters = () => {
     setSearchTerm('')
@@ -508,8 +503,7 @@ export default function CommissionReportPage() {
     setAgentFilter([])
     setAgencyFilter([])
     setSourceFilter('all')
-    setDateFrom('')
-    setDateTo('')
+    setFilterDate('')
   }
 
   const openCreateCommissionDialog = () => {
@@ -580,6 +574,64 @@ export default function CommissionReportPage() {
       alert(error?.message || 'Failed to save commission edits.')
     } finally {
       setSavingInlineEdits(false)
+    }
+  }
+
+  const deleteSelected = async () => {
+    if (selectedKeys.size === 0) return
+    const count = selectedKeys.size
+    const confirmed = confirm(`Delete ${count} commission entr${count === 1 ? 'y' : 'ies'}? This cannot be undone.`)
+    if (!confirmed) return
+
+    setDeleting(true)
+    try {
+      const idsToDelete: string[] = []
+      for (const key of selectedKeys) {
+        const [agencyCarrierId, policyNumber] = key.split('::')
+        const txRows = allRows.filter(
+          (r) => r.agency_carrier_id === agencyCarrierId && r.policy_number === policyNumber
+        )
+        for (const tx of txRows) {
+          if (tx.id) idsToDelete.push(tx.id)
+        }
+      }
+      if (idsToDelete.length === 0) return
+
+      const { error } = await supabase
+        .from('commission_tracker')
+        .delete()
+        .in('id', idsToDelete)
+
+      if (error) throw error
+
+      setSelectedKeys(new Set())
+      await fetchAllCommissionRows()
+    } catch (error: any) {
+      alert(error?.message || 'Failed to delete commission entries.')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const deleteSelectedTransactions = async () => {
+    const ids = Array.from(selectedTxIds).filter(Boolean)
+    if (ids.length === 0) return
+    const confirmed = confirm(`Delete ${ids.length} individual commission transaction${ids.length === 1 ? '' : 's'}? This cannot be undone.`)
+    if (!confirmed) return
+
+    setDeletingTx(true)
+    try {
+      const { error } = await supabase
+        .from('commission_tracker')
+        .delete()
+        .in('id', ids)
+      if (error) throw error
+      setSelectedTxIds(new Set())
+      await fetchAllCommissionRows()
+    } catch (error: any) {
+      alert(error?.message || 'Failed to delete commission transactions.')
+    } finally {
+      setDeletingTx(false)
     }
   }
 
@@ -711,39 +763,17 @@ export default function CommissionReportPage() {
             </Select>
           </div>
 
-          <QuickDateRangeChips
-            dateFrom={dateFrom}
-            dateTo={dateTo}
-            onRangeChange={(f, t) => {
-              setDateFrom(f)
-              setDateTo(t)
-            }}
-          />
-
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">From</span>
+              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Date</span>
               <div className="flex items-center gap-2">
                 <Calendar className="h-4 w-4 shrink-0 text-orange-500 dark:text-orange-400" />
                 <Input
                   type="date"
-                  value={dateFrom}
-                  onChange={(e) => setDateFrom(e.target.value)}
+                  value={filterDate}
+                  onChange={(e) => setFilterDate(e.target.value)}
                   className={adminDateInput}
-                  title="From date"
-                />
-              </div>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">To</span>
-              <div className="flex items-center gap-2">
-                <Calendar className="h-4 w-4 shrink-0 text-orange-500 dark:text-orange-400" />
-                <Input
-                  type="date"
-                  value={dateTo}
-                  onChange={(e) => setDateTo(e.target.value)}
-                  className={adminDateInput}
-                  title="To date"
+                  title="Filter by exact commission date"
                 />
               </div>
             </div>
@@ -811,9 +841,23 @@ export default function CommissionReportPage() {
               Add commission
             </Button>
             {!editMode ? (
-              <Button variant="outline" size="sm" onClick={startInlineEdit} className={adminOutlineBtn}>
-                Edit table
-              </Button>
+              <>
+                <Button variant="outline" size="sm" onClick={startInlineEdit} className={adminOutlineBtn}>
+                  Edit table
+                </Button>
+                {selectedKeys.size > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={deleteSelected}
+                    disabled={deleting}
+                    className="border-red-300 text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/30"
+                  >
+                    <Trash2 className="mr-1 h-4 w-4" />
+                    {deleting ? 'Deleting...' : `Delete (${selectedKeys.size})`}
+                  </Button>
+                )}
+              </>
             ) : (
               <>
                 <Button variant="outline" size="sm" onClick={cancelInlineEdit} className={adminOutlineBtn}>
@@ -836,6 +880,23 @@ export default function CommissionReportPage() {
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border hover:bg-transparent odd:bg-transparent even:bg-transparent dark:border-slate-800">
+                  <TableHead className={cn(adminThPlain, 'w-10')}>
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 cursor-pointer"
+                      checked={selectedKeys.size > 0 && selectedKeys.size === paginated.length}
+                      ref={(el) => {
+                        if (el) el.indeterminate = selectedKeys.size > 0 && selectedKeys.size < paginated.length
+                      }}
+                      onChange={() => {
+                        if (selectedKeys.size === paginated.length) {
+                          setSelectedKeys(new Set())
+                        } else {
+                          setSelectedKeys(new Set(paginated.map((r) => policyGroupKey(r))))
+                        }
+                      }}
+                    />
+                  </TableHead>
                   <TableHead className={adminThPlain}>Name</TableHead>
                   <TableHead className={adminThPlain}>Date</TableHead>
                   <TableHead className={adminThPlain}>Policy Number</TableHead>
@@ -850,13 +911,13 @@ export default function CommissionReportPage() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center py-8">
+                    <TableCell colSpan={10} className="text-center py-8">
                       <Loader2 className="w-8 h-8 animate-spin text-orange-400 mx-auto" />
                     </TableCell>
                   </TableRow>
                 ) : filtered.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
+                    <TableCell colSpan={10} className="py-8 text-center text-muted-foreground">
                       No commission rows found for the current filters.
                     </TableCell>
                   </TableRow>
@@ -894,6 +955,19 @@ export default function CommissionReportPage() {
                     return (
                       <Fragment key={row.id || `${policyNumber}-${idx}`}>
                         <TableRow className={adminTableRowInteractive}>
+                          <TableCell className={cn(adminTdMuted, 'w-10')}>
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 cursor-pointer"
+                              checked={selectedKeys.has(key)}
+                              onChange={() => {
+                                const next = new Set(selectedKeys)
+                                if (next.has(key)) next.delete(key)
+                                else next.add(key)
+                                setSelectedKeys(next)
+                              }}
+                            />
+                          </TableCell>
                           <TableCell className={adminTdStrong}>{name}</TableCell>
                           <TableCell className={adminTdMuted}>
                             {row.date || '-'}
@@ -930,15 +1004,54 @@ export default function CommissionReportPage() {
                         </TableRow>
                         {expandedKey === key && (
                           <TableRow className={adminExpandRowBg}>
-                            <TableCell colSpan={9} className="p-0">
+                            <TableCell colSpan={10} className="p-0">
                               <div className="border-t border-border px-4 py-3 dark:border-slate-800">
-                                <div className="mb-2 text-xs font-semibold text-foreground dark:text-slate-300">
-                                  Individual commission transactions for policy {policyNumber}
+                                <div className="mb-2 flex items-center gap-2">
+                                  <span className="text-xs font-semibold text-foreground dark:text-slate-300">
+                                    Individual commission transactions for policy {policyNumber}
+                                  </span>
+                                  {selectedTxIds.size > 0 && (
+                                    <button
+                                      type="button"
+                                      disabled={deletingTx}
+                                      onClick={deleteSelectedTransactions}
+                                      className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                      {deletingTx ? 'Deleting...' : `Delete (${selectedTxIds.size})`}
+                                    </button>
+                                  )}
                                 </div>
                                 <div className={adminNestedTableShell}>
                                   <Table>
                                     <TableHeader>
                                       <TableRow className="border-b border-border dark:border-slate-800">
+                                        <TableHead className={cn(adminThPlain, 'w-8 text-xs')}>
+                                          {detailRows.some(r => r.id) && (
+                                            <input
+                                              type="checkbox"
+                                              className="h-3.5 w-3.5 cursor-pointer"
+                                              checked={
+                                                selectedTxIds.size > 0 &&
+                                                selectedTxIds.size === detailRows.filter(r => r.id).length
+                                              }
+                                              ref={(el) => {
+                                                if (el) {
+                                                  const withIds = detailRows.filter(r => r.id)
+                                                  el.indeterminate = selectedTxIds.size > 0 && selectedTxIds.size < withIds.length
+                                                }
+                                              }}
+                                              onChange={() => {
+                                                const withIds = detailRows.filter(r => r.id).map(r => String(r.id))
+                                                if (withIds.every(id => selectedTxIds.has(id))) {
+                                                  setSelectedTxIds(new Set())
+                                                } else {
+                                                  setSelectedTxIds(new Set(withIds))
+                                                }
+                                              }}
+                                            />
+                                          )}
+                                        </TableHead>
                                         <TableHead className={`${adminThPlain} text-xs`}>Date</TableHead>
                                         <TableHead className={`${adminThPlain} text-xs`}>Name</TableHead>
                                         <TableHead className={`${adminThPlain} text-xs`}>Sales Agent</TableHead>
@@ -961,6 +1074,21 @@ export default function CommissionReportPage() {
                                           const txDraft = txId ? draftByTransactionId[txId] : null
                                           return (
                                             <TableRow key={tx.id || `${key}-tx-${i}`} className="border-b border-border/80 dark:border-slate-900/60">
+                                              <TableCell className={cn(adminTdMuted, 'w-8 text-xs')}>
+                                                {tx.id ? (
+                                                  <input
+                                                    type="checkbox"
+                                                    className="h-3.5 w-3.5 cursor-pointer"
+                                                    checked={selectedTxIds.has(txId)}
+                                                    onChange={() => {
+                                                      const next = new Set(selectedTxIds)
+                                                      if (next.has(txId)) next.delete(txId)
+                                                      else next.add(txId)
+                                                      setSelectedTxIds(next)
+                                                    }}
+                                                  />
+                                                ) : null}
+                                              </TableCell>
                                               <TableCell className={`${adminTdMuted} text-xs`}>
                                                 {editMode && txId ? (
                                                   <Input

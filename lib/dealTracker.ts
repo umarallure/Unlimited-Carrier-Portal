@@ -5,7 +5,13 @@
 
 import { supabase } from './supabaseClient'
 import { createClient } from '@supabase/supabase-js'
-import { resolveGhlStage, mergeEffectiveDateWithPendingRoll } from './ghlStageResolver'
+import { resolveGhlStage, mergeEffectiveDateWithPendingRoll, isBlockedGhlStageRegression } from './ghlStageResolver'
+import {
+  fetchExceptionIndex,
+  partitionByException,
+  describeSkipped,
+  type ExceptionIndex,
+} from './policyExceptions'
 import { effectiveDateForThreeMonthRuleFromPreview, extractYmdFromDbValue } from './calendarDate'
 import { getDdfClient } from './ddfSource'
 import { buildDealTrackerAttribution } from './dealTrackerAttribution'
@@ -3568,10 +3574,19 @@ export function statusFromDealValueAndChargeback(
  */
 export async function saveDealTrackerEntries(
   entries: DealTrackerEntry[] | DealTrackerPreviewEntry[],
-  options?: { onProgress?: (msg: string) => void; triggerFileId?: string | null }
-): Promise<{ inserted: number; updated: number; failed: number }> {
+  options?: {
+    onProgress?: (msg: string) => void
+    triggerFileId?: string | null
+    /**
+     * Pre-loaded freeze list. Pass this when the caller already read it (so one
+     * upload does a single read); omit to have it loaded here. Pass
+     * EMPTY_EXCEPTION_INDEX to deliberately save without the protection.
+     */
+    exceptionIndex?: ExceptionIndex
+  }
+): Promise<{ inserted: number; updated: number; failed: number; skipped: number }> {
   if (!entries || entries.length === 0) {
-    return { inserted: 0, updated: 0, failed: 0 }
+    return { inserted: 0, updated: 0, failed: 0, skipped: 0 }
   }
 
   const log = (msg: string) => {
@@ -3580,6 +3595,32 @@ export async function saveDealTrackerEntries(
   }
 
   log(`Starting batch save for ${entries.length.toLocaleString()} entries...`)
+
+  // Exception list ("freeze list") — drop protected policies before any work is
+  // done on them, so an upload cannot change deal_tracker for a policy someone
+  // has deliberately frozen. Applied here rather than per-carrier because this is
+  // the single funnel every upload path goes through.
+  //
+  // Deliberate human edits bypass this entirely: the Deal Tracker grid, Policy
+  // Audit, Review Policies and the stage-change API routes write to deal_tracker
+  // directly and are unaffected.
+  //
+  // fetchExceptionIndex throws if the list cannot be read — that aborts the save
+  // rather than silently overwriting protected policies.
+  const exceptionIndex = options?.exceptionIndex ?? (await fetchExceptionIndex())
+  const { kept: allowedEntries, skipped: frozenEntries } = partitionByException(
+    exceptionIndex,
+    entries as DealTrackerEntry[],
+    (e) => e.policy_number
+  )
+  if (frozenEntries.length > 0) {
+    log(describeSkipped(frozenEntries, (e) => e.policy_number)!)
+  }
+  if (allowedEntries.length === 0) {
+    log('Every entry in this batch is on the exception list — nothing to save.')
+    return { inserted: 0, updated: 0, failed: 0, skipped: frozenEntries.length }
+  }
+  entries = allowedEntries
 
   // Clean entries: remove preview-only and auto-managed fields
   const now = new Date().toISOString()
@@ -3857,6 +3898,54 @@ export async function saveDealTrackerEntries(
   const attribution = await buildDealTrackerAttribution(options?.triggerFileId ?? null)
   cleanEntries = cleanEntries.map(e => ({ ...e, ...attribution }))
 
+  // Snapshot each existing row's ghl_stage before saving, so we can log stage
+  // movement (deal_tracker_status_history) for whatever the upsert actually changes.
+  const ghlHistoryKeys = cleanEntries.filter(e => e.agency_carrier_id && e.policy_number)
+  const existingGhlStageForHistory = new Map<string, { id: string; ghl_stage: string | null; carrier: string | null }>()
+  {
+    const agencyCarrierIds = [...new Set(ghlHistoryKeys.map(e => e.agency_carrier_id))]
+    const CHUNK = 100
+    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
+      const ids = agencyCarrierIds.slice(i, i + CHUNK)
+      const { data: rows } = await supabase
+        .from('deal_tracker')
+        .select('id, agency_carrier_id, policy_number, ghl_stage, carrier')
+        .in('agency_carrier_id', ids)
+      if (rows) {
+        for (const row of rows as any[]) {
+          existingGhlStageForHistory.set(`${row.agency_carrier_id}\0${row.policy_number}`, row)
+        }
+      }
+    }
+  }
+
+  // Final save-time guard, independent of carrier or how ghl_stage was computed
+  // (auto-mapped from any carrier's status text, or hand-edited in the verification
+  // dialog): never let a save actually persist a regression away from an
+  // auditor-only stage (FDPF family -> Pending Approval / FDPF Pending Reason,
+  // Pending Manual Action -> Pending Approval). Revert just that field and keep
+  // saving the rest of the row.
+  const blockedGhlStageRegressions: { policy_number: string; from: string | null; attempted: string | null }[] = []
+  cleanEntries = cleanEntries.map(e => {
+    if (!e.agency_carrier_id || !e.policy_number) return e
+    const existingRow = existingGhlStageForHistory.get(`${e.agency_carrier_id}\0${e.policy_number}`)
+    if (!existingRow) return e
+    if (!isBlockedGhlStageRegression(existingRow.ghl_stage, e.ghl_stage)) return e
+    blockedGhlStageRegressions.push({
+      policy_number: e.policy_number,
+      from: existingRow.ghl_stage,
+      attempted: e.ghl_stage,
+    })
+    return { ...e, ghl_stage: existingRow.ghl_stage }
+  })
+  if (blockedGhlStageRegressions.length > 0) {
+    log(
+      `Kept GHL Stage unchanged for ${blockedGhlStageRegressions.length.toLocaleString()} polic${blockedGhlStageRegressions.length === 1 ? 'y' : 'ies'} ` +
+      `(blocked: ${blockedGhlStageRegressions.slice(0, 5).map(r => `${r.policy_number} "${r.attempted}" -> stays "${r.from}"`).join(', ')}` +
+      `${blockedGhlStageRegressions.length > 5 ? `, +${blockedGhlStageRegressions.length - 5} more` : ''})`
+    )
+  }
+
   const BATCH_SIZE = 500
   let saved = 0
   let failed = 0
@@ -3879,13 +3968,44 @@ export async function saveDealTrackerEntries(
     } else {
       saved += batch.length
       log(`Saved ${saved.toLocaleString()}/${cleanEntries.length.toLocaleString()} rows`)
+
+      const historyRows = batch
+        .filter((e: any) => e.agency_carrier_id && e.policy_number)
+        .map((e: any) => {
+          const existingRow = existingGhlStageForHistory.get(`${e.agency_carrier_id}\0${e.policy_number}`)
+          if (!existingRow) return null // new policy row: no prior stage to move from
+          const prevStage = existingRow.ghl_stage ?? null
+          const nextStage = e.ghl_stage ?? null
+          if (valueEqual(prevStage, nextStage)) return null
+          return {
+            deal_tracker_id: existingRow.id,
+            agency_carrier_id: e.agency_carrier_id,
+            carrier: e.carrier ?? existingRow.carrier ?? null,
+            policy_number: e.policy_number,
+            previous_ghl_stage: prevStage,
+            new_ghl_stage: nextStage,
+            source: 'upload',
+            file_id: e.last_changed_by_file_id ?? null,
+            file_name: e.last_changed_by_file_name ?? null,
+            changed_by_user_id: e.last_changed_by_user_id ?? null,
+            changed_by_user_email: e.last_changed_by_user_email ?? null,
+          }
+        })
+        .filter((row): row is NonNullable<typeof row> => row != null)
+
+      if (historyRows.length > 0) {
+        const { error: historyError } = await supabase.from('deal_tracker_status_history').insert(historyRows)
+        if (historyError) {
+          console.error('[Deal Tracker] Failed to insert ghl_stage history:', historyError)
+        }
+      }
     }
   }
 
   log(`Batch save complete. Saved ${saved.toLocaleString()} rows, failed ${failed.toLocaleString()}.`)
 
   // We no longer distinguish inserted vs updated here; both are "saved".
-  return { inserted: saved, updated: 0, failed }
+  return { inserted: saved, updated: 0, failed, skipped: frozenEntries.length }
 }
 
 /**
