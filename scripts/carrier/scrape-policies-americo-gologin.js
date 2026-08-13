@@ -8,7 +8,7 @@ const lib = require('./americo-scrape-lib');
 const { env } = lib;
 
 const GOLOGIN_TOKEN = env('GOLOGIN_TOKEN', '') || env('GL_API_TOKEN', '');
-const GOLOGIN_PROFILE_ID = env('GOLOGIN_PROFILE_ID', '') || env('GOLOGIN_PROFILEID', '');
+const GOLOGIN_PROFILE_ID = env('AMERICO_PROFILE_ID', '') || env('GOLOGIN_PROFILE_ID', '') || env('GOLOGIN_PROFILEID', '');
 const PROXY_USER = env('CARRIER_PROXY_USER_AMERICO', '');
 const PROXY_PASS = env('CARRIER_PROXY_PASS_AMERICO', '');
 const CARRIER_PROXY_HOST = env('CARRIER_PROXY_HOST_AMERICO', '');
@@ -139,19 +139,43 @@ async function createBrowserWithSession() {
     lastAttemptWasHeadless = false;
   }
 
-  // Last resort: still not authenticated, but we already have a visible
-  // (headful) browser open from the retry above (or as the only attempt, if
-  // HEADLESS=0) - rather than closing it and making you run
-  // login-once-americo-gologin.js as a separate step, offer to log in right
-  // here. Skipped when there's no visible browser to use (HEADLESS=1 -
-  // explicitly unattended) or no human to prompt (stdin isn't a real
-  // terminal, e.g. a future cron/server job - blocking on a keypress that
-  // will never come would just hang forever).
+  // Still not authenticated, but we already have a visible (headful) browser
+  // open from the retry above (or as the only attempt, if HEADLESS=0) - try
+  // filling AMERICO_USERNAME/AMERICO_PASSWORD and submitting before falling
+  // back to a human prompt. This needs no TTY/human at all, so it runs
+  // whenever there's a headful browser to use, independent of the
+  // stdin.isTTY check below (which only gates the *human* fallback for
+  // whatever's left - normally just 2FA/email confirmation, if Americo
+  // challenges this login).
+  if (!attempt.authenticated && !lastAttemptWasHeadless) {
+    const autoLoginAttempted = await lib.attemptAutoLogin(attempt.page);
+    if (autoLoginAttempted) {
+      const currentUrl = attempt.page.url();
+      if (!lib.isLoginPage(currentUrl) && currentUrl.includes('portal.americoagent.com')) {
+        attempt.authenticated = true;
+        console.log('Auto-login succeeded - no 2FA challenge this time. Continuing...');
+      } else {
+        console.log('Credentials submitted automatically. Still need a human for whatever comes next (2FA/email confirmation).');
+      }
+    } else {
+      console.log('Auto-login skipped (AMERICO_USERNAME/AMERICO_PASSWORD not set in .env, or login form not detected) - falling back to manual.');
+    }
+  }
+
+  // Last resort: still not authenticated after the auto-login attempt above
+  // (or auto-login wasn't possible - no AMERICO_USERNAME/AMERICO_PASSWORD
+  // set). Offer to log in right here rather than closing the browser and
+  // making you run login-once-americo-gologin.js as a separate step. Skipped
+  // when there's no visible browser to use (HEADLESS=1 - explicitly
+  // unattended) or no human to prompt (stdin isn't a real terminal, e.g. a
+  // future cron/server job - blocking on a keypress that will never come
+  // would just hang forever).
   if (!attempt.authenticated && !lastAttemptWasHeadless && process.stdin.isTTY) {
     const pollIntervalMs = 3000;
     const maxWaitMs = Number(env('LOGIN_WAIT_TIMEOUT_MS', '600000')); // 10 min default
-    console.log('\nNot logged in yet. Log in on the Americo site in the browser window that opened.');
-    console.log(`Take whatever time you need (2FA, email confirmation, etc.) - this continues automatically`);
+    console.log('\nNot logged in yet. Check the browser window that opened - if credentials were');
+    console.log('submitted automatically above, this is likely just a 2FA/email confirmation step;');
+    console.log('otherwise log in manually. Take whatever time you need - this continues automatically');
     console.log(`once you're back on the portal (checking every ${pollIntervalMs / 1000}s, up to ${Math.round(maxWaitMs / 60000)} min).\n`);
 
     // Passive polling only - never force-navigate the page while waiting, so

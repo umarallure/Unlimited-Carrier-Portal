@@ -106,7 +106,10 @@ export function DealTrackerVerificationDialog({
   const [openDdfRowKey, setOpenDdfRowKey] = useState<string | null>(null)
   const [ddfMatches, setDdfMatches] = useState<Record<string, { loading: boolean; error: string | null; matches: DdfMatchRow[] }>>({})
   const [expandedChangesRowKey, setExpandedChangesRowKey] = useState<string | null>(null)
-  const [incompleteSnapshot, setIncompleteSnapshot] = useState<Set<number>>(new Set())
+  // Keyed by policy_number (not array index) - removing a row shifts every
+  // subsequent row's index down, so an index-based snapshot would silently
+  // start matching the wrong (now-shifted) rows after any removal.
+  const [incompleteSnapshot, setIncompleteSnapshot] = useState<Set<string>>(new Set())
 
   // Keep editable state in sync with props when dialog opens or entries change
   useEffect(() => {
@@ -170,9 +173,9 @@ export function DealTrackerVerificationDialog({
       setError(
         'Incomplete rows found. Fill Effective Date, Call Center, and Phone (and ensure GHL Stage is valid) for every row before saving.'
       )
-      const snap = new Set<number>()
-      editableEntries.forEach((e, idx) => {
-        if (isEntryIncomplete(e)) snap.add(idx)
+      const snap = new Set<string>()
+      editableEntries.forEach((e) => {
+        if (isEntryIncomplete(e)) snap.add(String(e.policy_number ?? ''))
       })
       setIncompleteSnapshot(snap)
       setFilter('incomplete')
@@ -196,9 +199,9 @@ export function DealTrackerVerificationDialog({
       setError(
         'Incomplete rows found. Fill Effective Date, Call Center, and Phone (and ensure GHL Stage is valid) for every row before continuing to Commission Report.'
       )
-      const snap = new Set<number>()
-      editableEntries.forEach((e, idx) => {
-        if (isEntryIncomplete(e)) snap.add(idx)
+      const snap = new Set<string>()
+      editableEntries.forEach((e) => {
+        if (isEntryIncomplete(e)) snap.add(String(e.policy_number ?? ''))
       })
       setIncompleteSnapshot(snap)
       setFilter('incomplete')
@@ -258,7 +261,7 @@ export function DealTrackerVerificationDialog({
                 return n && duplicateNames.has(n)
               })
             : filter === 'incomplete'
-              ? editableEntries.filter((e, idx) => incompleteSnapshot.has(idx) || isEntryIncomplete(e))
+              ? editableEntries.filter((e) => incompleteSnapshot.has(String(e.policy_number ?? '')) || isEntryIncomplete(e))
               : editableEntries
 
   const loadDdfMatches = useCallback(async (rowKey: string, carrier: string | null, name: string | null) => {
@@ -405,9 +408,9 @@ export function DealTrackerVerificationDialog({
                   : cn(adminOutlineBtn, 'h-8', hasIncomplete && 'border-rose-400/80 text-rose-800 dark:border-rose-500/60 dark:text-rose-300')
               }
               onClick={() => {
-                const snap = new Set<number>()
-                editableEntries.forEach((e, idx) => {
-                  if (isEntryIncomplete(e)) snap.add(idx)
+                const snap = new Set<string>()
+                editableEntries.forEach((e) => {
+                  if (isEntryIncomplete(e)) snap.add(String(e.policy_number ?? ''))
                 })
                 setIncompleteSnapshot(snap)
                 setFilter('incomplete')

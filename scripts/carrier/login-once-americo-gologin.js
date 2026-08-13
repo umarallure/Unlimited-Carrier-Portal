@@ -4,6 +4,7 @@ require('dotenv').config({ path: path.join(__dirname, '../..', '.env.local') });
 require('dotenv').config({ path: path.join(__dirname, '../..', '.env') });
 
 const { GologinApi } = require('gologin');
+const { attemptAutoLogin } = require('./americo-scrape-lib');
 
 function env(name, fallback) {
   const v = process.env[name];
@@ -11,7 +12,7 @@ function env(name, fallback) {
 }
 
 const GOLOGIN_TOKEN = env('GOLOGIN_TOKEN', '') || env('GL_API_TOKEN', '');
-const GOLOGIN_PROFILE_ID = env('GOLOGIN_PROFILE_ID', '') || env('GOLOGIN_PROFILEID', '');
+const GOLOGIN_PROFILE_ID = env('AMERICO_PROFILE_ID', '') || env('GOLOGIN_PROFILE_ID', '') || env('GOLOGIN_PROFILEID', '');
 const HOME_URL = env('CARRIER_HOME_URL', 'https://portal.americoagent.com/');
 
 async function main() {
@@ -36,8 +37,13 @@ async function main() {
     console.warn('Navigation warning (continuing anyway):', err.message || err);
   }
 
-  console.log('\nLog in on the Americo site in the browser window that opened.');
-  console.log('Take whatever time you need (2FA, email confirmation, etc.).');
+  const autoLoginAttempted = await attemptAutoLogin(page);
+  if (autoLoginAttempted) {
+    console.log('\nCredentials submitted automatically.');
+  } else {
+    console.log('\nAMERICO_USERNAME/AMERICO_PASSWORD not set (or login form not detected) - log in manually.');
+  }
+  console.log('If Americo asks for 2FA / email confirmation, complete that in the browser window.');
   console.log('Once you can see the portal dashboard (not a login page), come back here');
   console.log('and press ENTER to save the session and close the browser.\n');
 

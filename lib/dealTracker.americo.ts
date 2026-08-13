@@ -9,6 +9,7 @@ import {
   statusFromDealValueAndChargeback,
   getChangedFieldsAndPrevious,
   carrierStatusUnchanged,
+  financialsUnchanged,
   policyNeedsDdfLookup,
   resolvePolicyStatusFromCarrierMapping,
   calculateCcValue,
@@ -23,17 +24,49 @@ function normalizePolicyNumberSoft(value: any): string {
 }
 
 /**
+ * ghlStageResolver.ts's cancellation-text rule deliberately always prefers
+ * "Chargeback Cancellation" whenever the carrier status text contains "cancel"
+ * - by design, for every carrier, even when there's no actual negative
+ * charge_back to justify a chargeback classification (see the "even if the
+ * commission net looks like a chargeback" comment there). That's a shared
+ * rule affecting every carrier, so it's not touched here. For Americo
+ * specifically, "Cancelled" with no real chargeback signal should resolve to
+ * Application Withdrawn instead - scoped to just this carrier by overriding
+ * the resolved stage (and the paired policy_status label, so the two stay
+ * consistent - same "Application Withdrawn" <-> "Withdrawn" pairing Aetna/AHL
+ * already use) after the fact, rather than changing the shared rule.
+ */
+function overrideAmericoCancelledWithoutChargeback(
+  mappedGhlStage: string | null,
+  policyStatusResolved: string | null,
+  originalStatus: string | null,
+  chargeBack: number | null
+): { ghlStage: string | null; policyStatus: string | null } {
+  if (!originalStatus || !/cancel/i.test(originalStatus)) {
+    return { ghlStage: mappedGhlStage, policyStatus: policyStatusResolved }
+  }
+  const hasRealChargeback = chargeBack != null && chargeBack < 0
+  if (hasRealChargeback) {
+    return { ghlStage: mappedGhlStage, policyStatus: policyStatusResolved }
+  }
+  if (mappedGhlStage === 'Chargeback Cancellation' || mappedGhlStage === 'Chargeback Failed Payment') {
+    return { ghlStage: 'Application Withdrawn', policyStatus: 'Withdrawn' }
+  }
+  return { ghlStage: mappedGhlStage, policyStatus: policyStatusResolved }
+}
+
+/**
  * Process Americo policy files and create deal tracker entries.
  *
- * Policy-only: unlike MOH/Aetna/etc., there is no americo_commissions table yet
- * (the Americo agent portal has no bulk commission-dollar export we've found a
- * source for) — see lib/uploadLogic.ts's buildAmericoPolicyRows for context.
- * Deal Value therefore has nowhere to come from on a first upload; it's left
- * null (same as any other carrier's "policy uploaded, no commission yet" case)
- * and preserved from any existing deal_tracker row on re-uploads, exactly like
- * MOH's policy-only fallback. Sales Agent / Writing # come directly off the
- * policy row (americo_policies already has Agent/Agent #), unlike carriers
- * where those only appear on the commission file.
+ * Policy-only: this function does not join against americo_commissions (unlike
+ * AHL/Aetna/AMAM's policy-file processing, which does). A policy file upload
+ * leaves Deal Value untouched — it's read only from any existing deal_tracker
+ * row and preserved as-is, same as any other carrier's "policy uploaded, no
+ * commission yet" case. Deal Value only actually gets set/updated via
+ * processAmericoCommissionsForDealTracker below (the commission PDF path).
+ * Sales Agent / Writing # come directly off the policy row (americo_policies
+ * already has Agent/Agent #), unlike carriers where those only appear on the
+ * commission file — so no commission join is needed here for that either.
  */
 export async function processAmericoFilesForDealTracker(
   agencyCarrierId: string,
@@ -91,6 +124,32 @@ export async function processAmericoFilesForDealTracker(
 
   const policyNumbers = policies.map(p => p.policy_number)
 
+  // Fetch any americo_commissions already on file for these policies, so a
+  // policy re-upload can also pick up a genuinely new deal_value if a
+  // commission file was uploaded after the last policy upload - mirrors
+  // AHL's policy-function commission join, adapted to Americo's multi-row-
+  // per-policy commission structure (only ADVNCE9 rows count toward deal
+  // value, same aggregation processAmericoCommissionsForDealTracker uses).
+  let policyCommissions: any[] = []
+  try {
+    policyCommissions = await fetchAllPaginated(() =>
+      supabase
+        .from('americo_commissions')
+        .select('*')
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', policyNumbers)
+    )
+  } catch (_) {}
+
+  const commissionDealValueMap = new Map<string, number>()
+  policyCommissions.forEach((comm: any) => {
+    const pn = normalizePolicyNumberSoft(comm.policy_number)
+    if (!pn || !DEAL_VALUE_TRANSACTION_TYPES.has(comm.transaction_type)) return
+    const amountRaw = comm.amt != null ? (typeof comm.amt === 'string' ? parseFloat(comm.amt) : comm.amt) : 0
+    const amount = Number.isNaN(amountRaw) ? 0 : amountRaw
+    commissionDealValueMap.set(pn, (commissionDealValueMap.get(pn) || 0) + amount)
+  })
+
   let existingEntries: any[] = []
   try {
     existingEntries = await fetchAllPaginated(() =>
@@ -125,13 +184,20 @@ export async function processAmericoFilesForDealTracker(
         .filter((n: string) => n.length > 0)
     )
   )
+  // Exact policy-number match (tracking_id, decrypted) takes priority over
+  // name-only fuzzy matching — same as AHL/Aetna/AMAM.
+  const policyNumberByName = new Map<string, string>()
+  policiesNeedingDdf.forEach(p => {
+    const normalized = normalizeNameForSearch((p.insured ?? '').trim())
+    if (normalized && p.policy_number) policyNumberByName.set(normalized, p.policy_number)
+  })
 
   const skipCount = policies.length - policiesNeedingDdf.length
   console.log('[Deal Tracker] Americo: carrier=', carrierName, '| names to DDF=', uniqueInsuredNames.length, '| skip (already have DDF)=', skipCount)
 
   const dailyDealFlowMap =
     uniqueInsuredNames.length > 0
-      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier)
+      ? await bulkFetchDailyDealFlowInfo(uniqueInsuredNames, ddfCarrier, undefined, policyNumberByName)
       : new Map<
           string,
           { call_center: string | null; phone_number: string | null; draft_date: string | null; lead_name: string | null }
@@ -160,21 +226,37 @@ export async function processAmericoFilesForDealTracker(
     }
     const effectiveDateFromDdf = ddfInfo?.draft_date ?? null
 
-    // No commission source yet — preserve whatever deal_value/charge_back already
-    // exists on deal_tracker (same as any other carrier's policy-only upload);
-    // otherwise leave null until a commission file exists for Americo.
-    const dealValue: number | null = existing?.deal_value != null
+    const americoCcFallbackDate =
+      existing?.deal_creation_date ??
+      (policy.received_date as string | undefined) ??
+      (policy.effective_date as string | undefined) ??
+      null
+
+    // If a commission file for this policy already exists (uploaded before or
+    // after this policy file), pick up its ADVNCE9-summed deal_value here too
+    // - not just whatever existing.deal_value already has - same "lock in a
+    // positive value" rule the commission function uses, so a policy re-upload
+    // can't silently wipe/change a deal_value already confirmed by commission
+    // data. Falls back to preserving existing.deal_value when there's no
+    // commission on file yet (same as any other carrier's policy-only upload).
+    const chargeBack: number | null = existing?.charge_back ?? null
+    const commissionDealValue = commissionDealValueMap.get(normalizePolicyNumberSoft(policy.policy_number))
+    let dealValue: number | null = existing?.deal_value != null
       ? (typeof existing.deal_value === 'string' ? parseFloat(existing.deal_value) : existing.deal_value)
       : null
-    const chargeBack: number | null = existing?.charge_back ?? null
-
-    const ccValue = calculateCcValue(
-      dealValue,
-      existing?.deal_creation_date ??
-        (policy.received_date as string | undefined) ??
-        (policy.effective_date as string | undefined) ??
-        null
-    )
+    let ccValue: number | null
+    if (commissionDealValue != null && commissionDealValue > 0) {
+      const positivePreview = resolveCommissionPreviewDealValue(
+        existing?.deal_value,
+        existing?.cc_value,
+        commissionDealValue,
+        americoCcFallbackDate,
+      )
+      dealValue = positivePreview.dealValue
+      ccValue = positivePreview.ccValue
+    } else {
+      ccValue = calculateCcValue(dealValue, americoCcFallbackDate)
+    }
 
     // Deal date: Received Date is the closest Americo analog to "when the deal came in".
     const dealCreationDate =
@@ -191,17 +273,23 @@ export async function processAmericoFilesForDealTracker(
     )
     const dealCreationDateForGhl = existing?.deal_creation_date ?? dealCreationDate
 
-    const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
+    // Preserve a manually-adjusted `status` across a re-upload when nothing
+    // financial actually changed (same as AHL/Aetna) — otherwise every policy
+    // re-upload silently overwrites any manual status edit.
+    const derivedStatus =
+      existing && financialsUnchanged(existing, dealValue, chargeBack)
+        ? (existing.status ?? statusFromDealValueAndChargeback(dealValue, chargeBack))
+        : statusFromDealValueAndChargeback(dealValue, chargeBack)
 
     const shouldPreserveMappedStatus = existing && carrierStatusUnchanged(existing, originalStatus)
-    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+    const policyStatusMapped = resolvePolicyStatusFromCarrierMapping(
       statusMappingMap,
       originalStatus,
       !!shouldPreserveMappedStatus,
       existing?.policy_status
     )
 
-    const mappedGhlStage = resolveGhlStage({
+    const ghlStageMapped = resolveGhlStage({
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
@@ -213,6 +301,12 @@ export async function processAmericoFilesForDealTracker(
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
+    const { ghlStage: mappedGhlStage, policyStatus: policyStatusResolved } = overrideAmericoCancelledWithoutChargeback(
+      ghlStageMapped,
+      policyStatusMapped,
+      originalStatus,
+      chargeBack
+    )
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,
@@ -422,10 +516,18 @@ export async function processAmericoCommissionsForDealTracker(
     const namesForDdf = allPolicyNumbersNeedingDDF
       .map(pn => (policiesMap.get(pn)?.insured ?? '').trim())
       .filter((n: string) => n.length > 0)
+    // Exact policy-number match (tracking_id, decrypted) takes priority over
+    // name-only fuzzy matching — same as AHL/Aetna/AMAM.
+    const policyNumberByName = new Map<string, string>()
+    allPolicyNumbersNeedingDDF.forEach(pn => {
+      const name = (policiesMap.get(pn)?.insured || existingMap.get(pn)?.name || '').trim()
+      const normalized = normalizeNameForSearch(name)
+      if (normalized && pn) policyNumberByName.set(normalized, pn)
+    })
 
     if (namesForDdf.length > 0) {
       console.log('[Deal Tracker] Americo commissions: fetching DDF for', namesForDdf.length, 'names')
-      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(namesForDdf, ddfCarrier)
+      dailyDealFlowMap = await bulkFetchDailyDealFlowInfo(namesForDdf, ddfCarrier, undefined, policyNumberByName)
     } else {
       console.log('[Deal Tracker] Americo commissions: no policy names for DDF - upload the policy file first so americo_policies has rows for these policy numbers')
     }
@@ -536,14 +638,14 @@ export async function processAmericoCommissionsForDealTracker(
 
     const derivedStatus = statusFromDealValueAndChargeback(dealValue, chargeBack)
     const statusUnchanged = existing && carrierStatusUnchanged(existing, originalStatus)
-    const policyStatusResolved = resolvePolicyStatusFromCarrierMapping(
+    const policyStatusMapped = resolvePolicyStatusFromCarrierMapping(
       statusMappingMap,
       originalStatus,
       !!statusUnchanged,
       existing?.policy_status
     )
 
-    const mappedGhlStage = resolveGhlStage({
+    const ghlStageMapped = resolveGhlStage({
       carrierStatus: originalStatus,
       allMappings: ghlStageMappingMap,
       effectiveDate,
@@ -555,6 +657,12 @@ export async function processAmericoCommissionsForDealTracker(
       existingGhlStage: existing?.ghl_stage ?? null,
       carrierCode,
     })
+    const { ghlStage: mappedGhlStage, policyStatus: policyStatusResolved } = overrideAmericoCancelledWithoutChargeback(
+      ghlStageMapped,
+      policyStatusMapped,
+      originalStatus,
+      chargeBack
+    )
 
     const entry: DealTrackerPreviewEntry = {
       agency_carrier_id: agencyCarrierId,

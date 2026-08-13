@@ -524,7 +524,8 @@ export function UploadTreeOrgChart() {
               type="file"
               accept={
                 (uploadDialog?.carrierCode === 'COREBRIDGE' ||
-                  uploadDialog?.carrierCode === 'SENTINEL') &&
+                  uploadDialog?.carrierCode === 'SENTINEL' ||
+                  uploadDialog?.carrierCode === 'AMERICO') &&
                 uploadDialog?.fileType === 'Commission'
                   ? ACCEPT_TYPES_WITH_PDF
                   : ACCEPT_TYPES
@@ -558,7 +559,10 @@ export function UploadTreeOrgChart() {
                 <p className="font-semibold text-foreground">Drag and drop files</p>
                 <p className="mt-0.5 text-sm text-muted-foreground">
                   Up to {MAX_FILE_SIZE_MB}MB per file in{' '}
-                  {uploadDialog?.carrierCode === 'COREBRIDGE' && uploadDialog?.fileType === 'Commission'
+                  {(uploadDialog?.carrierCode === 'COREBRIDGE' ||
+                    uploadDialog?.carrierCode === 'SENTINEL' ||
+                    uploadDialog?.carrierCode === 'AMERICO') &&
+                  uploadDialog?.fileType === 'Commission'
                     ? ACCEPT_LABEL_WITH_PDF
                     : ACCEPT_LABEL}
                   .

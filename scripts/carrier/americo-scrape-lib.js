@@ -33,6 +33,56 @@ function isLoginPage(url) {
   return /\/login|signin|sign-in/i.test(url);
 }
 
+/**
+ * Fill Americo's login form (real selectors, confirmed against the actual
+ * ASP.NET Identity login page markup: #txtUsername / #txtPassword / a
+ * type="submit" button.login-button) and submit. Only handles the
+ * username+password step - 2FA/email confirmation (if Americo challenges
+ * the login) still needs a human, same as before; this just removes the
+ * "type credentials and click/press enter" step that always came first.
+ *
+ * Returns false without doing anything if AMERICO_USERNAME/AMERICO_PASSWORD
+ * aren't set, or if the page isn't actually showing the login form (e.g.
+ * already authenticated) - callers should fall back to the existing
+ * prompt-and-wait flow in either case.
+ */
+async function attemptAutoLogin(page) {
+  const username = env('AMERICO_USERNAME', '');
+  const password = env('AMERICO_PASSWORD', '');
+  if (!username || !password) return false;
+
+  const usernameField = await page.$('#txtUsername');
+  if (!usernameField) return false;
+
+  console.log('Login form detected - filling credentials from AMERICO_USERNAME/AMERICO_PASSWORD...');
+  await usernameField.click({ clickCount: 3 });
+  await usernameField.type(username, { delay: 20 });
+
+  const passwordField = await page.$('#txtPassword');
+  if (!passwordField) return false;
+  await passwordField.click({ clickCount: 3 });
+  await passwordField.type(password, { delay: 20 });
+
+  const submitBtn = await page.$('button.login-button[type="submit"]') || await page.$('button[type="submit"]');
+  if (submitBtn) {
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+      submitBtn.click(),
+    ]);
+  } else {
+    // Fall back to Enter-submits-the-form (confirmed working manually) if the
+    // button selector ever changes and stops matching.
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+      passwordField.press('Enter'),
+    ]);
+  }
+
+  await sleep(1500);
+  console.log('Submitted login form. Landed on:', page.url());
+  return true;
+}
+
 async function ensureDownloadDir() {
   if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
@@ -199,6 +249,7 @@ module.exports = {
   LIST_URL,
   sleep,
   isLoginPage,
+  attemptAutoLogin,
   ensureDownloadDir,
   extractGridRows,
   collectAllGridRows,
