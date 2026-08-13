@@ -28,6 +28,7 @@ import { processCorebridgeCommissionsForDealTracker, processCorebridgeFilesForDe
 import { processSentinelFilesForDealTracker, processSentinelCommissionsForDealTracker } from './dealTracker.sentinel'
 import { processAflacFilesForDealTracker, processAflacCommissionsForDealTracker } from './dealTracker.aflac'
 import { processAhlFilesForDealTracker, processAhlCommissionsForDealTracker } from './dealTracker.ahl'
+import { processAmericoFilesForDealTracker, processAmericoCommissionsForDealTracker } from './dealTracker.americo'
 import { supabase } from './supabaseClient'
 import { fetchExceptionIndex, partitionByException } from './policyExceptions'
 
@@ -75,7 +76,8 @@ export async function processDealTrackerAfterUpload(
   const isAflac = upperCode === 'AFLAC'
   const isSentinel = upperCode === 'SENTINEL'
   const isAhl = upperCode === 'AHL'
-  if (!isAetna && !isAmam && !isMoh && !isRNA && !isTransamerica && !isLiberty && !isCorebridge && !isAflac && !isSentinel && !isAhl) {
+  const isAmerico = upperCode === 'AMERICO'
+  if (!isAetna && !isAmam && !isMoh && !isRNA && !isTransamerica && !isLiberty && !isCorebridge && !isAflac && !isSentinel && !isAhl && !isAmerico) {
     console.log('[Deal Tracker] Skipping - carrier not supported for deal tracker:', carrierCode)
     return { success: true }
   }
@@ -204,6 +206,18 @@ export async function processDealTrackerAfterUpload(
           previewEntries = await processAhlCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
         } else {
           previewEntries = await processAhlCommissionsForDealTracker(agencyCarrierId, fileId)
+        }
+      }
+    } else if (isAmerico) {
+      if (fileType === 'Policy') {
+        console.log('[Deal Tracker] Processing Americo policy file for deal tracker...')
+        previewEntries = await processAmericoFilesForDealTracker(agencyCarrierId, fileId)
+      } else if (fileType === 'Commission') {
+        console.log('[Deal Tracker] Processing Americo commission file for deal tracker...')
+        if (pendingRows?.rows?.length) {
+          previewEntries = await processAmericoCommissionsForDealTracker(agencyCarrierId, fileId, pendingRows.rows)
+        } else {
+          previewEntries = await processAmericoCommissionsForDealTracker(agencyCarrierId, fileId)
         }
       }
     }
