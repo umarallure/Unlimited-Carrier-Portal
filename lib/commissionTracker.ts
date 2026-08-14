@@ -291,8 +291,9 @@ export async function syncCommissionTrackerForAgencyCarrier(
   const isMoh = upperCode === 'MOH'
   const isSentinel = upperCode === 'SENTINEL'
   const isTransamerica = upperCode === 'TRANSAMERICA'
+  const isAmerico = upperCode === 'AMERICO'
 
-  if (!isAetna && !isAmam && !isAflac && !isCorebridge && !isAhl && !isMoh && !isSentinel && !isTransamerica) {
+  if (!isAetna && !isAmam && !isAflac && !isCorebridge && !isAhl && !isMoh && !isSentinel && !isTransamerica && !isAmerico) {
     return
   }
 
@@ -506,6 +507,116 @@ export async function syncCommissionTrackerForAgencyCarrier(
       if (error) {
         console.error(
           '[CommissionTracker] Failed to insert Sentinel commission_tracker batch:',
+          error.message,
+        )
+        break
+      }
+    }
+
+    return
+  }
+
+  if (isAmerico) {
+    // Americo commissions come from PDF, same shape as Corebridge/Sentinel:
+    // each row in americo_commissions is a single commission transaction
+    // (ADVNCE9, PAID1, etc.), so one commission_tracker row per source row,
+    // keyed off (source_table, source_row_id). Every transaction line is
+    // synced (not just ADVNCE9/deal-value-counting ones) so the duplicate
+    // check in useCommissionReportUpload.ts has real data to compare against
+    // for every row shown in the Commission Report dialog, not just the ones
+    // that count toward deal_value.
+    let americoQuery = supabase
+      .from('americo_commissions')
+      .select('id, policy_number, statement_date, amt, rate, name_desc, agent_name, file_id')
+      .eq('agency_carrier_id', agencyCarrierId)
+    if (options?.fileId) {
+      americoQuery = americoQuery.eq('file_id', options.fileId)
+    }
+    const { data: americoRows, error: americoError } = await americoQuery
+
+    if (americoError || !americoRows || americoRows.length === 0) {
+      if (americoError) {
+        console.warn(
+          '[CommissionTracker] Failed to fetch americo_commissions rows for',
+          agencyCarrierId,
+          americoError.message,
+        )
+      }
+      return
+    }
+
+    interface AmericoCommissionRow {
+      id: string | number | null
+      policy_number: string | null
+      statement_date: string | null
+      amt: number | string | null
+      rate: number | string | null
+      name_desc: string | null
+      agent_name: string | null
+      file_id: string | null
+    }
+
+    const trackerRows: CommissionTrackerRow[] = []
+    for (const r of americoRows as AmericoCommissionRow[]) {
+      if (!r.policy_number) continue
+      const normalizedDate = normalizeDate(r.statement_date)
+      if (!normalizedDate) continue
+
+      const amtRaw =
+        r.amt != null
+          ? (typeof r.amt === 'number' ? r.amt : parseFloat(String(r.amt).replace(/,/g, '')))
+          : 0
+      if (Number.isNaN(amtRaw)) continue
+
+      let advanceAmount: number | null = null
+      let chargeBackAmount: number | null = null
+      if (amtRaw < 0) chargeBackAmount = amtRaw
+      else if (amtRaw > 0) advanceAmount = amtRaw
+
+      trackerRows.push({
+        agency_carrier_id: agencyCarrierId,
+        carrier_id: carrierId,
+        carrier: carrierName,
+        policy_number: String(r.policy_number),
+        name: r.name_desc ? String(r.name_desc) : null,
+        sales_agent: r.agent_name ? String(r.agent_name) : null,
+        date: normalizedDate,
+        commission_rate: r.rate != null ? parseFloat(String(r.rate)) : null,
+        advance_amount: advanceAmount,
+        charge_back_amount: chargeBackAmount,
+        source_table: 'americo_commissions',
+        source_row_id: r.id ? String(r.id) : null,
+        source_file_id: (r.file_id as string | null) ?? null,
+      })
+    }
+
+    if (!trackerRows.length) return
+
+    if (!options?.fileId) {
+      console.warn('[CommissionTracker] Skipping Americo sync: fileId is required')
+      return
+    }
+
+    const { error: americoWipeError } = await buildCommissionTrackerWipeQueryForFile(
+      agencyCarrierId,
+      'americo_commissions',
+      options.fileId,
+    )
+    if (americoWipeError) {
+      console.error(
+        '[CommissionTracker] Failed to wipe existing Americo commission_tracker rows before insert:',
+        americoWipeError.message,
+      )
+      return
+    }
+
+    const BATCH_SIZE = 500
+    for (let i = 0; i < trackerRows.length; i += BATCH_SIZE) {
+      const batch = trackerRows.slice(i, i + BATCH_SIZE)
+      const { error } = await supabase.from('commission_tracker').insert(batch)
+      if (error) {
+        console.error(
+          '[CommissionTracker] Failed to insert Americo commission_tracker batch:',
           error.message,
         )
         break

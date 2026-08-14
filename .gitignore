@@ -57,4 +57,5 @@ tes.ipynb
 /scripts/carrier/*.json
 # local persistent browser profile (cookies/session)
 /carrier-browser-profile
+/carrier-browser-profile-americo
 carrier-downloads/

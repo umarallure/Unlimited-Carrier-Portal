@@ -96,7 +96,8 @@ export function useDealTrackerUpload() {
         upperCode === 'COREBRIDGE' ||
         upperCode === 'AFLAC' ||
         upperCode === 'SENTINEL' ||
-        upperCode === 'AHL') &&
+        upperCode === 'AHL' ||
+        upperCode === 'AMERICO') &&
       (fileType === 'Policy' || fileType === 'Commission')
     if (!shouldProcess) {
       console.log('[Deal Tracker Hook] Skipping - conditions not met:', {
