@@ -831,7 +831,7 @@ export function normalizeNameForSearch(name: string): string {
  * Returns a canonical key (sorted first|last) so "Diane Walker", "Walker, Diane", and "HART, RAYMOND L" vs "Raymond Lee Hart" match.
  * When a comma is present, treat "Last, First MI" so last = before comma, first = first word after comma.
  */
-function extractNameParts(fullName: string): { firstName: string; lastName: string; allParts: string[]; firstLastKey: string } {
+export function extractNameParts(fullName: string): { firstName: string; lastName: string; allParts: string[]; firstLastKey: string } {
   const raw = (fullName ?? '').trim()
   if (!raw) {
     return { firstName: '', lastName: '', allParts: [], firstLastKey: '' }
@@ -871,7 +871,7 @@ function extractNameParts(fullName: string): { firstName: string; lastName: stri
 /**
  * Levenshtein edit distance (for fuzzy first-name matching: Lakeysha vs Lekeysha vs Leteysha)
  */
-function editDistance(a: string, b: string): number {
+export function editDistance(a: string, b: string): number {
   const m = a.length
   const n = b.length
   if (m === 0) return n
@@ -1003,27 +1003,31 @@ export async function fetchAllPaginated<T = any>(queryFactory: () => any): Promi
  * Fetch raw daily_deal_flow rows for a carrier (server-side only).
  * Exported for /api/ddf-lookup to cache and reuse across chunked requests.
  */
-export async function getDdfRecordsForCarrier(
-  externalSupabase: ReturnType<typeof createClient>,
-  carrier: string,
-  tableName: string = 'daily_deal_flow',
-): Promise<{
+export type DdfCarrierRecord = {
+  id?: string | null
   insured_name?: string | null
   lead_vendor?: string | null
   lead_vendor_name?: string | null
   client_phone_number?: string | null
   phone_number?: string | null
+  licensed_agent_account?: string | null
   carrier?: string | null
   draft_date?: string | null
   tracking_id?: string | null
   status?: string | null
-}[]> {
+}
+
+export async function getDdfRecordsForCarrier(
+  externalSupabase: ReturnType<typeof createClient>,
+  carrier: string,
+  tableName: string = 'daily_deal_flow',
+): Promise<DdfCarrierRecord[]> {
   const carrierUpper = (carrier || '').toUpperCase()
   const isAmam = carrierUpper === 'AMAM' || carrierUpper === 'ANAM' || carrierUpper.includes('AMERICAN AMICABLE')
   // External DDF table may not have lead_vendor_name or phone_number; use only columns that exist there
   let query = externalSupabase
     .from(tableName)
-    .select('insured_name, lead_vendor, client_phone_number, carrier, draft_date, tracking_id, status, submission_id')
+    .select('id, insured_name, lead_vendor, client_phone_number, licensed_agent_account, carrier, draft_date, tracking_id, status, submission_id')
     .order('created_at', { ascending: false })
     .limit(DDF_FETCH_LIMIT)
   if (isAmam) {
@@ -1037,21 +1041,18 @@ export async function getDdfRecordsForCarrier(
   }
   const { data, error } = await query
   if (error || !data) return []
-  return data as {
-    insured_name?: string | null
-    lead_vendor?: string | null
-    lead_vendor_name?: string | null
-    client_phone_number?: string | null
-    phone_number?: string | null
-    carrier?: string | null
-    draft_date?: string | null
-    tracking_id?: string | null
-    status?: string | null
-  }[]
+  return data as DdfCarrierRecord[]
 }
 
 /**
  * Match insured names against already-fetched DDF records. Used by API with cached records.
+ *
+ * Match tiers, highest priority first: tracking_id/policy-number exact match, exact
+ * name, first+last order-invariant, same last name with a fuzzy first name (edit
+ * distance <= 2), and both names fuzzy (edit distance <= 2 each). Every tier requires
+ * correspondence in both name parts — there is deliberately no first-name-only or
+ * last-name-only fallback, since matching on a single name part let unrelated people
+ * with a common name get silently matched to each other's contact info.
  */
 export function matchDdfNamesToRecords(
   allRecords: {
@@ -1093,7 +1094,6 @@ export function matchDdfNamesToRecords(
   }
   const exactMap = new Map<string, DailyDealFlowRecord[]>()
   const firstLastMap = new Map<string, DailyDealFlowRecord[]>()
-  const firstNameMap = new Map<string, DailyDealFlowRecord[]>()
   const lastNameMap = new Map<string, DailyDealFlowRecord[]>()
   const trackingIdMap = new Map<string, DailyDealFlowRecord>()
   for (const record of allRecords as DailyDealFlowRecord[]) {
@@ -1107,11 +1107,6 @@ export function matchDdfNamesToRecords(
       const key = recordParts.firstLastKey
       if (!firstLastMap.has(key)) firstLastMap.set(key, [])
       firstLastMap.get(key)!.push(record)
-    }
-    if (recordParts.firstName) {
-      const key = recordParts.firstName.toLowerCase()
-      if (!firstNameMap.has(key)) firstNameMap.set(key, [])
-      firstNameMap.get(key)!.push(record)
     }
     if (recordParts.lastName) {
       const key = recordParts.lastName.toLowerCase()
@@ -1173,20 +1168,12 @@ export function matchDdfNamesToRecords(
         }
       }
     }
-    if (!bestMatch && parts.firstName) {
-      const matches = firstNameMap.get(parts.firstName.toLowerCase())
-      if (matches?.length) {
-        bestMatch = pickBestMatch(matches)
-        bestScore = 60
-      }
-    }
-    if (!bestMatch && parts.lastName) {
-      const matches = lastNameMap.get(parts.lastName.toLowerCase())
-      if (matches?.length) {
-        bestMatch = pickBestMatch(matches)
-        bestScore = 50
-      }
-    }
+    // First-name-only and last-name-only fallbacks were removed: matching on a single
+    // name part with zero corroboration from the other part let unrelated people with
+    // a common first (or last) name get silently matched — e.g. a policy for "Marcus
+    // Delgado" was enriched with a real "Marcus Wheeler" DDF record's call_center/phone
+    // purely because both are "Marcus". Every remaining tier below requires some
+    // correspondence in *both* name parts (exact or fuzzy).
     if (!bestMatch && parts.firstName && parts.lastName) {
       const policyFirst = parts.firstName.toLowerCase()
       const policyLast = parts.lastName.toLowerCase()
@@ -1213,183 +1200,6 @@ export function matchDdfNamesToRecords(
     }
   }
   return resultMap
-}
-
-/**
- * Bulk fetch daily_deal_flow records (server-side implementation).
- * Exported for use by /api/ddf-lookup so the browser never calls external Supabase (avoids CORS).
- */
-export async function doBulkFetchDailyDealFlowInfo(
-  externalSupabase: ReturnType<typeof createClient>,
-  insuredNames: string[],
-  carrier: string
-): Promise<Map<string, DailyDealFlowInfo>> {
-  const resultMap = new Map<string, DailyDealFlowInfo>()
-  if (!insuredNames || insuredNames.length === 0) return resultMap
-
-  try {
-    const normalizedNames = insuredNames.map(n => normalizeNameForSearch(n))
-    // Use original names for extractNameParts so "Last, First MI" (e.g. HART, RAYMOND L) matches "Raymond Lee Hart"
-    const nameParts = insuredNames.map(n => extractNameParts((n ?? '').trim()))
-    
-    console.log('[Deal Tracker] Bulk fetching daily_deal_flow for carrier:', carrier, 'names:', normalizedNames.length)
-    
-    // STEP 1: Fetch DDF records for carrier (getDdfRecordsForCarrier only – no direct query here)
-    console.log('[Deal Tracker] Step 1: Filtering daily_deal_flow records by carrier:', carrier)
-    const ddfRecords = await getDdfRecordsForCarrier(externalSupabase, carrier)
-    if (!ddfRecords || ddfRecords.length === 0) {
-      console.log('[Deal Tracker] No daily_deal_flow records found for carrier:', carrier)
-      return resultMap
-    }
-
-    // Type assertion for external database records
-    type DailyDealFlowRecord = {
-      insured_name?: string | null
-      lead_vendor?: string | null
-      lead_vendor_name?: string | null
-      client_phone_number?: string | null
-      phone_number?: string | null
-      carrier?: string | null
-      draft_date?: string | null
-    }
-    const typedRecords = ddfRecords as DailyDealFlowRecord[]
-    const getCallCenter = (r: DailyDealFlowRecord) =>
-      (r.lead_vendor ?? r.lead_vendor_name ?? null) && String(r.lead_vendor ?? r.lead_vendor_name ?? '').trim() || null
-    const getPhone = (r: DailyDealFlowRecord) =>
-      (r.client_phone_number ?? r.phone_number ?? null) && String(r.client_phone_number ?? r.phone_number ?? '').trim() || null
-    const hasContact = (r: DailyDealFlowRecord) => !!(getCallCenter(r) || getPhone(r))
-    const hasDraft = (r: DailyDealFlowRecord) => {
-      const d = r.draft_date
-      return d != null && String(d).trim() !== ''
-    }
-    const pickBestMatch = (matches: DailyDealFlowRecord[]): DailyDealFlowRecord | null => {
-      if (!matches?.length) return null
-      const both = matches.find(r => hasContact(r) && hasDraft(r))
-      if (both) return both
-      const withDraft = matches.find(hasDraft)
-      if (withDraft) return withDraft
-      const withData = matches.find(hasContact)
-      return withData ?? matches[0]
-    }
-    const exactMap = new Map<string, DailyDealFlowRecord[]>()
-    const firstLastMap = new Map<string, DailyDealFlowRecord[]>()
-    const firstNameMap = new Map<string, DailyDealFlowRecord[]>()
-    const lastNameMap = new Map<string, DailyDealFlowRecord[]>()
-    // Build lookup maps from records (O(n) instead of O(n*m) later)
-    for (const record of typedRecords) {
-      const recordName = normalizeNameForSearch(record.insured_name || '')
-      const recordParts = extractNameParts(recordName)
-      
-      // Exact match map
-      if (recordName) {
-        if (!exactMap.has(recordName)) exactMap.set(recordName, [])
-        exactMap.get(recordName)!.push(record)
-      }
-      
-      // First + Last map (canonical key so "Diane Walker" and "Walker, Diane" match)
-      if (recordParts.firstName && recordParts.lastName && recordParts.firstLastKey) {
-        const key = recordParts.firstLastKey
-        if (!firstLastMap.has(key)) firstLastMap.set(key, [])
-        firstLastMap.get(key)!.push(record)
-      }
-      
-      // First name map
-      if (recordParts.firstName) {
-        const key = recordParts.firstName.toLowerCase()
-        if (!firstNameMap.has(key)) firstNameMap.set(key, [])
-        firstNameMap.get(key)!.push(record)
-      }
-      
-      // Last name map
-      if (recordParts.lastName) {
-        const key = recordParts.lastName.toLowerCase()
-        if (!lastNameMap.has(key)) lastNameMap.set(key, [])
-        lastNameMap.get(key)!.push(record)
-      }
-    }
-
-    console.log('[Deal Tracker] Step 2 complete: Lookup maps built from carrier-filtered records')
-    
-    // STEP 3: Match each policy name using lookup maps (only matches within carrier-filtered records)
-    console.log('[Deal Tracker] Step 3: Matching', normalizedNames.length, 'names against carrier-filtered records...')
-    let strategyUsed: string = 'none'
-    for (let i = 0; i < normalizedNames.length; i++) {
-      const normalizedName = normalizedNames[i]
-      const parts = nameParts[i]
-      strategyUsed = 'none'
-
-      let bestMatch: any = null
-      let bestScore = 0
-
-      // Strategy 1: Exact match (highest priority)
-      const exactMatches = exactMap.get(normalizedName)
-      if (exactMatches && exactMatches.length > 0) {
-        bestMatch = pickBestMatch(exactMatches)
-        bestScore = 100
-      }
-      // Strategy 2: First + Last name match (canonical key for "First Last" vs "Last, First")
-      else if (parts.firstName && parts.lastName && parts.firstLastKey) {
-        const matches = firstLastMap.get(parts.firstLastKey)
-        if (matches && matches.length > 0) {
-          bestMatch = pickBestMatch(matches)
-          bestScore = 80
-        }
-      }
-      // Strategy 2b: Last name + fuzzy first name (handles typos: Lakeysha vs Lekeysha vs Leteysha)
-      if (!bestMatch && parts.firstName && parts.lastName) {
-        const lastNameKey = parts.lastName.toLowerCase()
-        const lastMatches = lastNameMap.get(lastNameKey)
-        if (lastMatches && lastMatches.length > 0) {
-          const policyFirst = parts.firstName.toLowerCase()
-          const fuzzyMatches = lastMatches.filter((r: DailyDealFlowRecord) => {
-            const rName = normalizeNameForSearch(r.insured_name || '')
-            const rParts = extractNameParts(rName)
-            const rFirst = (rParts.firstName || '').toLowerCase()
-            return rFirst.length > 0 && editDistance(policyFirst, rFirst) <= 2
-          })
-          if (fuzzyMatches.length > 0) {
-            bestMatch = pickBestMatch(fuzzyMatches)
-            bestScore = 55
-            strategyUsed = 'fuzzyFirst'
-          }
-        }
-      }
-      // Strategy 3: First name match
-      else if (parts.firstName) {
-        const key = parts.firstName.toLowerCase()
-        const matches = firstNameMap.get(key)
-        if (matches && matches.length > 0) {
-          bestMatch = pickBestMatch(matches)
-          bestScore = 60
-        }
-      }
-      // Strategy 4: Last name match
-      else if (parts.lastName) {
-        const key = parts.lastName.toLowerCase()
-        const matches = lastNameMap.get(key)
-        if (matches && matches.length > 0) {
-          bestMatch = pickBestMatch(matches)
-          bestScore = 50
-        }
-      }
-
-      // Only use match if score is reasonable (>= 50)
-      if (bestMatch && bestScore >= 50) {
-        resultMap.set(normalizedName, {
-          call_center: getCallCenter(bestMatch) ?? null,
-          phone_number: getPhone(bestMatch) ?? null,
-          draft_date: bestMatch.draft_date != null ? String(bestMatch.draft_date).trim() : null,
-          lead_name: bestMatch.insured_name != null ? String(bestMatch.insured_name).trim() : null,
-        })
-      }
-    }
-
-    console.log('[Deal Tracker] Bulk fetch matched', resultMap.size, 'out of', normalizedNames.length, 'names')
-    return resultMap
-  } catch (error) {
-    console.error('[Deal Tracker] Error in bulk fetch:', error)
-    return resultMap
-  }
 }
 
 /**

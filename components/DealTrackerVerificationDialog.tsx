@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Input } from '@/components/ui/input'
-import { Loader2, CheckCircle, AlertCircle, PlusCircle, RefreshCw, ChevronDown, ChevronRight, GitCompare, X, ClipboardList } from 'lucide-react'
+import { Loader2, CheckCircle, AlertCircle, PlusCircle, RefreshCw, ChevronDown, ChevronRight, GitCompare, X, ClipboardList, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { toYmdForDateInput } from '@/lib/calendarDate'
 import { adminOutlineBtn } from '@/lib/adminFieldClasses'
@@ -48,9 +48,29 @@ const FIELD_LABELS: Record<string, string> = {
 }
 
 type DdfMatchRow = {
+  id: string | null
   insured_name: string | null
   call_center: string | null
   phone_number: string | null
+  agent: string | null
+  draft_date: string | null
+}
+
+type DdfAiSuggestion = {
+  recordId: string | null
+  confidence: number
+  matchedName: boolean
+  matchedAgent: boolean
+  matchedCarrier: boolean
+  reasoning: string
+  record: {
+    id: string | null
+    insuredName: string | null
+    callCenter: string | null
+    phoneNumber: string | null
+    draftDate: string | null
+    agent: string | null
+  } | null
 }
 
 interface DealTrackerVerificationDialogProps {
@@ -105,6 +125,7 @@ export function DealTrackerVerificationDialog({
   const isLoading = !!(open && loadingMessage && entries.length === 0)
   const [openDdfRowKey, setOpenDdfRowKey] = useState<string | null>(null)
   const [ddfMatches, setDdfMatches] = useState<Record<string, { loading: boolean; error: string | null; matches: DdfMatchRow[] }>>({})
+  const [ddfAiState, setDdfAiState] = useState<Record<string, { loading: boolean; suggestion?: DdfAiSuggestion; error?: string }>>({})
   const [expandedChangesRowKey, setExpandedChangesRowKey] = useState<string | null>(null)
   // Keyed by policy_number (not array index) - removing a row shifts every
   // subsequent row's index down, so an index-based snapshot would silently
@@ -264,7 +285,7 @@ export function DealTrackerVerificationDialog({
               ? editableEntries.filter((e) => incompleteSnapshot.has(String(e.policy_number ?? '')) || isEntryIncomplete(e))
               : editableEntries
 
-  const loadDdfMatches = useCallback(async (rowKey: string, carrier: string | null, name: string | null) => {
+  const loadDdfMatches = useCallback(async (rowKey: string, carrier: string | null, name: string | null, dealCreationDate?: string | null) => {
     const trimmedName = (name || '').trim()
     const trimmedCarrier = (carrier || '').trim()
     if (!trimmedName || !trimmedCarrier) return
@@ -282,13 +303,28 @@ export function DealTrackerVerificationDialog({
 
     try {
       const params = new URLSearchParams({ carrier: trimmedCarrier, name: trimmedName })
+      // Without this, the diagnostic route defaults to the legacy DDF database
+      // (isNewDdfByDealCreationDate treats a missing date as "not new"), while the
+      // upload matcher that actually enriches deal_tracker always queries the new
+      // one — silently searching the wrong database and finding nothing.
+      if (dealCreationDate) params.set('dealCreationDate', dealCreationDate)
       const res = await fetch(`/api/ddf-diagnostic?${params.toString()}`)
       const data = await res.json()
-      const matches = (data.matchingRows || []) as { insured_name?: string | null; lead_vendor?: string | null; client_phone_number?: string | null }[]
+      const matches = (data.matchingRows || []) as {
+        id?: string | null
+        insured_name?: string | null
+        lead_vendor?: string | null
+        client_phone_number?: string | null
+        licensed_agent_account?: string | null
+        draft_date?: string | null
+      }[]
       const mapped: DdfMatchRow[] = matches.map(m => ({
+        id: m.id ?? null,
         insured_name: m.insured_name ?? null,
         call_center: (m.lead_vendor as string | null) ?? null,
         phone_number: (m.client_phone_number as string | null) ?? null,
+        agent: m.licensed_agent_account ?? null,
+        draft_date: m.draft_date ?? null,
       }))
       setDdfMatches(prev => ({
         ...prev,
@@ -299,6 +335,22 @@ export function DealTrackerVerificationDialog({
         ...prev,
         [rowKey]: { loading: false, error: err?.message || 'Failed to load DDF matches', matches: [] },
       }))
+    }
+  }, [])
+
+  const askDdfAi = useCallback(async (rowKey: string, carrier: string | null, name: string | null, agent: string | null) => {
+    setDdfAiState(prev => ({ ...prev, [rowKey]: { loading: true } }))
+    try {
+      const res = await fetch('/api/deal-tracker/suggest-ddf-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, carrier, agent }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'AI suggestion failed.')
+      setDdfAiState(prev => ({ ...prev, [rowKey]: { loading: false, suggestion: data as DdfAiSuggestion } }))
+    } catch (err: any) {
+      setDdfAiState(prev => ({ ...prev, [rowKey]: { loading: false, error: err?.message || 'AI suggestion failed.' } }))
     }
   }, [])
 
@@ -747,7 +799,7 @@ export function DealTrackerVerificationDialog({
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
-                          {isDuplicateName && (
+                          {(isDuplicateName || (!entry.call_center && !entry.phone_number)) && (
                             <Button
                               type="button"
                               variant="outline"
@@ -757,7 +809,7 @@ export function DealTrackerVerificationDialog({
                                 const nextOpen = isExpanded ? null : rowKey
                                 setOpenDdfRowKey(nextOpen)
                                 if (!isExpanded) {
-                                  loadDdfMatches(rowKey, entry.carrier, entry.name)
+                                  loadDdfMatches(rowKey, entry.carrier, entry.name, entry.deal_creation_date)
                                 }
                               }}
                             >
@@ -832,60 +884,140 @@ export function DealTrackerVerificationDialog({
                     {isExpanded && (
                       <TableRow key={`${rowKey}-ddf`}>
                         <TableCell colSpan={19} className="border-t border-border bg-muted/50 py-2 dark:border-slate-700 dark:bg-slate-950/60">
-                          {ddfState.loading && (
-                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                              Loading DDF matches…
-                            </div>
-                          )}
-                          {!ddfState.loading && ddfState.error && (
-                            <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-300">
-                              <AlertCircle className="h-4 w-4" />
-                              {ddfState.error}
-                            </div>
-                          )}
-                          {!ddfState.loading && !ddfState.error && ddfState.matches.length === 0 && (
-                            <div className="text-xs text-muted-foreground">No DDF matches found for this name/carrier.</div>
-                          )}
-                          {!ddfState.loading && !ddfState.error && ddfState.matches.length > 0 && (
-                            <div className="space-y-1">
-                              <div className="text-xs text-muted-foreground">DDF matches for this insured (click &quot;Use&quot; to apply Call Center/Phone):</div>
-                              <div className="overflow-hidden rounded-md border border-border dark:border-slate-700">
-                                <Table>
-                                  <TableHeader>
-                                    <TableRow className="bg-muted/80 dark:bg-slate-900">
-                                      <TableHead className="text-xs text-foreground">Insured (DDF)</TableHead>
-                                      <TableHead className="text-xs text-foreground">Call Center</TableHead>
-                                      <TableHead className="text-xs text-foreground">Phone</TableHead>
-                                      <TableHead className="w-20 text-right text-xs text-foreground">Action</TableHead>
-                                    </TableRow>
-                                  </TableHeader>
-                                  <TableBody>
-                                    {ddfState.matches.map((m, i) => (
-                                      <TableRow key={`${rowKey}-ddf-${i}`} className="bg-background/80 dark:bg-slate-900/60">
-                                        <TableCell className="text-xs text-foreground">{m.insured_name ?? '-'}</TableCell>
-                                        <TableCell className="text-xs text-foreground">{m.call_center ?? '-'}</TableCell>
-                                        <TableCell className="font-mono text-xs text-foreground">{m.phone_number ?? '-'}</TableCell>
-                                        <TableCell className="text-right">
-                                          <Button
-                                            type="button"
-                                            size="sm"
-                                            className="h-6 px-2 text-[11px]"
-                                            onClick={() => {
-                                              updateEntry(globalIndex, 'call_center', m.call_center ?? null)
-                                              updateEntry(globalIndex, 'phone_number', m.phone_number ?? null)
-                                            }}
-                                          >
-                                            Use
-                                          </Button>
-                                        </TableCell>
-                                      </TableRow>
-                                    ))}
-                                  </TableBody>
-                                </Table>
+                          {(() => {
+                            const ai = ddfAiState[rowKey]
+                            return (
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="text-xs text-muted-foreground">
+                                  {ddfState.loading
+                                    ? 'Searching Daily Deal Flow…'
+                                    : ddfState.matches.length > 0
+                                      ? 'DDF matches for this insured (click "Use" to apply Call Center/Phone/Effective Date):'
+                                      : 'No exact-ish DDF matches found for this name/carrier — try Ask AI for a broader search.'}
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className={cn(adminOutlineBtn, 'h-6 shrink-0 px-2 text-[11px]')}
+                                  disabled={ai?.loading}
+                                  onClick={() => askDdfAi(rowKey, entry.carrier, entry.name, entry.sales_agent)}
+                                >
+                                  {ai?.loading ? (
+                                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                  ) : (
+                                    <Sparkles className="mr-1 h-3 w-3" />
+                                  )}
+                                  Ask AI
+                                </Button>
                               </div>
+
+                              {ddfState.loading && (
+                                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                </div>
+                              )}
+                              {!ddfState.loading && ddfState.error && (
+                                <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-300">
+                                  <AlertCircle className="h-4 w-4" />
+                                  {ddfState.error}
+                                </div>
+                              )}
+
+                              {ai?.error && <div className="text-xs text-red-600 dark:text-red-300">{ai.error}</div>}
+                              {ai?.suggestion && (
+                                <div className="space-y-1.5 rounded-md border border-border bg-background/60 p-2 text-xs dark:border-slate-700">
+                                  <div className="flex items-start gap-2">
+                                    <Badge
+                                      className={cn(
+                                        'shrink-0 border-transparent text-white',
+                                        ai.suggestion.confidence >= 0.75
+                                          ? 'bg-green-600 hover:bg-green-600'
+                                          : ai.suggestion.confidence >= 0.4
+                                            ? 'bg-amber-600 hover:bg-amber-600'
+                                            : 'bg-slate-500 hover:bg-slate-500'
+                                      )}
+                                    >
+                                      {Math.round(ai.suggestion.confidence * 100)}%
+                                    </Badge>
+                                    <span className="text-muted-foreground">{ai.suggestion.reasoning}</span>
+                                  </div>
+                                  {ai.suggestion.record && (
+                                    <div className="flex flex-wrap items-center gap-3 rounded border border-blue-500/40 bg-blue-50/60 px-2 py-1.5 dark:bg-blue-950/30">
+                                      <Badge className="border-transparent bg-blue-600 text-[10px] text-white hover:bg-blue-600">AI pick</Badge>
+                                      <span className="text-foreground">{ai.suggestion.record.insuredName ?? '-'}</span>
+                                      <span className="text-muted-foreground">Agent: {ai.suggestion.record.agent ?? '-'}</span>
+                                      <span className="text-muted-foreground">Call Center: {ai.suggestion.record.callCenter ?? '-'}</span>
+                                      <span className="font-mono text-muted-foreground">{ai.suggestion.record.phoneNumber ?? '-'}</span>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        className="ml-auto h-6 px-2 text-[11px]"
+                                        onClick={() => {
+                                          const r = ai.suggestion!.record!
+                                          updateEntry(globalIndex, 'call_center', r.callCenter)
+                                          updateEntry(globalIndex, 'phone_number', r.phoneNumber)
+                                          if (r.draftDate) updateEntry(globalIndex, 'effective_date', r.draftDate)
+                                        }}
+                                      >
+                                        Use
+                                      </Button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {!ddfState.loading && !ddfState.error && ddfState.matches.length > 0 && (
+                                <div className="overflow-hidden rounded-md border border-border dark:border-slate-700">
+                                  <Table>
+                                    <TableHeader>
+                                      <TableRow className="bg-muted/80 dark:bg-slate-900">
+                                        <TableHead className="text-xs text-foreground">Insured (DDF)</TableHead>
+                                        <TableHead className="text-xs text-foreground">Agent</TableHead>
+                                        <TableHead className="text-xs text-foreground">Call Center</TableHead>
+                                        <TableHead className="text-xs text-foreground">Phone</TableHead>
+                                        <TableHead className="w-20 text-right text-xs text-foreground">Action</TableHead>
+                                      </TableRow>
+                                    </TableHeader>
+                                    <TableBody>
+                                      {ddfState.matches.map((m, i) => {
+                                        const isAiPick = ai?.suggestion?.recordId != null && m.id === ai.suggestion.recordId
+                                        return (
+                                        <TableRow key={`${rowKey}-ddf-${i}`} className="bg-background/80 dark:bg-slate-900/60">
+                                          <TableCell className="text-xs text-foreground">
+                                            {m.insured_name ?? '-'}
+                                            {isAiPick && (
+                                              <Badge className="ml-1.5 border-transparent bg-blue-600 text-[10px] text-white hover:bg-blue-600">AI pick</Badge>
+                                            )}
+                                          </TableCell>
+                                          <TableCell className="text-xs text-foreground">{m.agent ?? '-'}</TableCell>
+                                          <TableCell className="text-xs text-foreground">{m.call_center ?? '-'}</TableCell>
+                                          <TableCell className="font-mono text-xs text-foreground">{m.phone_number ?? '-'}</TableCell>
+                                          <TableCell className="text-right">
+                                            <Button
+                                              type="button"
+                                              size="sm"
+                                              className="h-6 px-2 text-[11px]"
+                                              onClick={() => {
+                                                updateEntry(globalIndex, 'call_center', m.call_center ?? null)
+                                                updateEntry(globalIndex, 'phone_number', m.phone_number ?? null)
+                                                if (m.draft_date) updateEntry(globalIndex, 'effective_date', m.draft_date)
+                                              }}
+                                            >
+                                              Use
+                                            </Button>
+                                          </TableCell>
+                                        </TableRow>
+                                        )
+                                      })}
+                                    </TableBody>
+                                  </Table>
+                                </div>
+                              )}
                             </div>
-                          )}
+                            )
+                          })()}
                         </TableCell>
                       </TableRow>
                     )}

@@ -20,6 +20,7 @@ import {
     Sun,
     Moon,
     ClipboardCheck,
+    Link2,
     AlertTriangle,
     ScrollText,
     Mail,
@@ -158,6 +159,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Review Policies"
           icon={ClipboardCheck}
           active={navActive('/review-policies')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/deal-tracker/unmatched-leads"
+          label="Unmatched Leads"
+          icon={Link2}
+          active={navActive('/deal-tracker/unmatched-leads')}
           collapsed={collapsed}
         />
         <NavRow
