@@ -117,13 +117,6 @@ function dashAsNull(v: unknown): string | null {
   return t === '' || t === '-' ? null : String(v)
 }
 
-// TEMPORARY diagnostic logging (see the AI-DEBUG investigation) — stringified so copy-pasted
-// console output is fully readable instead of collapsed "Object" placeholders.
-function dbg(label: string, payload?: unknown): void {
-  // eslint-disable-next-line no-console
-  console.log(`[AI-DEBUG] ${label}${payload !== undefined ? ' ' + JSON.stringify(payload) : ''}`)
-}
-
 export function DealTrackerVerificationDialog({
   open,
   onOpenChange,
@@ -157,11 +150,6 @@ export function DealTrackerVerificationDialog({
 
   // Keep editable state in sync with props when dialog opens or entries change
   useEffect(() => {
-    dbg('sync-entries effect fired (this REBUILDS editableEntries from the raw `entries` prop, discarding any local AI-fills/edits)', {
-      open,
-      entriesLength: entries.length,
-      entriesSummary: entries.map(e => ({ policy_number: e.policy_number, name: e.name, isNew: e.isNew, call_center: e.call_center, phone_number: e.phone_number })),
-    })
     if (open && entries.length > 0) {
       setEditableEntries(
         entries.map((e) => ({
@@ -425,21 +413,6 @@ export function DealTrackerVerificationDialog({
       .map((entry, globalIndex) => ({ entry, globalIndex }))
       .filter(({ entry }) => entry.isNew)
 
-    dbg('runBatchAiMatch START', {
-      editableEntriesLength: editableEntries.length,
-      targetsCount: targets.length,
-      targets: targets.map(t => ({
-        globalIndex: t.globalIndex,
-        name: t.entry.name,
-        carrier: t.entry.carrier,
-        policy_number: t.entry.policy_number,
-        agency_carrier_id: t.entry.agency_carrier_id,
-        call_center: t.entry.call_center,
-        phone_number: t.entry.phone_number,
-        ghl_name: t.entry.ghl_name,
-      })),
-    })
-
     if (targets.length === 0) return
 
     setBatchAiRunning(true)
@@ -463,20 +436,17 @@ export function DealTrackerVerificationDialog({
     })
 
     try {
-      dbg('fetching suggest-ddf-match-batch with rows', rows)
       const res = await fetch('/api/deal-tracker/suggest-ddf-match-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rows }),
       })
-      dbg('fetch responded', { status: res.status, redirected: res.redirected, url: res.url })
       // See the matching comment in askDdfAi — a stale session gets silently redirected to
       // /login (200 OK) rather than erroring, so this has to be checked explicitly.
       if (res.redirected || res.url.includes('/login')) {
         throw new Error('Your session may have expired — refresh the page and log in again.')
       }
       const data = await res.json().catch(() => ({}))
-      dbg('response body', data)
       if (!res.ok) throw new Error(data.error || 'Batch AI match failed.')
       const results = (data.results || []) as (DdfAiSuggestion & { rowKey: string })[]
       setDdfAiState(prev => {
@@ -494,32 +464,9 @@ export function DealTrackerVerificationDialog({
       // this table, gated behind the human clicking Confirm & Save.
       results.forEach(({ rowKey, record }) => {
         const globalIndex = indexByRowKey.get(rowKey)
-        if (globalIndex == null || !record) {
-          dbg('SKIP row (no globalIndex or no record)', { rowKey, globalIndex, record })
-          return
-        }
+        if (globalIndex == null || !record) return
         const current = editableEntries[globalIndex]
-        if (!current) {
-          dbg('SKIP row (no current entry at globalIndex)', { rowKey, globalIndex })
-          return
-        }
-        const applied = {
-          call_center: isMissingRequired(current.call_center),
-          phone_number: isMissingRequired(current.phone_number),
-          effective_date: isMissingRequired(current.effective_date) && !!record.draftDate,
-          ghl_name: isMissingRequired(current.ghl_name) && !!record.insuredName,
-        }
-        dbg('APPLY row', {
-          rowKey,
-          globalIndex,
-          currentCallCenter: current.call_center,
-          currentPhone: current.phone_number,
-          currentGhlName: current.ghl_name,
-          currentName: current.name,
-          currentPolicyNumber: current.policy_number,
-          record,
-          applied,
-        })
+        if (!current) return
         if (isMissingRequired(current.call_center)) updateEntry(globalIndex, 'call_center', record.callCenter)
         if (isMissingRequired(current.phone_number)) updateEntry(globalIndex, 'phone_number', record.phoneNumber)
         if (isMissingRequired(current.effective_date) && record.draftDate) updateEntry(globalIndex, 'effective_date', record.draftDate)
@@ -527,7 +474,6 @@ export function DealTrackerVerificationDialog({
       })
       setFilter('incomplete')
     } catch (err: any) {
-      dbg('runBatchAiMatch CAUGHT ERROR', { message: err?.message, stack: err?.stack })
       setBatchAiError(err?.message || 'Batch AI match failed.')
       setDdfAiState(prev => {
         const next = { ...prev }
@@ -535,7 +481,6 @@ export function DealTrackerVerificationDialog({
         return next
       })
     } finally {
-      dbg('runBatchAiMatch FINALLY (done)')
       setBatchAiRunning(false)
       setHasRunAiOnce(true)
     }
@@ -556,11 +501,6 @@ export function DealTrackerVerificationDialog({
     // blocking the automatic trigger for every upload after the first in the same session — while
     // the stale hasRunAiOnce=true made the notification falsely claim "AI checked" for a run that
     // never happened. Manual Re-run always worked because it bypasses these guards entirely.
-    dbg('reset effect fired', {
-      open,
-      entriesLength: entries.length,
-      entriesSummary: entries.map(e => ({ policy_number: e.policy_number, name: e.name, isNew: e.isNew, call_center: e.call_center, phone_number: e.phone_number })),
-    })
     autoAiRanRef.current = false
     setHasRunAiOnce(false)
   }, [open, entries])
@@ -573,25 +513,6 @@ export function DealTrackerVerificationDialog({
     // matching exactly "does nothing the first time, works on manual Re-run." Waiting for
     // aiReadyCount to catch up to aiEligibleCount means the auto-trigger only fires once every
     // eligible row actually has real data to search DDF with.
-    dbg('auto-trigger effect evaluated', {
-      open,
-      isLoading,
-      batchAiRunning,
-      autoAiRanRefCurrent: autoAiRanRef.current,
-      aiEligibleCount,
-      aiReadyCount,
-      editableEntriesLength: editableEntries.length,
-      entriesLength: entries.length,
-      editableEntriesSynced,
-      willFire:
-        open &&
-        !isLoading &&
-        !batchAiRunning &&
-        !autoAiRanRef.current &&
-        editableEntriesSynced &&
-        aiEligibleCount > 0 &&
-        aiReadyCount === aiEligibleCount,
-    })
     if (
       open &&
       !isLoading &&
@@ -603,7 +524,6 @@ export function DealTrackerVerificationDialog({
       aiEligibleCount > 0 &&
       aiReadyCount === aiEligibleCount
     ) {
-      dbg('auto-trigger FIRING runBatchAiMatch() now')
       autoAiRanRef.current = true
       runBatchAiMatch()
     }
