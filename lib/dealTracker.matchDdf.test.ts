@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { matchDdfNamesToRecords } from './dealTracker'
+import { matchDdfNamesToRecords, extractNameParts } from './dealTracker'
 
 type DdfRecord = {
   insured_name?: string | null
@@ -76,4 +76,34 @@ test('matchDdfNamesToRecords: no matching record at all returns nothing', () => 
   const records = [record({ insured_name: 'Diane Walker', lead_vendor: 'Downtown BPO' })]
   const result = matchDdfNamesToRecords(records, ['Zachary Nguyen'])
   assert.equal(result.size, 0)
+})
+
+// ── extractNameParts: a trailing Jr/Sr/II/III/IV/V must never be picked as the
+// surname — it used to be, since the parser just took the last whitespace token,
+// which meant "Douglas Eugene Roberts Jr" parsed as last="Jr" and could never match
+// the real surname "Roberts" through any tier at all.
+
+test('extractNameParts: a trailing "Jr" is stripped, not treated as the surname', () => {
+  const parts = extractNameParts('Douglas Eugene Roberts Jr')
+  assert.equal(parts.firstName, 'Douglas')
+  assert.equal(parts.lastName, 'Roberts')
+})
+
+test('extractNameParts: "Sr", "II", "III" are also recognized, case-insensitively, with or without a period', () => {
+  assert.equal(extractNameParts('James Smith Sr').lastName, 'Smith')
+  assert.equal(extractNameParts('James Smith SR.').lastName, 'Smith')
+  assert.equal(extractNameParts('James Smith ii').lastName, 'Smith')
+  assert.equal(extractNameParts('James Smith III').lastName, 'Smith')
+})
+
+test('extractNameParts: a lone suffix with nothing else is left alone (nothing to strip down to)', () => {
+  const parts = extractNameParts('Jr')
+  assert.equal(parts.firstName, 'Jr')
+  assert.equal(parts.lastName, 'Jr')
+})
+
+test('matchDdfNamesToRecords: a DDF record with a Jr suffix now matches the plain carrier-file name', () => {
+  const records = [record({ insured_name: 'Douglas Eugene Roberts Jr', lead_vendor: 'Downtown BPO', client_phone_number: '5551234567' })]
+  const result = matchDdfNamesToRecords(records, ['Douglas Roberts'])
+  assert.equal(result.get('Douglas Roberts')?.call_center, 'Downtown BPO')
 })

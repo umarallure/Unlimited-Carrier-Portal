@@ -192,3 +192,40 @@ test('scoreDdfCandidatesFromPool: empty target name returns no candidates', () =
   assert.deepEqual(scoreDdfCandidatesFromPool([c], { name: '' }).candidates, [])
   assert.deepEqual(scoreDdfCandidatesFromPool([c], { name: null }).candidates, [])
 })
+
+// ── full-name-vs-full-name similarity: no token splitting, no first/last separation,
+// no suffix awareness — just how close the two whole strings are, as a 0-100 score.
+// Replaced the earlier tiered/token approach for this pipeline specifically (see
+// fullNameSimilarity in leadMatchCandidates.ts) so a typo or a trailing suffix doesn't
+// need its own special-cased tier — it's just a small edit-distance delta either way.
+
+test('fullNameSimilarity (via scoreDdfCandidatesFromPool): a typo anywhere in the full name still scores high', () => {
+  const c = ddfRecord({ id: 'c1', insured_name: 'Mike Ross', licensed_agent_account: 'Test Rion', draft_date: isoDaysAgo(1) })
+  const { candidates } = scoreDdfCandidatesFromPool([c], { name: 'Mike Ros', agent: 'Test Rion', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'c1')
+  assert.ok(candidates[0]!.score >= 80, `expected a high score for a one-letter typo, got ${candidates[0]?.score}`)
+})
+
+test('fullNameSimilarity: a trailing suffix (Jr) is tolerated without any special-casing, since it is only a few extra characters', () => {
+  const c = ddfRecord({ id: 'c1', insured_name: 'Harvey Spectre', licensed_agent_account: 'Test Rion', draft_date: isoDaysAgo(1) })
+  const { candidates } = scoreDdfCandidatesFromPool([c], { name: 'Harvey Spectre Jr', agent: 'Test Rion', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'c1')
+  assert.ok(candidates[0]!.score >= 75, `expected a high score for a suffix-only difference, got ${candidates[0]?.score}`)
+})
+
+test('fullNameSimilarity: two genuinely unrelated names still score low, but are not hard-excluded to zero', () => {
+  // Important behavioral note: unlike the old tiered system, there is no hard
+  // "not even a candidate" cutoff anymore — the AI's own "return null if nothing is
+  // plausible" judgment (and the topN cap) is what actually filters weak matches now,
+  // not this scoring step.
+  const c = ddfRecord({ id: 'c1', insured_name: 'Diane Walker', licensed_agent_account: 'Test Rion', draft_date: isoDaysAgo(1) })
+  const { candidates } = scoreDdfCandidatesFromPool([c], { name: 'Zachary Nguyen', agent: 'Test Rion', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'c1')
+  assert.ok(candidates[0]!.score < 40, `expected a low score for unrelated names, got ${candidates[0]?.score}`)
+})
+
+test('fullNameSimilarity: exact full-name match still scores 100', () => {
+  const c = ddfRecord({ id: 'c1', insured_name: 'Diane Walker', licensed_agent_account: 'Test Rion', draft_date: isoDaysAgo(1) })
+  const { candidates } = scoreDdfCandidatesFromPool([c], { name: 'Diane Walker', agent: 'Test Rion', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.score, 100)
+})

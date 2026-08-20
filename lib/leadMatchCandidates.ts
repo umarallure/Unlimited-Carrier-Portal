@@ -87,7 +87,11 @@ function nameScoreForNames(targetName: string, candidateFullName: string): numbe
   ) {
     return 80
   }
-  if (targetParts.lastName && candidateParts.lastName && candidateParts.lastName.toLowerCase() === targetParts.lastName.toLowerCase()) {
+  // Last name within edit-distance 2 (not just exact) — a requirement of exact equality here had
+  // zero typo tolerance at all: "Ros" vs "Ross" (one dropped letter, distance 1) scored the same
+  // as a totally unrelated surname. Every other tier in this function already allows distance <=2;
+  // this just makes the "same last name" tier consistent with that same standing tolerance.
+  if (targetParts.lastName && candidateParts.lastName && editDistance(candidateParts.lastName.toLowerCase(), targetParts.lastName.toLowerCase()) <= 2) {
     const firstDist =
       targetParts.firstName && candidateParts.firstName
         ? editDistance(targetParts.firstName.toLowerCase(), candidateParts.firstName.toLowerCase())
@@ -96,11 +100,6 @@ function nameScoreForNames(targetName: string, candidateFullName: string): numbe
   }
   if (targetParts.firstName && candidateParts.firstName && candidateParts.firstName.toLowerCase() === targetParts.firstName.toLowerCase()) {
     return 25
-  }
-  if (targetParts.firstName && targetParts.lastName && candidateParts.firstName && candidateParts.lastName) {
-    const firstDist = editDistance(targetParts.firstName.toLowerCase(), candidateParts.firstName.toLowerCase())
-    const lastDist = editDistance(targetParts.lastName.toLowerCase(), candidateParts.lastName.toLowerCase())
-    if (firstDist <= 2 && lastDist <= 2) return 45
   }
   return 0
 }
@@ -166,6 +165,26 @@ export function scoreDdfCandidates(target: MatchTarget, candidates: DdfCarrierRe
 const RECENT_WINDOW_DAYS = 7
 const WIDENED_WINDOW_DAYS = 10
 
+/**
+ * Full-name-vs-full-name similarity for this pipeline specifically — requested to replace
+ * nameScoreForNames' token-splitting/tiered approach here: no first/last separation, no
+ * suffix handling, just how close the two full strings are as a whole, as a 0-100 score.
+ * (scoreCandidates/scoreDdfCandidates above, the separate/currently-unlinked "Unmatched
+ * Leads" flow, still use nameScoreForNames unchanged — this is scoped to the AI-assist
+ * DDF candidate search only.)
+ */
+function fullNameSimilarity(targetName: string, candidateFullName: string): number {
+  const target = normalizeNameForSearch(targetName).toLowerCase()
+  if (!target) return 0
+  const candidate = normalizeNameForSearch(candidateFullName).toLowerCase()
+  if (!candidate) return 0
+  if (target === candidate) return 100
+
+  const dist = editDistance(target, candidate)
+  const maxLen = Math.max(target.length, candidate.length)
+  return Math.max(Math.round((1 - dist / maxLen) * 100), 0)
+}
+
 function isoDaysAgo(days: number): string {
   const d = new Date()
   d.setUTCDate(d.getUTCDate() - days)
@@ -199,7 +218,7 @@ export function scoreDdfCandidatesFromPool(
     const scored: ScoredDdfCandidate[] = []
     for (const c of records) {
       if (target.agent && !agentsMatch(target.agent, c.licensed_agent_account)) continue
-      const score = nameScoreForNames(target.name as string, c.insured_name ?? '')
+      const score = fullNameSimilarity(target.name as string, c.insured_name ?? '')
       if (score <= 0) continue
       scored.push({ ...c, score })
     }

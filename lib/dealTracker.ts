@@ -826,10 +826,22 @@ export function normalizeNameForSearch(name: string): string {
   return noComma.replace(/\s+/g, ' ').trim()
 }
 
+/** Generational suffixes that must never be picked as a surname — "Douglas Roberts Jr" is a Roberts, not a Jr. */
+const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'v'])
+
+/** Drops a trailing generational suffix token, if present, as long as at least one part remains. */
+function stripTrailingSuffix(parts: string[]): string[] {
+  if (parts.length <= 1) return parts
+  const last = parts[parts.length - 1].replace(/\.$/, '').toLowerCase()
+  return NAME_SUFFIXES.has(last) ? parts.slice(0, -1) : parts
+}
+
 /**
  * Extract first and last name for flexible matching.
  * Returns a canonical key (sorted first|last) so "Diane Walker", "Walker, Diane", and "HART, RAYMOND L" vs "Raymond Lee Hart" match.
  * When a comma is present, treat "Last, First MI" so last = before comma, first = first word after comma.
+ * A trailing Jr/Sr/II/III/IV/V is stripped before picking the last name — otherwise "Douglas Eugene
+ * Roberts Jr" parses as last="Jr", which can never match the real surname "Roberts" at all.
  */
 export function extractNameParts(fullName: string): { firstName: string; lastName: string; allParts: string[]; firstLastKey: string } {
   const raw = (fullName ?? '').trim()
@@ -857,10 +869,11 @@ export function extractNameParts(fullName: string): { firstName: string; lastNam
   }
 
   const normalized = normalizeNameForSearch(fullName)
-  const parts = normalized.split(' ').filter(p => p.length > 0)
-  if (parts.length === 0) {
+  const rawParts = normalized.split(' ').filter(p => p.length > 0)
+  if (rawParts.length === 0) {
     return { firstName: '', lastName: '', allParts: [], firstLastKey: '' }
   }
+  const parts = stripTrailingSuffix(rawParts)
   const firstName = parts[0]
   const lastName = parts[parts.length - 1]
   const allParts = parts.filter((p, i) => i === 0 || i === parts.length - 1)
