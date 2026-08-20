@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -279,9 +279,12 @@ export function DealTrackerVerificationDialog({
 
   const incompleteCount = editableEntries.filter((e) => isEntryIncomplete(e)).length
   const hasIncomplete = incompleteCount > 0
-  // Subset of Incomplete rows AI matching can actually help with — a row missing only
-  // Effective Date or a valid GHL Stage has nothing to do with DDF name matching.
-  const aiEligibleCount = editableEntries.filter((e) => isMissingRequired(e.call_center) || isMissingRequired(e.phone_number)).length
+  // Every New row gets AI-assist now (requirement from Fatlinda's lead), not just rows the
+  // strict matcher failed on — a deliberate broadening from "fallback for failures" to "checked
+  // for every new lead." Rows that already have Call Center/Phone from the strict matcher still
+  // get scored and shown a confidence badge for human review; runBatchAiMatch only ever
+  // auto-fills fields that are still genuinely empty, never overwrites an existing match.
+  const aiEligibleCount = editableEntries.filter((e) => e.isNew).length
 
   // Once nothing is left to fix, sitting on the now-empty Incomplete tab isn't useful —
   // move to New so the user immediately sees the rows they're actually about to save.
@@ -385,11 +388,11 @@ export function DealTrackerVerificationDialog({
   }, [])
 
   const runBatchAiMatch = useCallback(async () => {
-    // Only rows the DDF matcher actually failed on — a row that's Incomplete purely for a
-    // missing Effective Date or an invalid GHL Stage has nothing for AI matching to fix.
+    // Every New row, not just ones the strict matcher failed on (see aiEligibleCount above for
+    // why) — the auto-fill step below still refuses to overwrite fields that already have data.
     const targets = editableEntries
       .map((entry, globalIndex) => ({ entry, globalIndex }))
-      .filter(({ entry }) => isMissingRequired(entry.call_center) || isMissingRequired(entry.phone_number))
+      .filter(({ entry }) => entry.isNew)
 
     if (targets.length === 0) return
 
@@ -434,17 +437,21 @@ export function DealTrackerVerificationDialog({
         })
         return next
       })
-      // The whole point of a batch action is to not require a manual "Use" click per row
-      // afterward — auto-fill any row where the AI landed on an actual record. Nothing here
-      // writes to the database: these are the same in-memory, still-editable, still-reviewable
-      // fields as every other cell in this table, gated behind the human clicking Confirm & Save.
+      // Auto-fill any row where the AI landed on an actual record — but only fields that are
+      // still genuinely empty. A row the strict matcher already resolved keeps its existing
+      // Call Center/Phone as-is; the AI's opinion still shows via the badge/panel for review,
+      // it just never silently overwrites a match that already worked. Nothing here writes to
+      // the database either way: same in-memory, still-editable fields as every other cell in
+      // this table, gated behind the human clicking Confirm & Save.
       results.forEach(({ rowKey, record }) => {
         const globalIndex = indexByRowKey.get(rowKey)
         if (globalIndex == null || !record) return
-        updateEntry(globalIndex, 'call_center', record.callCenter)
-        updateEntry(globalIndex, 'phone_number', record.phoneNumber)
-        if (record.draftDate) updateEntry(globalIndex, 'effective_date', record.draftDate)
-        if (record.insuredName) updateEntry(globalIndex, 'ghl_name', record.insuredName)
+        const current = editableEntries[globalIndex]
+        if (!current) return
+        if (isMissingRequired(current.call_center)) updateEntry(globalIndex, 'call_center', record.callCenter)
+        if (isMissingRequired(current.phone_number)) updateEntry(globalIndex, 'phone_number', record.phoneNumber)
+        if (isMissingRequired(current.effective_date) && record.draftDate) updateEntry(globalIndex, 'effective_date', record.draftDate)
+        if (isMissingRequired(current.ghl_name) && record.insuredName) updateEntry(globalIndex, 'ghl_name', record.insuredName)
       })
       setFilter('incomplete')
     } catch (err: any) {
@@ -458,6 +465,22 @@ export function DealTrackerVerificationDialog({
       setBatchAiRunning(false)
     }
   }, [editableEntries, updateEntry])
+
+  // Runs AI matching automatically once per dialog-open, instead of requiring a manual click on
+  // "Run AI Match on All Incomplete" — same rows as that button always targeted (whatever the
+  // strict upload-time matcher couldn't resolve), just no longer gated behind asking a human
+  // first. The button stays available too, for re-running after a manual edit changes which rows
+  // still need it.
+  const autoAiRanRef = useRef(false)
+  useEffect(() => {
+    if (!open) autoAiRanRef.current = false
+  }, [open])
+  useEffect(() => {
+    if (open && !isLoading && !batchAiRunning && !autoAiRanRef.current && aiEligibleCount > 0) {
+      autoAiRanRef.current = true
+      runBatchAiMatch()
+    }
+  }, [open, isLoading, batchAiRunning, aiEligibleCount, runBatchAiMatch])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -637,41 +660,47 @@ export function DealTrackerVerificationDialog({
         {!isLoading && hasIncomplete && (
           <div
             role="status"
-            className="flex flex-col gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900 dark:border-rose-800/80 dark:bg-rose-950/50 dark:text-rose-100"
+            className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900 dark:border-rose-800/80 dark:bg-rose-950/50 dark:text-rose-100"
           >
-            <div className="flex items-start gap-2">
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
-              <span>
-                <strong>{incompleteCount}</strong> row{incompleteCount === 1 ? ' is' : 's are'} incomplete. Fill{' '}
-                <strong>Effective Date</strong>, <strong>Call Center</strong>, and <strong>Phone</strong> (and a valid{' '}
-                <strong>GHL Stage</strong>) on the <strong>Incomplete</strong> tab — saving and continuing to Commission Report are
-                blocked until every row is complete.
-              </span>
-            </div>
-            {aiEligibleCount > 0 && (
-              <div className="flex flex-wrap items-center gap-2 pl-6">
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-7 bg-blue-600 px-2 text-[11px] text-white hover:bg-blue-700"
-                  disabled={batchAiRunning}
-                  onClick={runBatchAiMatch}
-                >
-                  {batchAiRunning ? (
-                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                  ) : (
-                    <Sparkles className="mr-1 h-3 w-3" />
-                  )}
-                  Run AI Match on All Incomplete ({aiEligibleCount})
-                </Button>
-                {batchAiRunning && (
-                  <span className="text-xs text-rose-800/80 dark:text-rose-200/80">
-                    Matching each row against Daily Deal Flow (carrier + agent + last 7-10 days) — this can take a while…
-                  </span>
-                )}
-                {batchAiError && <span className="text-xs text-rose-700 dark:text-rose-300">{batchAiError}</span>}
-              </div>
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
+            <span>
+              <strong>{incompleteCount}</strong> row{incompleteCount === 1 ? ' is' : 's are'} incomplete. Fill{' '}
+              <strong>Effective Date</strong>, <strong>Call Center</strong>, and <strong>Phone</strong> (and a valid{' '}
+              <strong>GHL Stage</strong>) on the <strong>Incomplete</strong> tab — saving and continuing to Commission Report are
+              blocked until every row is complete.
+            </span>
+          </div>
+        )}
+
+        {/* Runs automatically on dialog open (see the auto-trigger effect below) for every New
+            row, not just Incomplete ones — a requirement that AI-assist check all new leads, not
+            only ones the strict matcher failed on. Reads as a status notification, not a call to
+            action, since there's normally nothing to click — "Re-run" only matters after an edit
+            changes what needs checking, and never overwrites a field that already has data. */}
+        {!isLoading && aiEligibleCount > 0 && (
+          <div
+            role="status"
+            className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-100"
+          >
+            {batchAiRunning ? (
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600 dark:text-blue-400" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
             )}
+            <span>
+              {batchAiRunning
+                ? `Matching ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow (carrier + agent + last 7-10 days) — this can take a while…`
+                : `AI checked ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow automatically.`}
+            </span>
+            <button
+              type="button"
+              className="ml-auto shrink-0 font-medium text-blue-700 underline underline-offset-2 hover:text-blue-900 disabled:opacity-50 disabled:no-underline dark:text-blue-300 dark:hover:text-blue-100"
+              disabled={batchAiRunning}
+              onClick={runBatchAiMatch}
+            >
+              Re-run
+            </button>
+            {batchAiError && <span className="w-full text-red-700 dark:text-red-300">{batchAiError}</span>}
           </div>
         )}
 
