@@ -20,11 +20,32 @@
  *   row's Call Center/Phone/Effective Date inputs, the same as picking one by
  *   hand from the existing candidate list.
  */
-import { nvidiaChat, nvidiaConfigured, extractJson } from './nvidia'
+import { nvidiaChat, nvidiaConfigured } from './nvidia'
+import { fireworksChat, fireworksConfigured, extractJson } from './fireworks'
+
+/**
+ * Provider switch — set AI_MATCH_PROVIDER=fireworks in .env.local to compare
+ * against NVIDIA's build.nvidia.com endpoint (default), which has had inconsistent
+ * gateway latency (see lib/nvidia.ts). Both clients share the same request/response
+ * shape, so nothing else in this file needs to know which one is active.
+ */
+function activeProvider(): 'nvidia' | 'fireworks' {
+  return process.env.AI_MATCH_PROVIDER?.trim().toLowerCase() === 'fireworks' ? 'fireworks' : 'nvidia'
+}
 
 export function aiMatchConfigured(): boolean {
-  return nvidiaConfigured()
+  return activeProvider() === 'fireworks' ? fireworksConfigured() : nvidiaConfigured()
 }
+
+async function runMatchChat(system: string, user: string, maxTokens: number): Promise<{ content: string }> {
+  return activeProvider() === 'fireworks'
+    ? fireworksChat(system, user, maxTokens)
+    : nvidiaChat(system, user, maxTokens)
+}
+
+/** Injectable in tests so the guard/parsing logic can be verified without a real network call. */
+export type MatchChatFn = (system: string, user: string, maxTokens: number) => Promise<{ content: string }>
+
 
 /** Shared response shape both prompts ask for — only the id field name differs per caller. */
 type ParsedMatchResponse = {
@@ -115,9 +136,10 @@ const LEAD_MATCH_SYSTEM_PROMPT = [
  */
 export async function suggestLeadMatch(
   target: LeadMatchTarget,
-  candidates: LeadMatchCandidate[]
+  candidates: LeadMatchCandidate[],
+  chat: MatchChatFn = runMatchChat
 ): Promise<LeadMatchSuggestion | null> {
-  if (!nvidiaConfigured()) return null
+  if (!aiMatchConfigured()) return null
   if (candidates.length === 0) {
     return {
       leadId: null,
@@ -145,7 +167,7 @@ export async function suggestLeadMatch(
   })
 
   try {
-    const { content } = await nvidiaChat(LEAD_MATCH_SYSTEM_PROMPT, userMessage, 400)
+    const { content } = await chat(LEAD_MATCH_SYSTEM_PROMPT, userMessage, 400)
     const parsed = parseMatchResponse(content, new Set(candidates.map((c) => c.leadId)))
     if (!parsed) return null
     return {
@@ -200,9 +222,10 @@ const DDF_MATCH_SYSTEM_PROMPT = [
  */
 export async function suggestDdfMatch(
   target: DdfMatchTarget,
-  candidates: DdfMatchCandidate[]
+  candidates: DdfMatchCandidate[],
+  chat: MatchChatFn = runMatchChat
 ): Promise<DdfMatchSuggestion | null> {
-  if (!nvidiaConfigured()) return null
+  if (!aiMatchConfigured()) return null
   if (candidates.length === 0) {
     return {
       recordId: null,
@@ -229,7 +252,7 @@ export async function suggestDdfMatch(
   })
 
   try {
-    const { content } = await nvidiaChat(DDF_MATCH_SYSTEM_PROMPT, userMessage, 400)
+    const { content } = await chat(DDF_MATCH_SYSTEM_PROMPT, userMessage, 400)
     const parsed = parseMatchResponse(content, new Set(candidates.map((c) => c.recordId)))
     if (!parsed) return null
     return {

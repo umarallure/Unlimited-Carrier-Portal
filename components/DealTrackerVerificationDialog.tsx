@@ -71,6 +71,16 @@ type DdfAiSuggestion = {
     draftDate: string | null
     agent: string | null
   } | null
+  topCandidates: {
+    id: string | null
+    insuredName: string | null
+    callCenter: string | null
+    phoneNumber: string | null
+    draftDate: string | null
+    agent: string | null
+    score: number
+  }[]
+  usedWiderWindow: boolean
 }
 
 interface DealTrackerVerificationDialogProps {
@@ -127,6 +137,8 @@ export function DealTrackerVerificationDialog({
   const [ddfMatches, setDdfMatches] = useState<Record<string, { loading: boolean; error: string | null; matches: DdfMatchRow[] }>>({})
   const [ddfAiState, setDdfAiState] = useState<Record<string, { loading: boolean; suggestion?: DdfAiSuggestion; error?: string }>>({})
   const [expandedChangesRowKey, setExpandedChangesRowKey] = useState<string | null>(null)
+  const [batchAiRunning, setBatchAiRunning] = useState(false)
+  const [batchAiError, setBatchAiError] = useState<string | null>(null)
   // Keyed by policy_number (not array index) - removing a row shifts every
   // subsequent row's index down, so an index-based snapshot would silently
   // start matching the wrong (now-shifted) rows after any removal.
@@ -267,6 +279,17 @@ export function DealTrackerVerificationDialog({
 
   const incompleteCount = editableEntries.filter((e) => isEntryIncomplete(e)).length
   const hasIncomplete = incompleteCount > 0
+  // Subset of Incomplete rows AI matching can actually help with — a row missing only
+  // Effective Date or a valid GHL Stage has nothing to do with DDF name matching.
+  const aiEligibleCount = editableEntries.filter((e) => isMissingRequired(e.call_center) || isMissingRequired(e.phone_number)).length
+
+  // Once nothing is left to fix, sitting on the now-empty Incomplete tab isn't useful —
+  // move to New so the user immediately sees the rows they're actually about to save.
+  useEffect(() => {
+    if (filter === 'incomplete' && incompleteCount === 0 && editableEntries.length > 0) {
+      setFilter('new')
+    }
+  }, [filter, incompleteCount, editableEntries.length])
 
   const filteredEntries =
     filter === 'new'
@@ -346,6 +369,13 @@ export function DealTrackerVerificationDialog({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, carrier, agent }),
       })
+      // The app's middleware redirects an unauthenticated/expired-session request to /login for
+      // ANY route, API routes included — fetch follows that redirect automatically, and /login
+      // itself returns 200 OK, so without this check a stale session silently looks like "AI
+      // found nothing" instead of an auth error.
+      if (res.redirected || res.url.includes('/login')) {
+        throw new Error('Your session may have expired — refresh the page and log in again.')
+      }
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || 'AI suggestion failed.')
       setDdfAiState(prev => ({ ...prev, [rowKey]: { loading: false, suggestion: data as DdfAiSuggestion } }))
@@ -353,6 +383,81 @@ export function DealTrackerVerificationDialog({
       setDdfAiState(prev => ({ ...prev, [rowKey]: { loading: false, error: err?.message || 'AI suggestion failed.' } }))
     }
   }, [])
+
+  const runBatchAiMatch = useCallback(async () => {
+    // Only rows the DDF matcher actually failed on — a row that's Incomplete purely for a
+    // missing Effective Date or an invalid GHL Stage has nothing for AI matching to fix.
+    const targets = editableEntries
+      .map((entry, globalIndex) => ({ entry, globalIndex }))
+      .filter(({ entry }) => isMissingRequired(entry.call_center) || isMissingRequired(entry.phone_number))
+
+    if (targets.length === 0) return
+
+    setBatchAiRunning(true)
+    setBatchAiError(null)
+    const indexByRowKey = new Map<string, number>()
+    const rows = targets.map(({ entry, globalIndex }) => {
+      const rowKey = `${entry.agency_carrier_id}-${entry.policy_number}-${globalIndex}`
+      indexByRowKey.set(rowKey, globalIndex)
+      return {
+        rowKey,
+        name: entry.name ?? '',
+        carrier: entry.carrier ?? '',
+        agent: entry.sales_agent ?? null,
+      }
+    })
+
+    setDdfAiState(prev => {
+      const next = { ...prev }
+      rows.forEach(r => { next[r.rowKey] = { loading: true } })
+      return next
+    })
+
+    try {
+      const res = await fetch('/api/deal-tracker/suggest-ddf-match-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows }),
+      })
+      // See the matching comment in askDdfAi — a stale session gets silently redirected to
+      // /login (200 OK) rather than erroring, so this has to be checked explicitly.
+      if (res.redirected || res.url.includes('/login')) {
+        throw new Error('Your session may have expired — refresh the page and log in again.')
+      }
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'Batch AI match failed.')
+      const results = (data.results || []) as (DdfAiSuggestion & { rowKey: string })[]
+      setDdfAiState(prev => {
+        const next = { ...prev }
+        results.forEach(({ rowKey, ...suggestion }) => {
+          next[rowKey] = { loading: false, suggestion: suggestion as DdfAiSuggestion }
+        })
+        return next
+      })
+      // The whole point of a batch action is to not require a manual "Use" click per row
+      // afterward — auto-fill any row where the AI landed on an actual record. Nothing here
+      // writes to the database: these are the same in-memory, still-editable, still-reviewable
+      // fields as every other cell in this table, gated behind the human clicking Confirm & Save.
+      results.forEach(({ rowKey, record }) => {
+        const globalIndex = indexByRowKey.get(rowKey)
+        if (globalIndex == null || !record) return
+        updateEntry(globalIndex, 'call_center', record.callCenter)
+        updateEntry(globalIndex, 'phone_number', record.phoneNumber)
+        if (record.draftDate) updateEntry(globalIndex, 'effective_date', record.draftDate)
+        if (record.insuredName) updateEntry(globalIndex, 'ghl_name', record.insuredName)
+      })
+      setFilter('incomplete')
+    } catch (err: any) {
+      setBatchAiError(err?.message || 'Batch AI match failed.')
+      setDdfAiState(prev => {
+        const next = { ...prev }
+        rows.forEach(r => { next[r.rowKey] = { loading: false, error: 'Batch AI match failed.' } })
+        return next
+      })
+    } finally {
+      setBatchAiRunning(false)
+    }
+  }, [editableEntries, updateEntry])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -532,15 +637,41 @@ export function DealTrackerVerificationDialog({
         {!isLoading && hasIncomplete && (
           <div
             role="status"
-            className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900 dark:border-rose-800/80 dark:bg-rose-950/50 dark:text-rose-100"
+            className="flex flex-col gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900 dark:border-rose-800/80 dark:bg-rose-950/50 dark:text-rose-100"
           >
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
-            <span>
-              <strong>{incompleteCount}</strong> row{incompleteCount === 1 ? ' is' : 's are'} incomplete. Fill{' '}
-              <strong>Effective Date</strong>, <strong>Call Center</strong>, and <strong>Phone</strong> (and a valid{' '}
-              <strong>GHL Stage</strong>) on the <strong>Incomplete</strong> tab — saving and continuing to Commission Report are
-              blocked until every row is complete.
-            </span>
+            <div className="flex items-start gap-2">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
+              <span>
+                <strong>{incompleteCount}</strong> row{incompleteCount === 1 ? ' is' : 's are'} incomplete. Fill{' '}
+                <strong>Effective Date</strong>, <strong>Call Center</strong>, and <strong>Phone</strong> (and a valid{' '}
+                <strong>GHL Stage</strong>) on the <strong>Incomplete</strong> tab — saving and continuing to Commission Report are
+                blocked until every row is complete.
+              </span>
+            </div>
+            {aiEligibleCount > 0 && (
+              <div className="flex flex-wrap items-center gap-2 pl-6">
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-7 bg-blue-600 px-2 text-[11px] text-white hover:bg-blue-700"
+                  disabled={batchAiRunning}
+                  onClick={runBatchAiMatch}
+                >
+                  {batchAiRunning ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : (
+                    <Sparkles className="mr-1 h-3 w-3" />
+                  )}
+                  Run AI Match on All Incomplete ({aiEligibleCount})
+                </Button>
+                {batchAiRunning && (
+                  <span className="text-xs text-rose-800/80 dark:text-rose-200/80">
+                    Matching each row against Daily Deal Flow (carrier + agent + last 7-10 days) — this can take a while…
+                  </span>
+                )}
+                {batchAiError && <span className="text-xs text-rose-700 dark:text-rose-300">{batchAiError}</span>}
+              </div>
+            )}
           </div>
         )}
 
@@ -570,7 +701,7 @@ export function DealTrackerVerificationDialog({
 
         {!isLoading ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-muted/30 dark:bg-slate-800/40">
-            <div className="min-h-[280px] flex-1 overflow-auto">
+            <div className="min-h-0 flex-1 overflow-auto">
             <Table>
               <TableHeader className="sticky top-0 z-10 border-b border-border bg-muted/95 backdrop-blur dark:border-slate-700 dark:bg-slate-800/95">
                 <TableRow className="border-border hover:bg-transparent dark:border-slate-700">
@@ -617,6 +748,7 @@ export function DealTrackerVerificationDialog({
                   const rowKey = `${entry.agency_carrier_id}-${entry.policy_number}-${globalIndex}`
                   const ddfState = ddfMatches[rowKey] || { loading: false, error: null, matches: [] }
                   const isExpanded = openDdfRowKey === rowKey
+                  const aiSuggestion = ddfAiState[rowKey]?.suggestion
                   const changesExpanded = expandedChangesRowKey === rowKey
                   const hasChanges = changed.length > 0
                   const cellChanged = (field: string) => isUpdated && changed.includes(field)
@@ -800,21 +932,59 @@ export function DealTrackerVerificationDialog({
                             <span className="text-muted-foreground">—</span>
                           )}
                           {(isDuplicateName || (!entry.call_center && !entry.phone_number)) && (
-                            <Button
-                              type="button"
+                            <div className="flex items-center gap-1">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-6 border-amber-600 px-2 text-[11px] text-amber-800 hover:bg-amber-50 dark:border-amber-500 dark:text-amber-300 dark:hover:bg-amber-900/40"
+                                onClick={() => {
+                                  const nextOpen = isExpanded ? null : rowKey
+                                  setOpenDdfRowKey(nextOpen)
+                                  if (!isExpanded) {
+                                    loadDdfMatches(rowKey, entry.carrier, entry.name, entry.deal_creation_date)
+                                  }
+                                }}
+                              >
+                                {isExpanded ? 'Hide DDF' : 'View DDF'}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-6 border-blue-600 px-2 text-[11px] text-blue-800 hover:bg-blue-50 dark:border-blue-500 dark:text-blue-300 dark:hover:bg-blue-900/40"
+                                disabled={ddfAiState[rowKey]?.loading}
+                                onClick={() => {
+                                  setOpenDdfRowKey(rowKey)
+                                  askDdfAi(rowKey, entry.carrier, entry.name, entry.sales_agent)
+                                }}
+                              >
+                                {ddfAiState[rowKey]?.loading ? (
+                                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Sparkles className="mr-1 h-3 w-3" />
+                                )}
+                                Ask AI
+                              </Button>
+                            </div>
+                          )}
+                          {aiSuggestion && (
+                            <Badge
                               variant="outline"
-                              size="sm"
-                              className="h-6 border-amber-600 px-2 text-[11px] text-amber-800 hover:bg-amber-50 dark:border-amber-500 dark:text-amber-300 dark:hover:bg-amber-900/40"
-                              onClick={() => {
-                                const nextOpen = isExpanded ? null : rowKey
-                                setOpenDdfRowKey(nextOpen)
-                                if (!isExpanded) {
-                                  loadDdfMatches(rowKey, entry.carrier, entry.name, entry.deal_creation_date)
-                                }
-                              }}
+                              className={cn(
+                                'h-5 shrink-0 px-1.5 text-[10px]',
+                                aiSuggestion.recordId
+                                  ? aiSuggestion.confidence >= 0.75
+                                    ? 'border-green-600 text-green-700 dark:border-green-500 dark:text-green-400'
+                                    : aiSuggestion.confidence >= 0.4
+                                      ? 'border-amber-600 text-amber-700 dark:border-amber-500 dark:text-amber-400'
+                                      : 'border-slate-400 text-slate-600 dark:border-slate-500 dark:text-slate-400'
+                                  : 'border-rose-400 text-rose-700 dark:border-rose-500 dark:text-rose-400'
+                              )}
+                              title={aiSuggestion.reasoning}
                             >
-                              {isExpanded ? 'Hide DDF' : 'View DDF'}
-                            </Button>
+                              {aiSuggestion.recordId ? `AI: ${Math.round(aiSuggestion.confidence * 100)}%` : 'AI: no match'}
+                            </Badge>
                           )}
                         </div>
                       </TableCell>
@@ -886,9 +1056,26 @@ export function DealTrackerVerificationDialog({
                         <TableCell colSpan={19} className="border-t border-border bg-muted/50 py-2 dark:border-slate-700 dark:bg-slate-950/60">
                           {(() => {
                             const ai = ddfAiState[rowKey]
+                            const applyDdfRecord = (r: NonNullable<DdfAiSuggestion['record']>) => {
+                              updateEntry(globalIndex, 'call_center', r.callCenter)
+                              updateEntry(globalIndex, 'phone_number', r.phoneNumber)
+                              if (r.draftDate) updateEntry(globalIndex, 'effective_date', r.draftDate)
+                              if (r.insuredName) updateEntry(globalIndex, 'ghl_name', r.insuredName)
+                            }
                             return (
                             <div className="space-y-2">
-                              <div className="flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-3">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 shrink-0 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                                  onClick={() => setOpenDdfRowKey(null)}
+                                  title="Close"
+                                >
+                                  <X className="mr-1 h-3 w-3" />
+                                  Close
+                                </Button>
                                 <div className="text-xs text-muted-foreground">
                                   {ddfState.loading
                                     ? 'Searching Daily Deal Flow…'
@@ -896,21 +1083,6 @@ export function DealTrackerVerificationDialog({
                                       ? 'DDF matches for this insured (click "Use" to apply Call Center/Phone/Effective Date):'
                                       : 'No exact-ish DDF matches found for this name/carrier — try Ask AI for a broader search.'}
                                 </div>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  className={cn(adminOutlineBtn, 'h-6 shrink-0 px-2 text-[11px]')}
-                                  disabled={ai?.loading}
-                                  onClick={() => askDdfAi(rowKey, entry.carrier, entry.name, entry.sales_agent)}
-                                >
-                                  {ai?.loading ? (
-                                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                  ) : (
-                                    <Sparkles className="mr-1 h-3 w-3" />
-                                  )}
-                                  Ask AI
-                                </Button>
                               </div>
 
                               {ddfState.loading && (
@@ -941,30 +1113,64 @@ export function DealTrackerVerificationDialog({
                                     >
                                       {Math.round(ai.suggestion.confidence * 100)}%
                                     </Badge>
-                                    <span className="text-muted-foreground">{ai.suggestion.reasoning}</span>
+                                    <span className="text-muted-foreground">
+                                      {ai.suggestion.reasoning}
+                                      {ai.suggestion.usedWiderWindow && (
+                                        <span className="italic"> (widened search to last 10 days)</span>
+                                      )}
+                                    </span>
                                   </div>
                                   {ai.suggestion.record && (
                                     <div className="flex flex-wrap items-center gap-3 rounded border border-blue-500/40 bg-blue-50/60 px-2 py-1.5 dark:bg-blue-950/30">
                                       <Badge className="border-transparent bg-blue-600 text-[10px] text-white hover:bg-blue-600">AI pick</Badge>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        className="h-6 shrink-0 px-2 text-[11px]"
+                                        onClick={() => applyDdfRecord(ai.suggestion!.record!)}
+                                      >
+                                        Use
+                                      </Button>
                                       <span className="text-foreground">{ai.suggestion.record.insuredName ?? '-'}</span>
                                       <span className="text-muted-foreground">Agent: {ai.suggestion.record.agent ?? '-'}</span>
                                       <span className="text-muted-foreground">Call Center: {ai.suggestion.record.callCenter ?? '-'}</span>
                                       <span className="font-mono text-muted-foreground">{ai.suggestion.record.phoneNumber ?? '-'}</span>
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        className="ml-auto h-6 px-2 text-[11px]"
-                                        onClick={() => {
-                                          const r = ai.suggestion!.record!
-                                          updateEntry(globalIndex, 'call_center', r.callCenter)
-                                          updateEntry(globalIndex, 'phone_number', r.phoneNumber)
-                                          if (r.draftDate) updateEntry(globalIndex, 'effective_date', r.draftDate)
-                                        }}
-                                      >
-                                        Use
-                                      </Button>
                                     </div>
                                   )}
+                                </div>
+                              )}
+
+                              {/* Always shown alongside/instead of the AI pick — the model is one more
+                                  point of failure on top of an already-flaky provider, so a human always
+                                  has the best-scored candidates to pick from by hand, ranked highest first. */}
+                              {ai?.suggestion && ai.suggestion.topCandidates.length > 0 && (
+                                <div className="space-y-1 rounded-md border border-border bg-background/60 p-2 text-xs dark:border-slate-700">
+                                  <div className="text-muted-foreground">Top-ranked DDF matches (highest score first):</div>
+                                  {ai.suggestion.topCandidates
+                                    .filter((c) => c.id !== ai.suggestion!.record?.id)
+                                    .map((c) => (
+                                      <div
+                                        key={c.id}
+                                        className="flex flex-wrap items-center gap-3 rounded border border-border px-2 py-1.5 dark:border-slate-700"
+                                      >
+                                        <Badge variant="outline" className="shrink-0 text-[10px]">
+                                          {c.score}
+                                        </Badge>
+                                        <Button
+                                          type="button"
+                                          variant="outline"
+                                          size="sm"
+                                          className="h-6 shrink-0 px-2 text-[11px]"
+                                          onClick={() => applyDdfRecord(c)}
+                                        >
+                                          Use
+                                        </Button>
+                                        <span className="text-foreground">{c.insuredName ?? '-'}</span>
+                                        <span className="text-muted-foreground">Agent: {c.agent ?? '-'}</span>
+                                        <span className="text-muted-foreground">Call Center: {c.callCenter ?? '-'}</span>
+                                        <span className="font-mono text-muted-foreground">{c.phoneNumber ?? '-'}</span>
+                                      </div>
+                                    ))}
                                 </div>
                               )}
 
@@ -1003,6 +1209,7 @@ export function DealTrackerVerificationDialog({
                                                 updateEntry(globalIndex, 'call_center', m.call_center ?? null)
                                                 updateEntry(globalIndex, 'phone_number', m.phone_number ?? null)
                                                 if (m.draft_date) updateEntry(globalIndex, 'effective_date', m.draft_date)
+                                                if (m.insured_name) updateEntry(globalIndex, 'ghl_name', m.insured_name)
                                               }}
                                             >
                                               Use

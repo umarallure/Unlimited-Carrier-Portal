@@ -20,7 +20,6 @@ import {
     Sun,
     Moon,
     ClipboardCheck,
-    Link2,
     AlertTriangle,
     ScrollText,
     Mail,
@@ -161,13 +160,11 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           active={navActive('/review-policies')}
           collapsed={collapsed}
         />
-        <NavRow
-          href="/deal-tracker/unmatched-leads"
-          label="Unmatched Leads"
-          icon={Link2}
-          active={navActive('/deal-tracker/unmatched-leads')}
-          collapsed={collapsed}
-        />
+        {/* Unmatched Leads (/deal-tracker/unmatched-leads) intentionally not linked here yet —
+            most of what currently shows up there has no CRM lead to find at all (predates the
+            CRM's history, or no lead was ever created), so the page isn't pulling its weight
+            next to the upload-time Ask AI flow. Page + API routes are still in place, not
+            deleted, so this is easy to re-add once that's sorted out. */}
         <NavRow
           href="/policy-audit"
           label="Policy Audit"

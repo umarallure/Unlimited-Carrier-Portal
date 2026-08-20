@@ -1021,6 +1021,10 @@ export async function getDdfRecordsForCarrier(
   externalSupabase: ReturnType<typeof createClient>,
   carrier: string,
   tableName: string = 'daily_deal_flow',
+  /** When set, scopes to draft_date >= this (YYYY-MM-DD) OR draft_date IS NULL — records with no
+   *  draft_date on file are kept rather than silently dropped, since that's a data gap on the DDF
+   *  side, not evidence the record is stale. */
+  sinceDraftDate?: string,
 ): Promise<DdfCarrierRecord[]> {
   const carrierUpper = (carrier || '').toUpperCase()
   const isAmam = carrierUpper === 'AMAM' || carrierUpper === 'ANAM' || carrierUpper.includes('AMERICAN AMICABLE')
@@ -1038,6 +1042,11 @@ export async function getDdfRecordsForCarrier(
     query = query.ilike('carrier', '%Corebridge%')
   } else {
     query = query.ilike('carrier', carrier)
+  }
+  // Chaining a second .or() ANDs it with the carrier .or() group above (AND-of-two-OR-groups) —
+  // verified against live data before relying on this composition.
+  if (sinceDraftDate) {
+    query = query.or(`draft_date.gte.${sinceDraftDate},draft_date.is.null`)
   }
   const { data, error } = await query
   if (error || !data) return []

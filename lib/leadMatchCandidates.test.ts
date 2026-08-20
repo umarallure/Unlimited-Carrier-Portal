@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { scoreCandidates, type ScoredLeadCandidate } from './leadMatchCandidates'
+import { scoreCandidates, scoreDdfCandidatesFromPool, type ScoredLeadCandidate } from './leadMatchCandidates'
 import type { LeadCandidateRow } from './leadNotesSync'
+import type { DdfCarrierRecord } from './dealTracker'
 
 function candidate(overrides: Partial<LeadCandidateRow>): LeadCandidateRow {
   return {
@@ -17,6 +18,27 @@ function candidate(overrides: Partial<LeadCandidateRow>): LeadCandidateRow {
     created_at: null,
     ...overrides,
   }
+}
+
+function ddfRecord(overrides: Partial<DdfCarrierRecord>): DdfCarrierRecord {
+  return {
+    id: 'ddf-1',
+    insured_name: null,
+    lead_vendor: null,
+    client_phone_number: null,
+    licensed_agent_account: null,
+    carrier: 'AMAM',
+    draft_date: null,
+    tracking_id: null,
+    status: null,
+    ...overrides,
+  }
+}
+
+function isoDaysAgo(days: number): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() - days)
+  return d.toISOString().slice(0, 10)
 }
 
 test('scoreCandidates: exact name match scores highest', () => {
@@ -109,4 +131,64 @@ test('scoreCandidates: results are sorted highest score first and capped at topN
   assert.equal(scored.length, 2)
   assert.equal(scored[0]?.id, 'exact')
   assert.ok(scored[0]!.score >= scored[1]!.score)
+})
+
+// ── scoreDdfCandidatesFromPool: the batch/single-row Ask AI candidate pipeline ─
+// carrier + agent + a recent date window are hard requirements here (unlike
+// scoreCandidates/scoreDdfCandidates above, where they're soft bonuses) — see
+// lib/leadMatchCandidates.ts's block comment for why this was requested.
+
+test('scoreDdfCandidatesFromPool: a name-perfect record for a DIFFERENT agent is excluded entirely', () => {
+  const wrongAgent = ddfRecord({ id: 'wrong-agent', insured_name: 'Diane Walker', licensed_agent_account: 'B. Lee', draft_date: isoDaysAgo(1) })
+  const { candidates } = scoreDdfCandidatesFromPool([wrongAgent], { name: 'Diane Walker', agent: 'D. Ruiz', carrier: 'AMAM' })
+  assert.deepEqual(candidates, [])
+})
+
+test('scoreDdfCandidatesFromPool: matching agent + name within the window is returned, not widened', () => {
+  const match = ddfRecord({ id: 'match', insured_name: 'Diane Walker', licensed_agent_account: 'D. Ruiz', draft_date: isoDaysAgo(2) })
+  const { candidates, usedWiderWindow } = scoreDdfCandidatesFromPool([match], { name: 'Diane Walker', agent: 'D. Ruiz', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'match')
+  assert.equal(usedWiderWindow, false)
+})
+
+test('scoreDdfCandidatesFromPool: a record with no draft_date on file is NOT excluded by the date window', () => {
+  const noDate = ddfRecord({ id: 'no-date', insured_name: 'Diane Walker', licensed_agent_account: 'D. Ruiz', draft_date: null })
+  const { candidates, usedWiderWindow } = scoreDdfCandidatesFromPool([noDate], { name: 'Diane Walker', agent: 'D. Ruiz', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'no-date')
+  assert.equal(usedWiderWindow, false)
+})
+
+test('scoreDdfCandidatesFromPool: when target.agent is blank, the agent filter is skipped rather than excluding everything', () => {
+  const noAgentOnFile = ddfRecord({ id: 'c1', insured_name: 'Diane Walker', licensed_agent_account: null, draft_date: isoDaysAgo(1) })
+  const { candidates } = scoreDdfCandidatesFromPool([noAgentOnFile], { name: 'Diane Walker', agent: null, carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'c1')
+})
+
+test('scoreDdfCandidatesFromPool: nothing within 7 days widens to the full pool (up to 10 days) and flags usedWiderWindow', () => {
+  const old = ddfRecord({ id: 'old', insured_name: 'Diane Walker', licensed_agent_account: 'D. Ruiz', draft_date: isoDaysAgo(9) })
+  const { candidates, usedWiderWindow } = scoreDdfCandidatesFromPool([old], { name: 'Diane Walker', agent: 'D. Ruiz', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'old')
+  assert.equal(usedWiderWindow, true)
+})
+
+test('scoreDdfCandidatesFromPool: the caller is responsible for the 10-day cutoff — records older than that (already excluded from the fetched pool) never surface, and there is no further widening', () => {
+  // Simulates what a caller sees when fetchDdfCandidatePool already excluded anything older
+  // than 10 days: an empty pool in, an empty (not widened) result out.
+  const { candidates, usedWiderWindow } = scoreDdfCandidatesFromPool([], { name: 'Diane Walker', agent: 'D. Ruiz', carrier: 'AMAM' })
+  assert.deepEqual(candidates, [])
+  assert.equal(usedWiderWindow, false)
+})
+
+test('scoreDdfCandidatesFromPool: within the 7-day slice, ranking is by name score alone (no carrier/agent bonus) since both are already guaranteed', () => {
+  const closerName = ddfRecord({ id: 'closer', insured_name: 'Diane Walker', licensed_agent_account: 'D. Ruiz', draft_date: isoDaysAgo(1) })
+  const fuzzierName = ddfRecord({ id: 'fuzzier', insured_name: 'Dianne Walkers', licensed_agent_account: 'D. Ruiz', draft_date: isoDaysAgo(1) })
+  const { candidates } = scoreDdfCandidatesFromPool([fuzzierName, closerName], { name: 'Diane Walker', agent: 'D. Ruiz', carrier: 'AMAM' })
+  assert.equal(candidates[0]?.id, 'closer')
+  assert.equal(candidates[0]?.score, 100)
+})
+
+test('scoreDdfCandidatesFromPool: empty target name returns no candidates', () => {
+  const c = ddfRecord({ id: 'c1', insured_name: 'Diane Walker', draft_date: isoDaysAgo(1) })
+  assert.deepEqual(scoreDdfCandidatesFromPool([c], { name: '' }).candidates, [])
+  assert.deepEqual(scoreDdfCandidatesFromPool([c], { name: null }).candidates, [])
 })

@@ -28,9 +28,10 @@
  * the AI's own judgment) reviewing the result — it never decides a match by
  * itself, and nothing here writes anything.
  */
-import { normalizeNameForSearch, extractNameParts, editDistance } from './dealTracker'
+import { normalizeNameForSearch, extractNameParts, editDistance, getDdfRecordsForCarrier } from './dealTracker'
 import type { LeadCandidateRow } from './leadNotesSync'
 import type { DdfCarrierRecord } from './dealTracker'
+import type { createClient } from '@supabase/supabase-js'
 
 export type ScoredLeadCandidate = LeadCandidateRow & { score: number }
 export type ScoredDdfCandidate = DdfCarrierRecord & { score: number }
@@ -61,7 +62,7 @@ function carriersMatch(a: string | null | undefined, b: string | null | undefine
   return aIsAmam && bIsAmam
 }
 
-function agentsMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+export function agentsMatch(a: string | null | undefined, b: string | null | undefined): boolean {
   const na = normalizeForCompare(a)
   const nb = normalizeForCompare(b)
   return Boolean(na) && na === nb
@@ -148,4 +149,79 @@ export function scoreDdfCandidates(target: MatchTarget, candidates: DdfCarrierRe
 
   scored.sort((a, b) => b.score - a.score)
   return scored.slice(0, topN)
+}
+
+/**
+ * Stricter DDF candidate pipeline for the batch "Ask AI on all Incomplete rows" flow (and the
+ * single-row Ask AI route, which now shares it) — requested to replace the carrier-only,
+ * agent-as-soft-bonus search above: carrier + agent + a recent date window are all hard
+ * requirements before a record is even considered, then the AI only has to pick among an
+ * already-corroborated small set instead of weighing bonuses across hundreds of records.
+ *
+ * Split into a DB fetch (fetchDdfCandidatePool) and a pure in-memory filter+score
+ * (scoreDdfCandidatesFromPool) so the batch route can fetch once per carrier and reuse the same
+ * pool for every row that carrier appears in, rather than one DB round-trip per row.
+ */
+
+const RECENT_WINDOW_DAYS = 7
+const WIDENED_WINDOW_DAYS = 10
+
+function isoDaysAgo(days: number): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+
+/** One DB call: every DDF record for `carrier` within the widest window this pipeline ever needs. */
+export async function fetchDdfCandidatePool(
+  ddf: ReturnType<typeof createClient>,
+  table: string,
+  carrier: string
+): Promise<DdfCarrierRecord[]> {
+  return getDdfRecordsForCarrier(ddf, carrier, table, isoDaysAgo(WIDENED_WINDOW_DAYS))
+}
+
+/**
+ * Hard-filters `pool` by agent (skipped only when target.agent is blank — nothing to hard-filter
+ * on), then scores by name alone (carrier and agent are already guaranteed by the pool itself, so
+ * they're preconditions here, not discriminators — unlike scoreDdfCandidates's soft bonuses).
+ * Tries the last 7 days first; if that's empty, retries against the full 10-day pool once and
+ * flags usedWiderWindow — no further widening beyond that.
+ */
+export function scoreDdfCandidatesFromPool(
+  pool: DdfCarrierRecord[],
+  target: MatchTarget,
+  topN = 5
+): { candidates: ScoredDdfCandidate[]; usedWiderWindow: boolean } {
+  if (!target.name || pool.length === 0) return { candidates: [], usedWiderWindow: false }
+
+  const scoreAgainst = (records: DdfCarrierRecord[]): ScoredDdfCandidate[] => {
+    const scored: ScoredDdfCandidate[] = []
+    for (const c of records) {
+      if (target.agent && !agentsMatch(target.agent, c.licensed_agent_account)) continue
+      const score = nameScoreForNames(target.name as string, c.insured_name ?? '')
+      if (score <= 0) continue
+      scored.push({ ...c, score })
+    }
+    scored.sort((a, b) => b.score - a.score)
+    return scored.slice(0, topN)
+  }
+
+  const since7 = isoDaysAgo(RECENT_WINDOW_DAYS)
+  const within7 = pool.filter((r) => !r.draft_date || r.draft_date >= since7)
+  const primary = scoreAgainst(within7)
+  if (primary.length > 0) return { candidates: primary, usedWiderWindow: false }
+
+  const widened = scoreAgainst(pool)
+  return { candidates: widened, usedWiderWindow: widened.length > 0 }
+}
+
+/** Convenience wrapper combining both steps, for the single-row Ask AI route. */
+export async function findDdfAiCandidates(
+  ddf: ReturnType<typeof createClient>,
+  table: string,
+  target: MatchTarget & { carrier: string }
+): Promise<{ candidates: ScoredDdfCandidate[]; usedWiderWindow: boolean }> {
+  const pool = await fetchDdfCandidatePool(ddf, table, target.carrier)
+  return scoreDdfCandidatesFromPool(pool, target)
 }
