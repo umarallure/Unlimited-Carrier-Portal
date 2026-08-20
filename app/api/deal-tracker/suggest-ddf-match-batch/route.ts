@@ -103,59 +103,74 @@ export async function POST(request: NextRequest) {
   const { client: ddf, table } = getDdfClient('new')
 
   // Fetch the DDF candidate pool once per unique carrier, reused across every row sharing it.
+  // Deliberately does NOT cache a rejected fetch: without this, a single transient failure (a
+  // Supabase connection hiccup) would poison every remaining row for that carrier for the rest
+  // of this request, since they'd all await the same already-rejected promise — exactly the kind
+  // of "some rows resolve, some don't within one batch" a fresh Re-run then appears to fix.
   const carrierPools = new Map<string, Promise<DdfCarrierRecord[]>>()
   const poolForCarrier = (carrier: string) => {
     if (!carrierPools.has(carrier)) {
-      carrierPools.set(carrier, fetchDdfCandidatePool(ddf, table, carrier))
+      const fetchPromise = fetchDdfCandidatePool(ddf, table, carrier)
+      fetchPromise.catch(() => carrierPools.delete(carrier))
+      carrierPools.set(carrier, fetchPromise)
     }
     return carrierPools.get(carrier)!
   }
 
   const results = await mapWithConcurrency(rows, CONCURRENCY, async (row): Promise<BatchRowResult> => {
-    const name = String(row.name ?? '').trim() || null
-    const carrier = String(row.carrier ?? '').trim() || null
-    const agent = row.agent != null ? String(row.agent).trim() || null : null
+    // One row throwing (a transient DDF connection hiccup, etc.) must never take the rest of the
+    // batch down with it — mapWithConcurrency has no per-row isolation of its own, so an uncaught
+    // rejection here would reject the whole Promise.all and could leave OTHER rows' client-side
+    // state stuck showing "loading" forever, since they'd never get a response at all.
+    try {
+      const name = String(row.name ?? '').trim() || null
+      const carrier = String(row.carrier ?? '').trim() || null
+      const agent = row.agent != null ? String(row.agent).trim() || null : null
 
-    if (!name || !carrier) return emptyResult(row.rowKey, 'Name and carrier are required.')
+      if (!name || !carrier) return emptyResult(row.rowKey, 'Name and carrier are required.')
 
-    const pool = await poolForCarrier(carrier)
-    const { candidates: scored, usedWiderWindow } = scoreDdfCandidatesFromPool(pool, { name, agent, carrier })
+      const pool = await poolForCarrier(carrier)
+      const { candidates: scored, usedWiderWindow } = scoreDdfCandidatesFromPool(pool, { name, agent, carrier })
 
-    if (scored.length === 0) {
-      return emptyResult(
-        row.rowKey,
-        `No Daily Deal Flow records for carrier "${carrier}"${agent ? ` and agent "${agent}"` : ''} in the last 10 days have a name resembling "${name}".`
+      if (scored.length === 0) {
+        return emptyResult(
+          row.rowKey,
+          `No Daily Deal Flow records for carrier "${carrier}"${agent ? ` and agent "${agent}"` : ''} in the last 10 days have a name resembling "${name}".`
+        )
+      }
+
+      const topCandidates = scored.slice(0, 3).map(toCandidateShape)
+      const candidateById = new Map(scored.map((c) => [String(c.id ?? ''), c]))
+      const suggestion = await suggestDdfMatch(
+        { name, carrier, agent },
+        scored.map((c) => ({
+          recordId: String(c.id ?? ''),
+          insuredName: c.insured_name ?? null,
+          agent: c.licensed_agent_account ?? null,
+          carrier: c.carrier ?? null,
+        }))
       )
-    }
 
-    const topCandidates = scored.slice(0, 3).map(toCandidateShape)
-    const candidateById = new Map(scored.map((c) => [String(c.id ?? ''), c]))
-    const suggestion = await suggestDdfMatch(
-      { name, carrier, agent },
-      scored.map((c) => ({
-        recordId: String(c.id ?? ''),
-        insuredName: c.insured_name ?? null,
-        agent: c.licensed_agent_account ?? null,
-        carrier: c.carrier ?? null,
-      }))
-    )
+      if (!suggestion) {
+        return {
+          ...emptyResult(row.rowKey, 'AI suggestion unavailable — pick from the top matches below.'),
+          topCandidates,
+          usedWiderWindow,
+        }
+      }
 
-    if (!suggestion) {
+      const matchedRecord = suggestion.recordId ? candidateById.get(suggestion.recordId) : null
+
       return {
-        ...emptyResult(row.rowKey, 'AI suggestion unavailable — pick from the top matches below.'),
+        rowKey: row.rowKey,
+        ...suggestion,
+        record: matchedRecord ? toCandidateShape(matchedRecord) : null,
         topCandidates,
         usedWiderWindow,
       }
-    }
-
-    const matchedRecord = suggestion.recordId ? candidateById.get(suggestion.recordId) : null
-
-    return {
-      rowKey: row.rowKey,
-      ...suggestion,
-      record: matchedRecord ? toCandidateShape(matchedRecord) : null,
-      topCandidates,
-      usedWiderWindow,
+    } catch (e) {
+      console.error('[suggest-ddf-match-batch] row failed:', row.rowKey, e instanceof Error ? e.message : e)
+      return emptyResult(row.rowKey, 'This row failed unexpectedly — try Re-run.')
     }
   })
 

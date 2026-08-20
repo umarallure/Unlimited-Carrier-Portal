@@ -117,6 +117,13 @@ function dashAsNull(v: unknown): string | null {
   return t === '' || t === '-' ? null : String(v)
 }
 
+// TEMPORARY diagnostic logging (see the AI-DEBUG investigation) — stringified so copy-pasted
+// console output is fully readable instead of collapsed "Object" placeholders.
+function dbg(label: string, payload?: unknown): void {
+  // eslint-disable-next-line no-console
+  console.log(`[AI-DEBUG] ${label}${payload !== undefined ? ' ' + JSON.stringify(payload) : ''}`)
+}
+
 export function DealTrackerVerificationDialog({
   open,
   onOpenChange,
@@ -139,6 +146,10 @@ export function DealTrackerVerificationDialog({
   const [expandedChangesRowKey, setExpandedChangesRowKey] = useState<string | null>(null)
   const [batchAiRunning, setBatchAiRunning] = useState(false)
   const [batchAiError, setBatchAiError] = useState<string | null>(null)
+  // Distinct from batchAiRunning (which starts false) so the notification can tell "hasn't run
+  // yet" apart from "ran and finished" — without this, the completed-state text showed even
+  // before the very first automatic run had started, making it look like it silently did nothing.
+  const [hasRunAiOnce, setHasRunAiOnce] = useState(false)
   // Keyed by policy_number (not array index) - removing a row shifts every
   // subsequent row's index down, so an index-based snapshot would silently
   // start matching the wrong (now-shifted) rows after any removal.
@@ -146,6 +157,11 @@ export function DealTrackerVerificationDialog({
 
   // Keep editable state in sync with props when dialog opens or entries change
   useEffect(() => {
+    dbg('sync-entries effect fired (this REBUILDS editableEntries from the raw `entries` prop, discarding any local AI-fills/edits)', {
+      open,
+      entriesLength: entries.length,
+      entriesSummary: entries.map(e => ({ policy_number: e.policy_number, name: e.name, isNew: e.isNew, call_center: e.call_center, phone_number: e.phone_number })),
+    })
     if (open && entries.length > 0) {
       setEditableEntries(
         entries.map((e) => ({
@@ -285,6 +301,21 @@ export function DealTrackerVerificationDialog({
   // get scored and shown a confidence badge for human review; runBatchAiMatch only ever
   // auto-fills fields that are still genuinely empty, never overwrites an existing match.
   const aiEligibleCount = editableEntries.filter((e) => e.isNew).length
+  // Of the eligible rows, how many actually have a usable name+carrier right now — used to hold
+  // the auto-trigger back until real data has landed (see the effect below for why this matters).
+  const aiReadyCount = editableEntries.filter((e) => e.isNew && (e.name || '').trim() && (e.carrier || '').trim()).length
+  // Whether the local editableEntries mirror has actually caught up to the current `entries` prop.
+  // These are kept in sync by a separate effect (the "sync-entries effect" above) whose setState
+  // doesn't take effect until the NEXT render — so on the render right after a new file arrives,
+  // `entries` already reflects the new file but `editableEntries` (and therefore aiEligibleCount/
+  // aiReadyCount, which are derived from it) can still be showing the PREVIOUS file for one more
+  // render. Without this check, the auto-trigger effect below can fire using that stale count,
+  // wastefully re-running against the old file's already-matched rows and "using up" its one-shot
+  // guard before the real new data ever lands — silently starving the actual new file of its
+  // automatic run. Comparing policy_number sequences (not just length) catches same-size swaps too.
+  const editableEntriesSynced =
+    editableEntries.length === entries.length &&
+    editableEntries.every((e, i) => e.policy_number === entries[i]?.policy_number)
 
   // Once nothing is left to fix, sitting on the now-empty Incomplete tab isn't useful —
   // move to New so the user immediately sees the rows they're actually about to save.
@@ -394,6 +425,21 @@ export function DealTrackerVerificationDialog({
       .map((entry, globalIndex) => ({ entry, globalIndex }))
       .filter(({ entry }) => entry.isNew)
 
+    dbg('runBatchAiMatch START', {
+      editableEntriesLength: editableEntries.length,
+      targetsCount: targets.length,
+      targets: targets.map(t => ({
+        globalIndex: t.globalIndex,
+        name: t.entry.name,
+        carrier: t.entry.carrier,
+        policy_number: t.entry.policy_number,
+        agency_carrier_id: t.entry.agency_carrier_id,
+        call_center: t.entry.call_center,
+        phone_number: t.entry.phone_number,
+        ghl_name: t.entry.ghl_name,
+      })),
+    })
+
     if (targets.length === 0) return
 
     setBatchAiRunning(true)
@@ -417,17 +463,20 @@ export function DealTrackerVerificationDialog({
     })
 
     try {
+      dbg('fetching suggest-ddf-match-batch with rows', rows)
       const res = await fetch('/api/deal-tracker/suggest-ddf-match-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rows }),
       })
+      dbg('fetch responded', { status: res.status, redirected: res.redirected, url: res.url })
       // See the matching comment in askDdfAi — a stale session gets silently redirected to
       // /login (200 OK) rather than erroring, so this has to be checked explicitly.
       if (res.redirected || res.url.includes('/login')) {
         throw new Error('Your session may have expired — refresh the page and log in again.')
       }
       const data = await res.json().catch(() => ({}))
+      dbg('response body', data)
       if (!res.ok) throw new Error(data.error || 'Batch AI match failed.')
       const results = (data.results || []) as (DdfAiSuggestion & { rowKey: string })[]
       setDdfAiState(prev => {
@@ -445,9 +494,32 @@ export function DealTrackerVerificationDialog({
       // this table, gated behind the human clicking Confirm & Save.
       results.forEach(({ rowKey, record }) => {
         const globalIndex = indexByRowKey.get(rowKey)
-        if (globalIndex == null || !record) return
+        if (globalIndex == null || !record) {
+          dbg('SKIP row (no globalIndex or no record)', { rowKey, globalIndex, record })
+          return
+        }
         const current = editableEntries[globalIndex]
-        if (!current) return
+        if (!current) {
+          dbg('SKIP row (no current entry at globalIndex)', { rowKey, globalIndex })
+          return
+        }
+        const applied = {
+          call_center: isMissingRequired(current.call_center),
+          phone_number: isMissingRequired(current.phone_number),
+          effective_date: isMissingRequired(current.effective_date) && !!record.draftDate,
+          ghl_name: isMissingRequired(current.ghl_name) && !!record.insuredName,
+        }
+        dbg('APPLY row', {
+          rowKey,
+          globalIndex,
+          currentCallCenter: current.call_center,
+          currentPhone: current.phone_number,
+          currentGhlName: current.ghl_name,
+          currentName: current.name,
+          currentPolicyNumber: current.policy_number,
+          record,
+          applied,
+        })
         if (isMissingRequired(current.call_center)) updateEntry(globalIndex, 'call_center', record.callCenter)
         if (isMissingRequired(current.phone_number)) updateEntry(globalIndex, 'phone_number', record.phoneNumber)
         if (isMissingRequired(current.effective_date) && record.draftDate) updateEntry(globalIndex, 'effective_date', record.draftDate)
@@ -455,6 +527,7 @@ export function DealTrackerVerificationDialog({
       })
       setFilter('incomplete')
     } catch (err: any) {
+      dbg('runBatchAiMatch CAUGHT ERROR', { message: err?.message, stack: err?.stack })
       setBatchAiError(err?.message || 'Batch AI match failed.')
       setDdfAiState(prev => {
         const next = { ...prev }
@@ -462,7 +535,9 @@ export function DealTrackerVerificationDialog({
         return next
       })
     } finally {
+      dbg('runBatchAiMatch FINALLY (done)')
       setBatchAiRunning(false)
+      setHasRunAiOnce(true)
     }
   }, [editableEntries, updateEntry])
 
@@ -473,14 +548,66 @@ export function DealTrackerVerificationDialog({
   // still need it.
   const autoAiRanRef = useRef(false)
   useEffect(() => {
-    if (!open) autoAiRanRef.current = false
-  }, [open])
+    // Reset on a new `entries` array arriving, not just when the dialog closes — relying on
+    // `open` toggling false alone isn't reliable: if the dialog stays mounted/open across
+    // successive uploads (a real pattern in at least one call site of this component), `open`
+    // never actually changes between files, so an [open]-only effect never re-fires. That left
+    // autoAiRanRef/hasRunAiOnce stuck true from the PREVIOUS file's successful run, permanently
+    // blocking the automatic trigger for every upload after the first in the same session — while
+    // the stale hasRunAiOnce=true made the notification falsely claim "AI checked" for a run that
+    // never happened. Manual Re-run always worked because it bypasses these guards entirely.
+    dbg('reset effect fired', {
+      open,
+      entriesLength: entries.length,
+      entriesSummary: entries.map(e => ({ policy_number: e.policy_number, name: e.name, isNew: e.isNew, call_center: e.call_center, phone_number: e.phone_number })),
+    })
+    autoAiRanRef.current = false
+    setHasRunAiOnce(false)
+  }, [open, entries])
   useEffect(() => {
-    if (open && !isLoading && !batchAiRunning && !autoAiRanRef.current && aiEligibleCount > 0) {
+    // aiEligibleCount alone isn't enough of a guard: a row can be flagged isNew (counted as
+    // eligible) before its name/carrier fields have actually landed — e.g. entries first arrives
+    // from the parent with placeholder rows, enriched a moment later. Firing on that first pass
+    // means runBatchAiMatch closes over rows with blank name/carrier, and the batch route
+    // correctly (but unhelpfully) returns "Name and carrier are required" for all of them —
+    // matching exactly "does nothing the first time, works on manual Re-run." Waiting for
+    // aiReadyCount to catch up to aiEligibleCount means the auto-trigger only fires once every
+    // eligible row actually has real data to search DDF with.
+    dbg('auto-trigger effect evaluated', {
+      open,
+      isLoading,
+      batchAiRunning,
+      autoAiRanRefCurrent: autoAiRanRef.current,
+      aiEligibleCount,
+      aiReadyCount,
+      editableEntriesLength: editableEntries.length,
+      entriesLength: entries.length,
+      editableEntriesSynced,
+      willFire:
+        open &&
+        !isLoading &&
+        !batchAiRunning &&
+        !autoAiRanRef.current &&
+        editableEntriesSynced &&
+        aiEligibleCount > 0 &&
+        aiReadyCount === aiEligibleCount,
+    })
+    if (
+      open &&
+      !isLoading &&
+      !batchAiRunning &&
+      !autoAiRanRef.current &&
+      // Guards against firing on a stale editableEntries mirror still reflecting the previous
+      // file — see editableEntriesSynced's own comment for why this race exists.
+      editableEntriesSynced &&
+      aiEligibleCount > 0 &&
+      aiReadyCount === aiEligibleCount
+    ) {
+      dbg('auto-trigger FIRING runBatchAiMatch() now')
       autoAiRanRef.current = true
       runBatchAiMatch()
     }
-  }, [open, isLoading, batchAiRunning, aiEligibleCount, runBatchAiMatch])
+  }, [open, isLoading, batchAiRunning, aiEligibleCount, aiReadyCount, editableEntriesSynced, runBatchAiMatch])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -682,7 +809,7 @@ export function DealTrackerVerificationDialog({
             role="status"
             className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-100"
           >
-            {batchAiRunning ? (
+            {batchAiRunning || !hasRunAiOnce ? (
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600 dark:text-blue-400" />
             ) : (
               <Sparkles className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
@@ -690,12 +817,15 @@ export function DealTrackerVerificationDialog({
             <span>
               {batchAiRunning
                 ? `Matching ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow (carrier + agent + last 7-10 days) — this can take a while…`
-                : `AI checked ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow automatically.`}
+                : !hasRunAiOnce
+                  ? `Preparing to check ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow…`
+                  : `AI checked ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow automatically.`}
             </span>
             <button
               type="button"
               className="ml-auto shrink-0 font-medium text-blue-700 underline underline-offset-2 hover:text-blue-900 disabled:opacity-50 disabled:no-underline dark:text-blue-300 dark:hover:text-blue-100"
-              disabled={batchAiRunning}
+              disabled={batchAiRunning || !hasRunAiOnce}
+              title={!hasRunAiOnce ? 'The automatic first run is still in progress' : undefined}
               onClick={runBatchAiMatch}
             >
               Re-run
@@ -781,6 +911,19 @@ export function DealTrackerVerificationDialog({
                   const changesExpanded = expandedChangesRowKey === rowKey
                   const hasChanges = changed.length > 0
                   const cellChanged = (field: string) => isUpdated && changed.includes(field)
+                  // Hold the reveal of every AI-touched field for ALL new rows until the automatic
+                  // batch run finishes — not just the rows the strict upload-time matcher couldn't
+                  // resolve. Without this, rows the strict matcher already resolved render their
+                  // real GHL Name/Call Center/Phone instantly while rows waiting on the AI batch
+                  // still show blanks, which looks like the AI ran on some leads before others even
+                  // though the whole batch is one request that resolves together.
+                  const aiPending = entry.isNew && aiEligibleCount > 0 && !hasRunAiOnce
+                  const pendingCell = (
+                    <div className="flex h-8 items-center gap-1.5 px-1 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                      <span>Checking…</span>
+                    </div>
+                  )
                   const formatChangeValue = (v: unknown): string => {
                     if (v == null) return '—'
                     if (typeof v === 'number') return String(v)
@@ -848,12 +991,14 @@ export function DealTrackerVerificationDialog({
                         />
                       </TableCell>
                       <TableCell className={cn('p-1', cellChanged('ghl_name') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
-                        <Input
-                          value={entry.ghl_name ?? ''}
-                          onChange={e => updateEntry(globalIndex, 'ghl_name', asNullableInput(e.target.value))}
-                          className={dialogTableInput}
-                          placeholder="-"
-                        />
+                        {aiPending ? pendingCell : (
+                          <Input
+                            value={entry.ghl_name ?? ''}
+                            onChange={e => updateEntry(globalIndex, 'ghl_name', asNullableInput(e.target.value))}
+                            className={dialogTableInput}
+                            placeholder="-"
+                          />
+                        )}
                       </TableCell>
                       <TableCell className={cn('p-1 align-middle', cellChanged('policy_number') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
                         {entry.isNew ? (
@@ -955,12 +1100,14 @@ export function DealTrackerVerificationDialog({
                       </TableCell>
                       <TableCell className="py-1 align-middle text-center" title={(entry.call_center || entry.phone_number) ? 'Call center/phone from Daily Deal Flow' : 'No DDF data for this row (no match or empty in DDF)'}>
                         <div className="flex flex-col items-center gap-1">
-                          {(entry.call_center || entry.phone_number) ? (
+                          {aiPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                          ) : (entry.call_center || entry.phone_number) ? (
                             <span className="font-semibold text-green-600 dark:text-green-400">✓</span>
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
-                          {(isDuplicateName || (!entry.call_center && !entry.phone_number)) && (
+                          {!aiPending && (isDuplicateName || (!entry.call_center && !entry.phone_number)) && (
                             <div className="flex items-center gap-1">
                               <Button
                                 type="button"
@@ -997,7 +1144,7 @@ export function DealTrackerVerificationDialog({
                               </Button>
                             </div>
                           )}
-                          {aiSuggestion && (
+                          {!aiPending && aiSuggestion && (
                             <Badge
                               variant="outline"
                               className={cn(
@@ -1018,20 +1165,24 @@ export function DealTrackerVerificationDialog({
                         </div>
                       </TableCell>
                       <TableCell className={cn('p-1', cellChanged('call_center') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
-                        <Input
-                          value={entry.call_center ?? ''}
-                          onChange={e => updateEntry(globalIndex, 'call_center', asNullableInput(e.target.value))}
-                          className={dialogTableInput}
-                          placeholder="-"
-                        />
+                        {aiPending ? pendingCell : (
+                          <Input
+                            value={entry.call_center ?? ''}
+                            onChange={e => updateEntry(globalIndex, 'call_center', asNullableInput(e.target.value))}
+                            className={dialogTableInput}
+                            placeholder="-"
+                          />
+                        )}
                       </TableCell>
                       <TableCell className={cn('p-1', cellChanged('phone_number') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
-                        <Input
-                          value={entry.phone_number ?? ''}
-                          onChange={e => updateEntry(globalIndex, 'phone_number', asNullableInput(e.target.value))}
-                          className={dialogTableInputMono}
-                          placeholder="-"
-                        />
+                        {aiPending ? pendingCell : (
+                          <Input
+                            value={entry.phone_number ?? ''}
+                            onChange={e => updateEntry(globalIndex, 'phone_number', asNullableInput(e.target.value))}
+                            className={dialogTableInputMono}
+                            placeholder="-"
+                          />
+                        )}
                       </TableCell>
                       <TableCell className={cn('p-1', cellChanged('deal_creation_date') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
                         <Input
@@ -1042,12 +1193,14 @@ export function DealTrackerVerificationDialog({
                         />
                       </TableCell>
                       <TableCell className={cn('p-1', cellChanged('effective_date') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
-                        <Input
-                          type="date"
-                          value={toYmdForDateInput(entry.effective_date)}
-                          onChange={e => updateEntry(globalIndex, 'effective_date', asNullableInput(e.target.value))}
-                          className={cn(dialogTableInput, '[color-scheme:light] dark:[color-scheme:dark]')}
-                        />
+                        {aiPending ? pendingCell : (
+                          <Input
+                            type="date"
+                            value={toYmdForDateInput(entry.effective_date)}
+                            onChange={e => updateEntry(globalIndex, 'effective_date', asNullableInput(e.target.value))}
+                            className={cn(dialogTableInput, '[color-scheme:light] dark:[color-scheme:dark]')}
+                          />
+                        )}
                       </TableCell>
                       <TableCell className={cn('p-1', cellChanged('notes') && 'border-l-2 border-amber-500 bg-amber-100/50 dark:bg-amber-500/20')}>
                         <Input
