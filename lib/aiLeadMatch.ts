@@ -167,7 +167,11 @@ export async function suggestLeadMatch(
   })
 
   try {
-    const { content } = await chat(LEAD_MATCH_SYSTEM_PROMPT, userMessage, 400)
+    // 400 previously truncated valid JSON on harder disambiguation cases (e.g. two candidates
+    // sharing the same corrected name from separate policies) — the model would run out of budget
+    // mid-string (e.g. `{"selected_id":"5817c334-`), fail to parse, and silently report no match
+    // even though it was one token away from a correct, high-confidence answer.
+    const { content } = await chat(LEAD_MATCH_SYSTEM_PROMPT, userMessage, 800)
     const parsed = parseMatchResponse(content, new Set(candidates.map((c) => c.leadId)))
     if (!parsed) return null
     return {
@@ -252,7 +256,10 @@ export async function suggestDdfMatch(
   })
 
   try {
-    const { content } = await chat(DDF_MATCH_SYSTEM_PROMPT, userMessage, 400)
+    // See the matching comment in suggestLeadMatch — 400 tokens was too tight and truncated valid
+    // JSON mid-string on harder disambiguation cases, silently producing "no match" for candidates
+    // the model had actually already selected correctly.
+    const { content } = await chat(DDF_MATCH_SYSTEM_PROMPT, userMessage, 800)
     const parsed = parseMatchResponse(content, new Set(candidates.map((c) => c.recordId)))
     if (!parsed) return null
     return {
