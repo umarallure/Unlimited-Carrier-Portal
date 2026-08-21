@@ -107,7 +107,6 @@ export async function POST(request: NextRequest) {
       leadStageSyncs.push({
         trackingId: String(it.policyNumber).trim(),
         status: '',
-        submissionId: m.submission_id ? String(m.submission_id).trim() : null,
       })
     })
     if (leadStageSyncs.length > 0) {

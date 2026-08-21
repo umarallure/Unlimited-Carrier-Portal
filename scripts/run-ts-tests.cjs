@@ -23,13 +23,15 @@ require.extensions['.ts'] = function (mod, filename) {
 
 const originalResolve = Module._resolveFilename
 Module._resolveFilename = function (request, ...rest) {
+  // tsconfig.json maps "@/*" -> "./*" (project root)
+  const aliased = request.startsWith('@/') ? path.resolve(__dirname, '..', request.slice(2)) : request
   try {
-    return originalResolve.call(this, request, ...rest)
+    return originalResolve.call(this, aliased, ...rest)
   } catch (err) {
-    if (request.startsWith('.')) {
+    if (aliased.startsWith('.') || path.isAbsolute(aliased)) {
       for (const ext of ['.ts', '.tsx']) {
         try {
-          return originalResolve.call(this, request + ext, ...rest)
+          return originalResolve.call(this, aliased + ext, ...rest)
         } catch (_) {
           // try next extension
         }

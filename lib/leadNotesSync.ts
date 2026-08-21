@@ -3,8 +3,6 @@ import { decryptTrackingIdSafe } from '@/lib/trackingIdCrypto'
 
 const LEADS_TABLE = process.env.NEW_DDF_LEADS_TABLE || 'leads'
 const LEAD_NOTES_TABLE = process.env.NEW_DDF_LEAD_NOTES_TABLE || 'lead_notes'
-/** Transfer pipeline — the only pipeline DDF-status-driven stage sync is allowed to touch. */
-const TRANSFER_PIPELINE_ID = 4
 
 function trimPolicy(value: unknown): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim()
@@ -172,81 +170,132 @@ export async function insertLeadNote(input: InsertLeadNoteInput): Promise<Insert
 }
 
 export type DdfStatusStageSync = {
-  /** Plaintext policy number — used as the value to write to leads.policy_id */
+  /** Plaintext policy number — matched against leads.policy_id directly, or against
+   *  decrypted leads.tracking_id for leads that don't have policy_id yet. */
   trackingId: string
   /** DDF disposition status — used to look up the matching pipeline_stage name */
   status: string
-  /** daily_deal_flow.submission_id — primary join key to find the lead reliably */
-  submissionId?: string | null
 }
 
-type LeadRow = { id: string; submission_id?: string | null; tracking_id?: string | null; policy_id: string | null; stage_id: number | null; pipeline_id: number | null }
+/**
+ * Policy numbers from the batch that matched no lead at all — neither by policy_id
+ * nor by decrypting tracking_id. Deliberately not auto-matched any other way (no
+ * scoring, no name/phone fuzzy matching): these need a human to attach the policy
+ * manually.
+ */
+export type SyncLeadStagesResult = {
+  matchedCount: number
+  unmatchedPolicyNumbers: string[]
+}
+
+type LeadRow = { id: string; tracking_id?: string | null; policy_id: string | null; stage_id: number | null; pipeline_id: number | null }
+
+export type PipelineStageRow = { id: number; pipeline_id: number; name: string }
 
 /**
- * For each matched DDF record: write leads.policy_id (always) and update leads.stage/stage_id
- * when the lead sits in the Transfer pipeline and the DDF status maps to a known stage name.
+ * Resolve which pipeline_stages row a stage name should apply to: the first
+ * match by name. Matches app/api/amam-correspondence/update-stage/route.ts's
+ * resolution (its own `resolvePipelineStage`, kept independent/unshared there)
+ * so both land on the same stage for the same name — no stage name currently
+ * sent by the carrier-portal side collides across more than one pipeline, so
+ * "first match" and "first match in the lead's pipeline" are equivalent today.
+ */
+export function resolvePreferredStage(matches: PipelineStageRow[]): PipelineStageRow | null {
+  return matches[0] ?? null
+}
+
+/**
+ * Fetch the whole `pipeline_stages` table, grouped by name (trimmed, lowercased).
+ * The table is small (a few dozen rows across all pipelines) so fetching it in
+ * full and matching in memory is cheap and sidesteps casing/exact-match issues
+ * with querying by name directly.
+ */
+export async function fetchPipelineStagesByName(
+  ddf: ReturnType<typeof getDdfClient>['client']
+): Promise<Map<string, PipelineStageRow[]>> {
+  const stageMatchesByName = new Map<string, PipelineStageRow[]>()
+  const { data: stageRows } = await ddf.from('pipeline_stages').select('id, pipeline_id, name')
+  for (const row of (stageRows ?? []) as PipelineStageRow[]) {
+    const key = row.name.trim().toLowerCase()
+    const bucket = stageMatchesByName.get(key)
+    if (bucket) bucket.push(row)
+    else stageMatchesByName.set(key, [row])
+  }
+  return stageMatchesByName
+}
+
+type LeadStageFields = { policy_id: string | null; stage_id: number | null; pipeline_id: number | null }
+
+/**
+ * Build the `leads` update payload for moving one lead to `stageRow` (or just
+ * self-healing `policy_id` when `stageRow` is null — e.g. a GHL stage with no
+ * CRM pipeline_stages equivalent yet). Returns `{}` when nothing would change.
+ * Shared so every caller writes the same fields the same way.
+ */
+export function buildLeadStageUpdate(
+  lead: LeadStageFields,
+  policyNumber: string,
+  stageRow: PipelineStageRow | null
+): Record<string, unknown> {
+  const update: Record<string, unknown> = {}
+  if (policyNumber && lead.policy_id !== policyNumber) update.policy_id = policyNumber
+  if (stageRow && (lead.stage_id !== stageRow.id || lead.pipeline_id !== stageRow.pipeline_id)) {
+    update.stage = stageRow.name
+    update.stage_id = stageRow.id
+    update.pipeline_id = stageRow.pipeline_id
+  }
+  return update
+}
+
+/**
+ * For each matched policy: write leads.policy_id (when not already set) and update
+ * leads.stage/stage_id/pipeline_id whenever the status maps to a known pipeline_stages
+ * name — moving the lead to whichever pipeline that stage lives in (stages are not
+ * confined to a single pipeline; e.g. FDPF stages live in the Chargeback pipeline,
+ * Active milestones in the Customer pipeline).
  *
- * Lookup priority:
- *   1. submission_id — direct reliable join, works even when leads.tracking_id is null.
- *   2. tracking_id decryption — fallback for rows that lack a submission_id link.
+ * Matching is deliberately two exact, unique-key paths only — no scoring, no
+ * name/phone fuzzy matching, no submission_id:
+ *   1. policy_id — the lead already has this policy attached (from a prior sync,
+ *      or attached manually). Just find it and move the stage.
+ *   2. tracking_id decryption — the lead doesn't have policy_id yet (a brand-new
+ *      policy that isn't in the accounting database yet). Decrypt each candidate
+ *      lead's tracking_id, and if it equals the incoming policy number, attach
+ *      policy_id AND move the stage in the same update.
  *
- * Stage moves are scoped to Transfer pipeline (pipeline_id 4) only.
- * policy_id is written unconditionally whenever the matched policyNumber differs.
+ * A policy number that matches neither path is left completely untouched and is
+ * reported back in `unmatchedPolicyNumbers` — that lead needs a human to attach
+ * the policy manually. There is no fallback matching beyond these two paths.
  */
 export async function syncLeadStagesFromDdfStatus(
   ddf: ReturnType<typeof getDdfClient>['client'],
   updates: DdfStatusStageSync[]
-): Promise<void> {
-  // ── build lookup maps ──────────────────────────────────────────────────────
-  /** submissionId → { policyNumber, status } */
-  const bySubmissionId = new Map<string, { policyNumber: string; status: string }>()
-  /** plaintext policyNumber → status (for tracking_id fallback path) */
+): Promise<SyncLeadStagesResult> {
+  // ── build lookup map ────────────────────────────────────────────────────────
+  /** plaintext policyNumber → status */
   const byPolicyNumber = new Map<string, string>()
 
   for (const u of updates) {
     const policyNumber = trimPolicy(u.trackingId)
     if (!policyNumber) continue
-    const status = trimPolicy(u.status)
-    if (u.submissionId) bySubmissionId.set(trimPolicy(u.submissionId), { policyNumber, status })
-    byPolicyNumber.set(policyNumber, status)
+    byPolicyNumber.set(policyNumber, trimPolicy(u.status))
   }
 
-  if (bySubmissionId.size === 0 && byPolicyNumber.size === 0) return
+  if (byPolicyNumber.size === 0) return { matchedCount: 0, unmatchedPolicyNumbers: [] }
 
-  // ── resolve pipeline stages once ──────────────────────────────────────────
-  const distinctStatuses = Array.from(new Set([...bySubmissionId.values()].map(v => v.status).concat(Array.from(byPolicyNumber.values())))).filter(Boolean)
-  const stageByName = new Map<string, { id: number; pipeline_id: number; name: string }>()
-
-  if (distinctStatuses.length > 0) {
-    const { data: stageRows } = await ddf
-      .from('pipeline_stages')
-      .select('id, pipeline_id, name')
-      .eq('pipeline_id', TRANSFER_PIPELINE_ID)
-      .in('name', distinctStatuses)
-    for (const row of (stageRows ?? []) as { id: number; pipeline_id: number; name: string }[]) {
-      stageByName.set(row.name.trim().toLowerCase(), row)
-    }
-  }
+  // ── resolve pipeline stages once, across every pipeline ────────────────────
+  const stageMatchesByName = await fetchPipelineStagesByName(ddf)
 
   const processedLeadIds = new Set<string>()
+  const matchedPolicyNumbers = new Set<string>()
 
   async function applyUpdate(lead: LeadRow, policyNumber: string, status: string) {
-    const update: Record<string, unknown> = {}
-    if (lead.policy_id !== policyNumber) update.policy_id = policyNumber
-    if (status) {
-      const stageRow = stageByName.get(status.toLowerCase())
-      if (stageRow && (lead.pipeline_id === TRANSFER_PIPELINE_ID || lead.pipeline_id == null)) {
-        if (lead.stage_id !== stageRow.id || lead.pipeline_id !== stageRow.pipeline_id) {
-          update.stage = stageRow.name
-          update.stage_id = stageRow.id
-          update.pipeline_id = stageRow.pipeline_id
-        }
-      } else if (stageRow) {
-        console.log(`[sync] skipping stage update for lead ${lead.id}: pipeline_id=${lead.pipeline_id} (not Transfer or null)`)
-      } else {
-        console.log(`[sync] no pipeline_stage row for status="${status}" — stage not changed`)
-      }
+    const matches = status ? stageMatchesByName.get(status.toLowerCase()) ?? [] : []
+    const stageRow = resolvePreferredStage(matches)
+    if (status && !stageRow) {
+      console.log(`[sync] no pipeline_stage row for status="${status}" — stage not changed`)
     }
+    const update = buildLeadStageUpdate(lead, policyNumber, stageRow)
     if (Object.keys(update).length > 0) {
       console.log(`[sync] updating lead ${lead.id}:`, JSON.stringify(update))
       const { error } = await ddf.from(LEADS_TABLE).update(update as never).eq('id', lead.id)
@@ -256,31 +305,34 @@ export async function syncLeadStagesFromDdfStatus(
     }
   }
 
-  // ── Path 1: find leads directly by submission_id ───────────────────────────
-  console.log(`[sync] bySubmissionId size=${bySubmissionId.size}, byPolicyNumber size=${byPolicyNumber.size}`)
-  if (bySubmissionId.size > 0) {
-    const submissionIds = Array.from(bySubmissionId.keys())
-    console.log('[sync] querying leads by submission_id:', submissionIds)
+  console.log(`[sync] byPolicyNumber size=${byPolicyNumber.size}`)
+
+  // ── Path 1: already-attached leads — exact policy_id match ─────────────────
+  {
+    const policyNumbers = Array.from(byPolicyNumber.keys())
     const { data: rows, error } = await ddf
       .from(LEADS_TABLE)
-      .select('id, submission_id, policy_id, stage_id, pipeline_id')
-      .in('submission_id', submissionIds)
+      .select('id, policy_id, stage_id, pipeline_id')
+      .in('policy_id', policyNumbers)
 
-    if (error) console.error('[sync] submission_id lookup error:', error.message)
-    console.log(`[sync] submission_id path found ${(rows ?? []).length} lead(s)`)
+    if (error) console.error('[sync] policy_id lookup error:', error.message)
+    console.log(`[sync] policy_id path found ${(rows ?? []).length} lead(s)`)
 
     for (const raw of (rows ?? []) as LeadRow[]) {
-      const sid = trimPolicy(raw.submission_id)
-      if (!sid) continue
-      const entry = bySubmissionId.get(sid)
-      if (!entry) continue
+      const policyNumber = trimPolicy(raw.policy_id)
+      if (!policyNumber) continue
+      const status = byPolicyNumber.get(policyNumber)
+      if (status === undefined) continue
       processedLeadIds.add(raw.id)
-      await applyUpdate(raw, entry.policyNumber, entry.status)
+      matchedPolicyNumbers.add(policyNumber)
+      await applyUpdate(raw, policyNumber, status)
     }
   }
 
-  // ── Path 2: find remaining leads by decrypting tracking_id ─────────────────
-  if (byPolicyNumber.size > 0) {
+  // ── Path 2: new/unattached leads — decrypt tracking_id, attach + move stage ─
+  // Scans every lead with a non-null tracking_id and decrypts to compare — the
+  // only way to find a lead that has no policy_id yet.
+  {
     const { data: rows, error } = await ddf
       .from(LEADS_TABLE)
       .select('id, tracking_id, policy_id, stage_id, pipeline_id')
@@ -296,7 +348,18 @@ export async function syncLeadStagesFromDdfStatus(
       const status = byPolicyNumber.get(policyNumber)
       if (status === undefined) continue
       console.log(`[sync] tracking_id path matched lead ${raw.id} → policyNumber=${policyNumber}`)
+      processedLeadIds.add(raw.id)
+      matchedPolicyNumbers.add(policyNumber)
       await applyUpdate(raw, policyNumber, status)
     }
   }
+
+  const unmatchedPolicyNumbers = Array.from(byPolicyNumber.keys()).filter(
+    pn => !matchedPolicyNumbers.has(pn)
+  )
+  if (unmatchedPolicyNumbers.length > 0) {
+    console.log(`[sync] ${unmatchedPolicyNumbers.length} polic${unmatchedPolicyNumbers.length === 1 ? 'y' : 'ies'} matched no lead (needs manual attach):`, unmatchedPolicyNumbers)
+  }
+
+  return { matchedCount: matchedPolicyNumbers.size, unmatchedPolicyNumbers }
 }
