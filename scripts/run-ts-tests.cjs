@@ -7,6 +7,11 @@ const path = require('path')
 const Module = require('module')
 const ts = require('typescript')
 
+// Some lib modules (e.g. dealTracker.ts) eagerly instantiate a Supabase client at
+// import time, which throws if NEXT_PUBLIC_SUPABASE_URL/ANON_KEY aren't set. Load
+// .env so tests that transitively import such modules run outside `next dev`/build.
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') })
+
 require.extensions['.ts'] = function (mod, filename) {
   const source = fs.readFileSync(filename, 'utf8')
   const { outputText } = ts.transpileModule(source, {

@@ -159,9 +159,14 @@ export async function GET(request: NextRequest) {
     const dLast = editDistance(policyLastLower, rLast)
     if (dFirst <= 2 && dLast <= 2) {
       matchingRows.push({
+        // Stringified so it compares equal to suggest-ddf-match's recordId (always a
+        // string) — the "AI pick" badge in the dialog matches on this id.
+        id: rec.id != null ? String(rec.id) : null,
         insured_name: rec.insured_name ?? rec.insuredname,
         lead_vendor: rec.lead_vendor ?? rec.lead_vendor_name,
         client_phone_number: rec.client_phone_number ?? rec.phone_number,
+        licensed_agent_account: rec.licensed_agent_account ?? null,
+        draft_date: rec.draft_date ?? null,
         carrier: rec.carrier,
         editDistanceFirst: dFirst,
         editDistanceLast: dLast,

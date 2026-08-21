@@ -4,6 +4,8 @@ import {
   syncLeadStagesFromDdfStatus,
   resolvePreferredStage,
   buildLeadStageUpdate,
+  findLeadsForPolicyNumbers,
+  attachPolicyToLeadById,
   type DdfStatusStageSync,
   type PipelineStageRow,
 } from './leadNotesSync'
@@ -272,6 +274,80 @@ test('syncLeadStagesFromDdfStatus: a policy number matching no lead at all comes
   assert.deepEqual(result.unmatchedPolicyNumbers, ['POL-DOES-NOT-EXIST'])
 })
 
+// ── Edge cases: same-name rows in the carrier file + a lead with a wrong tracking_id ─
+//
+// Requested by the manager: the carrier file can have two rows for the same insured
+// name but different policy numbers (twins, a re-issued policy, etc.), and a CRM lead
+// can carry a tracking_id that was captured wrong at form submission (typo/stale value)
+// so it decrypts to a policy number that doesn't actually belong to it. Since this
+// function never looks at name — matching is exactly policy_id or tracking_id decryption,
+// see the file-level doc comment — a same-name coincidence must never cause a guess.
+// The wrong-tracking_id lead must come back untouched and its policy number unmatched,
+// not force-matched to whichever same-named lead happens to be nearby.
+
+test('syncLeadStagesFromDdfStatus: two same-name rows with different policy numbers, one lead with a wrong tracking_id — both stay unmatched and the lead is untouched', async () => {
+  // "John Smith" has two policies in this upload: POL-100 and POL-200. The only CRM
+  // lead on file for him has tracking_id 'POL-999' — wrong/mistyped at submission —
+  // which matches neither policy number.
+  const wrongTrackingLead = baseLead({
+    id: 'lead-wrong-tid',
+    tracking_id: 'POL-999',
+    policy_id: null,
+    pipeline_id: 4,
+    stage_id: 128,
+    stage: 'Pending Approval',
+  })
+  const snapshot = { ...wrongTrackingLead }
+  const ddf = makeFakeDdfClient({ leads: [wrongTrackingLead], pipeline_stages: PIPELINE_STAGES })
+  const updates: DdfStatusStageSync[] = [
+    { trackingId: 'POL-100', status: 'FDPF Pending Reason' }, // John Smith, policy 1
+    { trackingId: 'POL-200', status: 'Pending Lapse' },       // John Smith, policy 2
+  ]
+
+  const result = await syncLeadStagesFromDdfStatus(ddf as any, updates)
+
+  assert.deepEqual(wrongTrackingLead, snapshot)
+  assert.equal(result.matchedCount, 0)
+  assert.deepEqual(result.unmatchedPolicyNumbers.sort(), ['POL-100', 'POL-200'])
+})
+
+test('syncLeadStagesFromDdfStatus: of two same-name rows, only the one with a real match updates — the wrong-tracking_id lead is never substituted in for the other', async () => {
+  // Same "John Smith, two policies" setup, but POL-100 does have a real lead (brand
+  // new, tracking_id matches exactly). POL-200 has no correct lead — only the
+  // wrong-tracking_id lead exists, and it must not be picked as a fallback for it.
+  const correctLead = baseLead({
+    id: 'lead-correct',
+    tracking_id: 'POL-100',
+    policy_id: null,
+    pipeline_id: 4,
+    stage_id: 128,
+    stage: 'Pending Approval',
+  })
+  const wrongTrackingLead = baseLead({
+    id: 'lead-wrong-tid',
+    tracking_id: 'POL-999',
+    policy_id: null,
+    pipeline_id: 4,
+    stage_id: 128,
+    stage: 'Pending Approval',
+  })
+  const wrongSnapshot = { ...wrongTrackingLead }
+  const ddf = makeFakeDdfClient({ leads: [correctLead, wrongTrackingLead], pipeline_stages: PIPELINE_STAGES })
+  const updates: DdfStatusStageSync[] = [
+    { trackingId: 'POL-100', status: 'FDPF Pending Reason' },
+    { trackingId: 'POL-200', status: 'Pending Lapse' },
+  ]
+
+  const result = await syncLeadStagesFromDdfStatus(ddf as any, updates)
+
+  assert.equal(correctLead.policy_id, 'POL-100')
+  assert.equal(correctLead.stage_id, 1)
+  assert.equal(correctLead.pipeline_id, 1)
+  assert.deepEqual(wrongTrackingLead, wrongSnapshot)
+  assert.equal(result.matchedCount, 1)
+  assert.deepEqual(result.unmatchedPolicyNumbers, ['POL-200'])
+})
+
 test('syncLeadStagesFromDdfStatus: matches multiple leads by policy number in one batch', async () => {
   const leadA = baseLead({ id: 'lead-a', policy_id: 'POL-A', pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
   const leadB = baseLead({ id: 'lead-b', tracking_id: 'POL-B', policy_id: null, pipeline_id: 2, stage_id: 12, stage: 'Issued - Pending First Draft' })
@@ -289,4 +365,118 @@ test('syncLeadStagesFromDdfStatus: matches multiple leads by policy number in on
   assert.equal(leadB.pipeline_id, 1)
   assert.equal(leadB.policy_id, 'POL-B')
   assert.equal(result.matchedCount, 2)
+})
+
+// ── findLeadsForPolicyNumbers: the read-only resolver shared by the sync path and
+// the unmatched-lead review page ──────────────────────────────────────────────
+
+test('findLeadsForPolicyNumbers: resolves policy_id and tracking_id matches, reports the rest unmatched', async () => {
+  const leadA = baseLead({ id: 'lead-a', policy_id: 'POL-A' })
+  const leadB = baseLead({ id: 'lead-b', tracking_id: 'POL-B', policy_id: null })
+  const ddf = makeFakeDdfClient({ leads: [leadA, leadB], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await findLeadsForPolicyNumbers(ddf as any, ['POL-A', 'POL-B', 'POL-NOWHERE'])
+
+  assert.equal(result.matchedByPolicy.get('POL-A')?.id, 'lead-a')
+  assert.equal(result.matchedByPolicy.get('POL-B')?.id, 'lead-b')
+  assert.deepEqual(result.unmatchedPolicyNumbers, ['POL-NOWHERE'])
+})
+
+test('findLeadsForPolicyNumbers: nothing is written — this is read-only', async () => {
+  const lead = baseLead({ id: 'lead-1', policy_id: 'POL-1', stage_id: 128, pipeline_id: 4, stage: 'Pending Approval' })
+  const snapshot = { ...lead }
+  const ddf = makeFakeDdfClient({ leads: [lead], pipeline_stages: PIPELINE_STAGES })
+
+  await findLeadsForPolicyNumbers(ddf as any, ['POL-1'])
+
+  assert.deepEqual(lead, snapshot)
+})
+
+test('findLeadsForPolicyNumbers: when both a policy_id lead and a separate tracking_id lead resolve to the same policy number, the policy_id match wins', async () => {
+  const policyIdLead = baseLead({ id: 'lead-policy-id', policy_id: 'POL-DUP' })
+  const trackingIdLead = baseLead({ id: 'lead-tracking-id', tracking_id: 'POL-DUP', policy_id: null })
+  const ddf = makeFakeDdfClient({ leads: [policyIdLead, trackingIdLead], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await findLeadsForPolicyNumbers(ddf as any, ['POL-DUP'])
+
+  assert.equal(result.matchedByPolicy.size, 1)
+  assert.equal(result.matchedByPolicy.get('POL-DUP')?.id, 'lead-policy-id')
+})
+
+// ── attachPolicyToLeadById: the human-confirmed, by-id write path used by the
+// AI-assisted unmatched-lead review page's "Confirm" button ───────────────────
+
+test('attachPolicyToLeadById: writes policy_id and moves stage on the specified lead', async () => {
+  const lead = baseLead({ id: 'lead-1', policy_id: null, tracking_id: null, pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
+  const ddf = makeFakeDdfClient({ leads: [lead], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await attachPolicyToLeadById(ddf as any, 'lead-1', 'POL-999', 'FDPF Pending Reason')
+
+  assert.equal(result.ok, true)
+  assert.equal(lead.policy_id, 'POL-999')
+  assert.equal(lead.stage_id, 1)
+  assert.equal(lead.pipeline_id, 1)
+})
+
+test('attachPolicyToLeadById: works even when the lead has an unrelated tracking_id — bypasses the exact-key search entirely', async () => {
+  // This is exactly the "wrong tracking_id" scenario the manager's edge-case tests
+  // guard against for the automatic sync — but here a human has looked at it and
+  // explicitly confirmed the match, so attaching by id must succeed regardless.
+  const lead = baseLead({ id: 'lead-1', policy_id: null, tracking_id: 'POL-SOMETHING-ELSE', pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
+  const ddf = makeFakeDdfClient({ leads: [lead], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await attachPolicyToLeadById(ddf as any, 'lead-1', 'POL-100', 'Pending Lapse')
+
+  assert.equal(result.ok, true)
+  assert.equal(lead.policy_id, 'POL-100')
+  assert.equal(lead.stage_id, 6)
+})
+
+test('attachPolicyToLeadById: no matching pipeline_stage still writes policy_id', async () => {
+  const lead = baseLead({ id: 'lead-1', policy_id: null, pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
+  const ddf = makeFakeDdfClient({ leads: [lead], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await attachPolicyToLeadById(ddf as any, 'lead-1', 'POL-100', 'NOT A REAL STAGE')
+
+  assert.equal(result.ok, true)
+  assert.equal(lead.policy_id, 'POL-100')
+  assert.equal(lead.stage_id, 128)
+})
+
+test('attachPolicyToLeadById: unknown lead id returns ok:false and writes nothing', async () => {
+  const lead = baseLead({ id: 'lead-1', policy_id: null, pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
+  const snapshot = { ...lead }
+  const ddf = makeFakeDdfClient({ leads: [lead], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await attachPolicyToLeadById(ddf as any, 'lead-does-not-exist', 'POL-100', null)
+
+  assert.equal(result.ok, false)
+  assert.deepEqual(lead, snapshot)
+})
+
+test('attachPolicyToLeadById: missing leadId or policyNumber returns ok:false', async () => {
+  const ddf = makeFakeDdfClient({ leads: [], pipeline_stages: PIPELINE_STAGES })
+  assert.equal((await attachPolicyToLeadById(ddf as any, '', 'POL-100', null)).ok, false)
+  assert.equal((await attachPolicyToLeadById(ddf as any, 'lead-1', '', null)).ok, false)
+})
+
+test('attachPolicyToLeadById: refuses to overwrite a lead that already has a different policy attached', async () => {
+  const lead = baseLead({ id: 'lead-1', policy_id: 'POL-ALREADY-CORRECT', pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
+  const snapshot = { ...lead }
+  const ddf = makeFakeDdfClient({ leads: [lead], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await attachPolicyToLeadById(ddf as any, 'lead-1', 'POL-DIFFERENT', 'FDPF Pending Reason')
+
+  assert.equal(result.ok, false)
+  assert.deepEqual(lead, snapshot)
+})
+
+test('attachPolicyToLeadById: re-confirming the same policy_id the lead already has still succeeds (idempotent, still moves stage)', async () => {
+  const lead = baseLead({ id: 'lead-1', policy_id: 'POL-100', pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
+  const ddf = makeFakeDdfClient({ leads: [lead], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await attachPolicyToLeadById(ddf as any, 'lead-1', 'POL-100', 'FDPF Pending Reason')
+
+  assert.equal(result.ok, true)
+  assert.equal(lead.stage_id, 1)
 })
