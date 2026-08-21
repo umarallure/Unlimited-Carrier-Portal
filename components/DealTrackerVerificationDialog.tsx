@@ -143,6 +143,11 @@ export function DealTrackerVerificationDialog({
   // yet" apart from "ran and finished" — without this, the completed-state text showed even
   // before the very first automatic run had started, making it look like it silently did nothing.
   const [hasRunAiOnce, setHasRunAiOnce] = useState(false)
+  // How many rows the most recent runBatchAiMatch call actually targeted — the automatic first
+  // pass covers every New row (aiEligibleCount), but "Re-run" only re-targets rows still
+  // Incomplete, so the status text needs the real per-run count instead of the static
+  // aiEligibleCount, or a Re-run of e.g. 11 leftover rows would misleadingly still say "45".
+  const [batchTargetCount, setBatchTargetCount] = useState(0)
   // Keyed by policy_number (not array index) - removing a row shifts every
   // subsequent row's index down, so an index-based snapshot would silently
   // start matching the wrong (now-shifted) rows after any removal.
@@ -292,6 +297,12 @@ export function DealTrackerVerificationDialog({
   // Of the eligible rows, how many actually have a usable name+carrier right now — used to hold
   // the auto-trigger back until real data has landed (see the effect below for why this matters).
   const aiReadyCount = editableEntries.filter((e) => e.isNew && (e.name || '').trim() && (e.carrier || '').trim()).length
+  // True while the very first AI pass hasn't landed yet — the window where incompleteCount is
+  // computed from Call Center/Phone fields the AI just hasn't had a chance to fill in, not fields
+  // it actually failed on. Showing "N rows incomplete, blocked until fixed" during that window
+  // reads as a hard verdict when it's really just "still checking" — the count is about to change
+  // on its own, not something the user needs to act on yet.
+  const aiCheckInProgress = aiEligibleCount > 0 && !hasRunAiOnce
   // Whether the local editableEntries mirror has actually caught up to the current `entries` prop.
   // These are kept in sync by a separate effect (the "sync-entries effect" above) whose setState
   // doesn't take effect until the NEXT render — so on the render right after a new file arrives,
@@ -406,14 +417,20 @@ export function DealTrackerVerificationDialog({
     }
   }, [])
 
-  const runBatchAiMatch = useCallback(async () => {
-    // Every New row, not just ones the strict matcher failed on (see aiEligibleCount above for
-    // why) — the auto-fill step below still refuses to overwrite fields that already have data.
+  const runBatchAiMatch = useCallback(async (options?: { onlyIncomplete?: boolean }) => {
+    // The automatic first pass covers every New row, not just ones the strict matcher failed on
+    // (see aiEligibleCount above for why) — the auto-fill step below still refuses to overwrite
+    // fields that already have data. A manual "Re-run" click, though, only needs to re-check rows
+    // still actually Incomplete: everything else already has its confidence badge from the first
+    // pass, so resending it wastes an AI call and is why "Re-run" kept saying "Matching 45" even
+    // once only 11 rows genuinely needed another look.
+    const onlyIncomplete = options?.onlyIncomplete ?? false
     const targets = editableEntries
       .map((entry, globalIndex) => ({ entry, globalIndex }))
-      .filter(({ entry }) => entry.isNew)
+      .filter(({ entry }) => entry.isNew && (!onlyIncomplete || isEntryIncomplete(entry)))
 
     if (targets.length === 0) return
+    setBatchTargetCount(targets.length)
 
     setBatchAiRunning(true)
     setBatchAiError(null)
@@ -484,7 +501,7 @@ export function DealTrackerVerificationDialog({
       setBatchAiRunning(false)
       setHasRunAiOnce(true)
     }
-  }, [editableEntries, updateEntry])
+  }, [editableEntries, updateEntry, isEntryIncomplete])
 
   // Runs AI matching automatically once per dialog-open, instead of requiring a manual click on
   // "Run AI Match on All Incomplete" — same rows as that button always targeted (whatever the
@@ -642,10 +659,18 @@ export function DealTrackerVerificationDialog({
                 setIncompleteSnapshot(snap)
                 setFilter('incomplete')
               }}
-              title="Rows missing Effective Date, Call Center, Phone, or a valid GHL Stage (cannot save until fixed)"
+              title={
+                aiCheckInProgress
+                  ? 'AI matching is still in progress — this count will settle once it finishes'
+                  : 'Rows missing Effective Date, Call Center, Phone, or a valid GHL Stage (cannot save until fixed)'
+              }
             >
               <ClipboardList className="mr-1 h-3.5 w-3.5" />
-              Incomplete ({incompleteCount})
+              {/* Same reasoning as the banner above: while the first AI pass is still running, most
+                  rows' Call Center/Phone are blank simply because nothing has checked them yet, not
+                  because they're confirmed unmatched — showing a hard number here would be just as
+                  misleading as the banner was, so it reads as pending instead until settled. */}
+              Incomplete ({aiCheckInProgress ? '…' : incompleteCount})
             </Button>
             </div>
             <div className="flex items-center gap-2">
@@ -704,7 +729,7 @@ export function DealTrackerVerificationDialog({
           </div>
         )}
 
-        {!isLoading && hasIncomplete && (
+        {!isLoading && hasIncomplete && !aiCheckInProgress && (
           <div
             role="status"
             className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900 dark:border-rose-800/80 dark:bg-rose-950/50 dark:text-rose-100"
@@ -722,8 +747,9 @@ export function DealTrackerVerificationDialog({
         {/* Runs automatically on dialog open (see the auto-trigger effect below) for every New
             row, not just Incomplete ones — a requirement that AI-assist check all new leads, not
             only ones the strict matcher failed on. Reads as a status notification, not a call to
-            action, since there's normally nothing to click — "Re-run" only matters after an edit
-            changes what needs checking, and never overwrites a field that already has data. */}
+            action, since there's normally nothing to click — "Re-run" only re-targets rows still
+            Incomplete (everything else already has its badge from the first pass), and never
+            overwrites a field that already has data. */}
         {!isLoading && aiEligibleCount > 0 && (
           <div
             role="status"
@@ -736,17 +762,23 @@ export function DealTrackerVerificationDialog({
             )}
             <span>
               {batchAiRunning
-                ? `Matching ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow (carrier + agent + last 7-10 days) — this can take a while…`
+                ? `Matching ${batchTargetCount} lead${batchTargetCount === 1 ? '' : 's'} against Daily Deal Flow (carrier + agent + last 7-10 days) — this can take a while…`
                 : !hasRunAiOnce
                   ? `Preparing to check ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow…`
-                  : `AI checked ${aiEligibleCount} new lead${aiEligibleCount === 1 ? '' : 's'} against Daily Deal Flow automatically.`}
+                  : `AI checked ${batchTargetCount} lead${batchTargetCount === 1 ? '' : 's'} against Daily Deal Flow.`}
             </span>
             <button
               type="button"
               className="ml-auto shrink-0 font-medium text-blue-700 underline underline-offset-2 hover:text-blue-900 disabled:opacity-50 disabled:no-underline dark:text-blue-300 dark:hover:text-blue-100"
-              disabled={batchAiRunning || !hasRunAiOnce}
-              title={!hasRunAiOnce ? 'The automatic first run is still in progress' : undefined}
-              onClick={runBatchAiMatch}
+              disabled={batchAiRunning || !hasRunAiOnce || incompleteCount === 0}
+              title={
+                !hasRunAiOnce
+                  ? 'The automatic first run is still in progress'
+                  : incompleteCount === 0
+                    ? 'Nothing left to re-check — every row is complete'
+                    : 'Only re-checks rows still Incomplete'
+              }
+              onClick={() => runBatchAiMatch({ onlyIncomplete: true })}
             >
               Re-run
             </button>
