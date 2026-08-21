@@ -75,8 +75,10 @@ function stageRequiresPositiveDealValue(stage: string): boolean {
 /**
  * Stages auto-mapping must never *target*: when the resolver picks one of these,
  * sanitize back to the safe parent (e.g. FDPF Insufficient Funds → FDPF Pending Reason).
- * This does NOT prevent updates *away* from these stages — that protection is
- * scoped to auditor-only stages via EXISTING_STAGES_NEVER_AUTO_OVERWRITE below.
+ * This does NOT prevent updates *away* from these stages — moving away from one is
+ * governed by applyNonRegressiveGhlClamp + isBlockedGhlStageRegression instead, which
+ * block only regressing to the stage's own generic parent (e.g. Pending Manual Action
+ * → Pending Approval), not a real cross-family change (e.g. → Active).
  */
 const MANUAL_APPROVAL_STAGES = new Set([
   'Pending Manual Action',
@@ -104,16 +106,6 @@ const FDPF_FAMILY_STAGES = new Set([
   'FDPF Insufficient Funds',
   'FDPF Unauthorized Draft',
   'FDPF Incorrect Banking Info',
-])
-
-/**
- * Existing stages auto-mapping must never overwrite — auditor-only.
- * FDPF / Pending Lapse sub-reasons and Active milestones are NOT in this set:
- * within-family regression is blocked by applyNonRegressiveGhlClamp + stageProgressRank,
- * but a real cross-family change (e.g. carrier reports Active again) flows through.
- */
-const EXISTING_STAGES_NEVER_AUTO_OVERWRITE = new Set([
-  'Pending Manual Action',
 ])
 
 export const GHL_STAGE_ORDER = [
@@ -498,8 +490,9 @@ function stageProgressRank(stage: string | null): { family: string; rank: number
  *
  * Cross-family changes (FDPF reason → Active, Pending Lapse → Active, Active → Pending Lapse,
  * anything → Chargeback / Withdrawn / Declined, etc.) flow through unchanged: the new mapping
- * is the source of truth. Auditor-only stages are short-circuited earlier in resolveGhlStageRaw
- * via EXISTING_STAGES_NEVER_AUTO_OVERWRITE.
+ * is the source of truth. Pending Manual Action gets the same treatment via
+ * isBlockedGhlStageRegression below — only its regression back to generic Pending Approval
+ * is blocked, so a real status change (e.g. the carrier reports Active) still updates it.
  */
 /**
  * True when moving from `existing` to `candidate` would undo an auditor-only
@@ -686,15 +679,6 @@ function resolveGhlStageRaw(ctx: GhlStageResolutionContext): string | null {
         )
       : effDate
   const grace = CARRIER_GRACE_PERIODS[(carrierCode || '').toUpperCase()] ?? 31
-
-  // Auditor-only stages: never overwrite by auto-mapping.
-  // FDPF / Pending Lapse sub-reasons + Active milestones are NOT short-circuited here —
-  // they're protected only against within-family regression by applyNonRegressiveGhlClamp,
-  // so a real cross-family change (e.g. carrier flips back to Active) still flows through.
-  const normalizedExistingGhlStage = normalizeStageLabel(existingGhlStage)
-  if (normalizedExistingGhlStage && EXISTING_STAGES_NEVER_AUTO_OVERWRITE.has(normalizedExistingGhlStage)) {
-    return normalizedExistingGhlStage
-  }
 
   const stageSet = new Set(possibleStages)
   const isActPastDueStatus =
