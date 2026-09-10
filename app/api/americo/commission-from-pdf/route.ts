@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { parsePdfTextIsolated } from '@/lib/pdfParseIsolated'
 
 export const dynamic = 'force-dynamic'
 
@@ -53,16 +52,21 @@ export async function POST(req: NextRequest) {
     const arrayBuffer = await data.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)
 
-    // Parse in an isolated child process — pdf-parse's vendored pdf.js throws
-    // spuriously on well-formed PDFs once the Supabase client above has been
-    // created in-process. See lib/pdfParseIsolated.ts for details.
-    let text: string
-    try {
-      text = await parsePdfTextIsolated(buffer)
-    } catch (e: any) {
-      console.error('[Americo PDF] pdf-parse failed:', e)
-      return NextResponse.json({ error: e?.message || 'pdf-parse failed on server.' }, { status: 500 })
+    const pdfParseModule: any = await import('pdf-parse')
+    const pdfParseFn =
+      typeof pdfParseModule === 'function'
+        ? pdfParseModule
+        : typeof pdfParseModule.default === 'function'
+          ? pdfParseModule.default
+          : null
+
+    if (!pdfParseFn) {
+      console.error('[Americo PDF] pdf-parse did not export a function. Got:', pdfParseModule)
+      return NextResponse.json({ error: 'pdf-parse module not available on server.' }, { status: 500 })
     }
+
+    const parsed = await pdfParseFn(buffer)
+    const text: string = parsed.text || ''
 
     if (!text.trim()) {
       console.warn('[Americo PDF] No text extracted from PDF:', storagePath)
