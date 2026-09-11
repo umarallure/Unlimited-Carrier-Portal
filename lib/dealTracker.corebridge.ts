@@ -347,7 +347,10 @@ export async function processCorebridgeCommissionsForDealTracker(
     if (!policyNum) continue
 
     const rawType = (comm.comm_type ?? '').toString().toUpperCase().trim()
-    const isAdvanceType = rawType.length >= 4 && /^[A-Z]+AD$/.test(rawType)
+    // Some statement layouts store a bare "AD" comm type instead of one fused
+    // onto a product code (e.g. "GENERICATTAD") — match either form. Mirrors
+    // the same fix in the PDF parser (lib/corebridgeCommissionParser.ts).
+    const isAdvanceType = rawType === 'AD' || (rawType.length >= 4 && /^[A-Z]+AD$/.test(rawType))
     const isOverrideType = rawType === 'OVERRIDE' || rawType.includes('OVERRIDE')
 
     console.log('[Deal Tracker Corebridge]   Filter:', policyNum, '| rawType:', rawType, '| isAD:', isAdvanceType, '| isOverride:', isOverrideType, '| pass:', isAdvanceType || isOverrideType)
