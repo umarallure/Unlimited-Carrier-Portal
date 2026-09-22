@@ -3,6 +3,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { fetchAllPaginated } from '@/lib/dealTracker'
+import {
+  ACTIVE_STAGES_NEEDING_COMMISSION,
+  AMAM_ISSUED_CARRIER_STATUSES,
+  findIssuedDatesFromHistory,
+  isDueForCommissionCheck,
+  isUncoveredCarrier,
+  mergeCandidatesDeduped,
+  resolveCarrierCode,
+  type GhlStageHistoryRow,
+} from '@/lib/missingCommission'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -61,6 +71,7 @@ type AuditPolicyRow = {
   agency_carrier_id: string | null
   carriers: { code: string | null } | null
   ghl_stage: string | null
+  carrier_status: string | null
   effective_date: string | null
   deal_creation_date: string | null
   deal_value: number | null
@@ -136,52 +147,8 @@ const CRM_STAGE_GROUPS = [
   },
 ] as const
 
-const ACTIVE_STAGES_NEEDING_COMMISSION = [
-  'Active Placed - Paid as Advanced',
-  'ACTIVE PLACED - Paid as Advanced',
-  'Active Placed - Paid as Earned',
-  'Premium Paid - Commission Pending',
-]
-
 const SELECT_FIELDS =
-  'id, name, policy_number, carrier, agency_carrier_id, carrier_id, carriers ( code ), ghl_stage, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type, last_audited_at, audit_count'
-
-// Carriers whose commission is expected to key off the policy's ISSUE date
-// rather than its effective date. An issue date is, by definition, already in
-// the past by the time a policy exists in our system, so these carriers get no
-// date gating at all — just active status + a real commission on file. This is
-// a business decision (confirmed directly), not something derivable from the
-// code: there's no explicit "carrier X pays on date Y" rule anywhere in this
-// codebase (checked lib/dealTracker.*.ts, lib/ghlStageResolver.ts,
-// lib/commissionTracker.ts — none state a payment-timing rule per carrier).
-const ISSUE_DATE_CARRIER_CODES = new Set(['MOH', 'SENTINEL', 'AMERICO', 'AMAM'])
-
-// Carriers not yet synced into commission_tracker (lib/commissionTracker.ts) —
-// for these, "no commission_tracker row" doesn't mean "no commission exists,"
-// it means "not checked yet." Surfaced in the UI rather than silently reading 0.
-const MISSING_COMMISSION_UNCOVERED_CARRIER_CODES = new Set(['RNA', 'LIBERTY'])
-
-// Some deal_tracker rows have no working carrier_id link (legacy data), so the
-// carriers(code) join comes back null even though the free-text `carrier`
-// field has a value — and that free-text value isn't consistent (e.g.
-// "Sentinel Security Life" vs "Sentinel"). Fall back to matching it directly
-// so those rows don't silently fall out of both carrier groups above.
-function resolveCarrierCode(row: Pick<AuditPolicyRow, 'carrier' | 'carriers'>): string | null {
-  if (row.carriers?.code) return row.carriers.code
-  const raw = (row.carrier || '').toUpperCase()
-  if (!raw) return null
-  if (raw.includes('MUTUAL OF OMAHA') || raw === 'MOH') return 'MOH'
-  if (raw.includes('SENTINEL')) return 'SENTINEL'
-  if (raw.includes('AMERICO')) return 'AMERICO'
-  if (raw.includes('AMERICAN AMICABLE') || raw.includes('AMAM')) return 'AMAM'
-  if (raw.includes('ROYAL NEIGHBORS') || raw === 'RNA') return 'RNA'
-  if (raw.includes('LIBERTY')) return 'LIBERTY'
-  if (raw.includes('COREBRIDGE')) return 'COREBRIDGE'
-  if (raw.includes('AETNA')) return 'AETNA'
-  if (raw.includes('AFLAC')) return 'AFLAC'
-  if (raw.includes('AMERICAN HOME LIFE') || raw === 'AHL') return 'AHL'
-  return raw
-}
+  'id, name, policy_number, carrier, agency_carrier_id, carrier_id, carriers ( code ), ghl_stage, carrier_status, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type, last_audited_at, audit_count'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -494,6 +461,14 @@ export default function PolicyAuditPage() {
   const [pastDraftRows, setPastDraftRows] = useState<AuditPolicyRow[]>([])
   const [missingCommRows, setMissingCommRows] = useState<AuditPolicyRow[]>([])
   const [missingCommUncoveredCarriers, setMissingCommUncoveredCarriers] = useState<string[]>([])
+  // deal_tracker.id -> earliest known stage-change date, used as a stand-in
+  // "Issue Date" for carriers (currently just AMAM) where no reliable issue
+  // date exists anywhere else. Backed by deal_tracker_status_history, which
+  // is barely populated today (17 rows total in production as of 2026-09-22,
+  // all from manual testing) — so this will mostly come back empty right now
+  // and start filling in once that logging is fixed. Rows with no match show
+  // "—" rather than a guessed date.
+  const [issueDateFromHistory, setIssueDateFromHistory] = useState<Record<string, string>>({})
   const [earnedRows, setEarnedRows] = useState<AuditPolicyRow[]>([])
   const [advancedRows, setAdvancedRows] = useState<AuditPolicyRow[]>([])
 
@@ -617,21 +592,53 @@ export default function PolicyAuditPage() {
         .order('effective_date', { ascending: true, nullsFirst: false })
     )
 
+    // AMAM's "issued" policies mostly sit in "Issued - Pending First Draft" /
+    // "FDPF ..." stages, not the active-stage set above — the main query alone
+    // would never see them. Two ways in, checked in priority order:
+    //  1. deal_tracker_status_history — a real recorded transition past a
+    //     pre-issue stage is authoritative proof of issuance, independent of
+    //     whatever the carrier reports today (declined later, re-worded
+    //     their status text, etc.), and gives a real issue date.
+    //  2. Fallback: today's raw carrier_status, categorically. Needed because
+    //     deal_tracker_status_history is almost entirely unpopulated in
+    //     practice right now (see lib/missingCommission.ts) — this is what
+    //     actually catches AMAM's "issued" policies today.
+    // Fetched once and reused below for the Issue Date column too.
+    const amamHistoryRows = await fetchAllPaginated<GhlStageHistoryRow>(() =>
+      supabase
+        .from('deal_tracker_status_history')
+        .select('deal_tracker_id, new_ghl_stage, created_at')
+        .or('carrier.ilike.%amam%,carrier.ilike.%amicable%')
+    )
+    const amamIssueDateByRowId = findIssuedDatesFromHistory(amamHistoryRows)
+
+    const amamHistoryCandidates = Object.keys(amamIssueDateByRowId).length > 0
+      ? await fetchAllPaginated<AuditPolicyRow>(() =>
+          supabase.from('deal_tracker').select(SELECT_FIELDS).in('id', Object.keys(amamIssueDateByRowId))
+        )
+      : []
+    const amamStatusCandidates = await fetchAllPaginated<AuditPolicyRow>(() =>
+      supabase
+        .from('deal_tracker').select(SELECT_FIELDS)
+        .or('carrier.ilike.%amam%,carrier.ilike.%amicable%')
+        .in('carrier_status', AMAM_ISSUED_CARRIER_STATUSES)
+    )
+    const allCandidates = mergeCandidatesDeduped(
+      mergeCandidatesDeduped(candidates, amamHistoryCandidates),
+      amamStatusCandidates
+    )
+
     // Issue-date carriers need no date gating (an issue date is always already
     // in the past). Everyone else only qualifies once their effective date has
     // passed — otherwise the carrier simply hasn't had time to process anything.
     const today = new Date().toISOString().slice(0, 10)
-    const dueForCommission = candidates.filter((r) => {
-      const code = resolveCarrierCode(r)
-      if (code && ISSUE_DATE_CARRIER_CODES.has(code)) return true
-      return !!r.effective_date && ymdFromDate(r.effective_date) < today
-    })
+    const dueForCommission = allCandidates.filter((r) => isDueForCommissionCheck(r, today))
 
     const uncovered = new Set<string>()
     const checkable = dueForCommission.filter((r) => {
-      const code = resolveCarrierCode(r)
-      if (code && MISSING_COMMISSION_UNCOVERED_CARRIER_CODES.has(code)) {
-        uncovered.add(code)
+      if (isUncoveredCarrier(r)) {
+        const code = resolveCarrierCode(r)
+        if (code) uncovered.add(code)
         return false
       }
       return true
@@ -657,6 +664,10 @@ export default function PolicyAuditPage() {
     }
 
     const rows = checkable.filter((r) => !covered.has(`${r.agency_carrier_id}::${r.policy_number}`))
+
+    // Issue Date column for AMAM rows reuses the same history lookup that
+    // widened candidacy above — no second fetch needed.
+    setIssueDateFromHistory((prev) => ({ ...prev, ...amamIssueDateByRowId }))
 
     const grouped = await fetchNotes(rows)
     setMissingCommRows(rows)
@@ -1468,8 +1479,12 @@ export default function PolicyAuditPage() {
                 )}
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                Active or commission-pending stage, past the point a commission should exist (effective date for most carriers;
-                immediately for MOH, Sentinel, Americo, and AMAM, which pay on issue date), with no matching commission on file.
+                Past the point a commission should exist (effective date for every carrier except AMAM, which pays on issue
+                date and needs no date gating), with no matching commission on file. AMAM is checked against its own carrier
+                status directly (Active, Issued Not Paid, Act-Pastdue, Act-Ret Item, RPU, or Terminated) rather than our GHL
+                stage — confirmed against carrier data that AMAM pays before the client&apos;s first payment even clears, so
+                gating on our stage would miss these policies entirely. MOH, Sentinel, and Americo are on the effective-date
+                rule (safer default) until each is individually confirmed the way AMAM was.
               </p>
               {missingCommUncoveredCarriers.length > 0 && (
                 <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
@@ -1511,7 +1526,17 @@ export default function PolicyAuditPage() {
                                 <span className="block max-w-[160px] truncate text-xs" title={row.ghl_stage || ''}>{row.ghl_stage || '—'}</span>
                               </TableCell>
                               <TableCell className={cn(adminTdMuted, 'whitespace-nowrap text-xs')}>
-                                {row.deal_creation_date ? formatStoredDateForDisplay(row.deal_creation_date) : '—'}
+                                {resolveCarrierCode(row) === 'AMAM' ? (
+                                  issueDateFromHistory[row.id] ? (
+                                    <span title="From the earliest recorded stage change for this policy — no reliable issue date exists elsewhere for AMAM.">
+                                      {formatStoredDateForDisplay(issueDateFromHistory[row.id])}
+                                    </span>
+                                  ) : (
+                                    <span className="text-muted-foreground" title="No reliable issue date available for AMAM yet.">—</span>
+                                  )
+                                ) : (
+                                  row.deal_creation_date ? formatStoredDateForDisplay(row.deal_creation_date) : '—'
+                                )}
                               </TableCell>
                               {renderEffDate(row)}
                               <TableCell className={adminTdMuted}>
