@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { fetchAllPaginated } from '@/lib/dealTracker'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -57,6 +58,8 @@ type AuditPolicyRow = {
   name: string | null
   policy_number: string
   carrier: string | null
+  agency_carrier_id: string | null
+  carriers: { code: string | null } | null
   ghl_stage: string | null
   effective_date: string | null
   deal_creation_date: string | null
@@ -141,7 +144,44 @@ const ACTIVE_STAGES_NEEDING_COMMISSION = [
 ]
 
 const SELECT_FIELDS =
-  'id, name, policy_number, carrier, ghl_stage, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type, last_audited_at, audit_count'
+  'id, name, policy_number, carrier, agency_carrier_id, carrier_id, carriers ( code ), ghl_stage, effective_date, deal_creation_date, deal_value, notes, sales_agent, call_center, writing_number, commission_type, last_audited_at, audit_count'
+
+// Carriers whose commission is expected to key off the policy's ISSUE date
+// rather than its effective date. An issue date is, by definition, already in
+// the past by the time a policy exists in our system, so these carriers get no
+// date gating at all — just active status + a real commission on file. This is
+// a business decision (confirmed directly), not something derivable from the
+// code: there's no explicit "carrier X pays on date Y" rule anywhere in this
+// codebase (checked lib/dealTracker.*.ts, lib/ghlStageResolver.ts,
+// lib/commissionTracker.ts — none state a payment-timing rule per carrier).
+const ISSUE_DATE_CARRIER_CODES = new Set(['MOH', 'SENTINEL', 'AMERICO', 'AMAM'])
+
+// Carriers not yet synced into commission_tracker (lib/commissionTracker.ts) —
+// for these, "no commission_tracker row" doesn't mean "no commission exists,"
+// it means "not checked yet." Surfaced in the UI rather than silently reading 0.
+const MISSING_COMMISSION_UNCOVERED_CARRIER_CODES = new Set(['RNA', 'LIBERTY'])
+
+// Some deal_tracker rows have no working carrier_id link (legacy data), so the
+// carriers(code) join comes back null even though the free-text `carrier`
+// field has a value — and that free-text value isn't consistent (e.g.
+// "Sentinel Security Life" vs "Sentinel"). Fall back to matching it directly
+// so those rows don't silently fall out of both carrier groups above.
+function resolveCarrierCode(row: Pick<AuditPolicyRow, 'carrier' | 'carriers'>): string | null {
+  if (row.carriers?.code) return row.carriers.code
+  const raw = (row.carrier || '').toUpperCase()
+  if (!raw) return null
+  if (raw.includes('MUTUAL OF OMAHA') || raw === 'MOH') return 'MOH'
+  if (raw.includes('SENTINEL')) return 'SENTINEL'
+  if (raw.includes('AMERICO')) return 'AMERICO'
+  if (raw.includes('AMERICAN AMICABLE') || raw.includes('AMAM')) return 'AMAM'
+  if (raw.includes('ROYAL NEIGHBORS') || raw === 'RNA') return 'RNA'
+  if (raw.includes('LIBERTY')) return 'LIBERTY'
+  if (raw.includes('COREBRIDGE')) return 'COREBRIDGE'
+  if (raw.includes('AETNA')) return 'AETNA'
+  if (raw.includes('AFLAC')) return 'AFLAC'
+  if (raw.includes('AMERICAN HOME LIFE') || raw === 'AHL') return 'AHL'
+  return raw
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -453,6 +493,7 @@ export default function PolicyAuditPage() {
   const [declinedRows, setDeclinedRows] = useState<AuditPolicyRow[]>([])
   const [pastDraftRows, setPastDraftRows] = useState<AuditPolicyRow[]>([])
   const [missingCommRows, setMissingCommRows] = useState<AuditPolicyRow[]>([])
+  const [missingCommUncoveredCarriers, setMissingCommUncoveredCarriers] = useState<string[]>([])
   const [earnedRows, setEarnedRows] = useState<AuditPolicyRow[]>([])
   const [advancedRows, setAdvancedRows] = useState<AuditPolicyRow[]>([])
 
@@ -563,15 +604,63 @@ export default function PolicyAuditPage() {
   }, [fetchNotes])
 
   const loadMissingCommission = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('deal_tracker').select(SELECT_FIELDS)
-      .in('ghl_stage', ACTIVE_STAGES_NEEDING_COMMISSION)
-      .or('deal_value.is.null,deal_value.lte.0')
-      .order('effective_date', { ascending: true, nullsFirst: false })
-    if (error) throw error
-    const rows = (data || []) as AuditPolicyRow[]
+    // Active policies, any carrier — commission_tracker (not deal_value) decides
+    // who actually has a commission on file; deal_value is written once and
+    // never updated, so it can look "fine" long after it's gone stale.
+    // fetchAllPaginated (not a single .select()) because this list regularly
+    // exceeds Supabase's default 1000-row cap — a plain select silently
+    // truncated the check before this fix, undercounting real gaps.
+    const candidates = await fetchAllPaginated<AuditPolicyRow>(() =>
+      supabase
+        .from('deal_tracker').select(SELECT_FIELDS)
+        .in('ghl_stage', ACTIVE_STAGES_NEEDING_COMMISSION)
+        .order('effective_date', { ascending: true, nullsFirst: false })
+    )
+
+    // Issue-date carriers need no date gating (an issue date is always already
+    // in the past). Everyone else only qualifies once their effective date has
+    // passed — otherwise the carrier simply hasn't had time to process anything.
+    const today = new Date().toISOString().slice(0, 10)
+    const dueForCommission = candidates.filter((r) => {
+      const code = resolveCarrierCode(r)
+      if (code && ISSUE_DATE_CARRIER_CODES.has(code)) return true
+      return !!r.effective_date && ymdFromDate(r.effective_date) < today
+    })
+
+    const uncovered = new Set<string>()
+    const checkable = dueForCommission.filter((r) => {
+      const code = resolveCarrierCode(r)
+      if (code && MISSING_COMMISSION_UNCOVERED_CARRIER_CODES.has(code)) {
+        uncovered.add(code)
+        return false
+      }
+      return true
+    })
+
+    // A row counts as "has a commission" only when commission_tracker has a
+    // matching policy with a non-null advance_amount. commissionTracker.ts
+    // guarantees advance_amount is never negative — a chargeback routes to the
+    // separate charge_back_amount column instead — so this is already the
+    // correct "positive amount" check, no extra sign filter needed.
+    const agencyCarrierIds = [...new Set(checkable.map((r) => r.agency_carrier_id).filter((v): v is string => !!v))]
+    const covered = new Set<string>()
+    for (let i = 0; i < agencyCarrierIds.length; i += 100) {
+      const chunk = agencyCarrierIds.slice(i, i + 100)
+      const commRows = await fetchAllPaginated<{ policy_number: string; agency_carrier_id: string }>(() =>
+        supabase
+          .from('commission_tracker')
+          .select('policy_number, agency_carrier_id')
+          .in('agency_carrier_id', chunk)
+          .not('advance_amount', 'is', null)
+      )
+      commRows.forEach((c) => covered.add(`${c.agency_carrier_id}::${c.policy_number}`))
+    }
+
+    const rows = checkable.filter((r) => !covered.has(`${r.agency_carrier_id}::${r.policy_number}`))
+
     const grouped = await fetchNotes(rows)
     setMissingCommRows(rows)
+    setMissingCommUncoveredCarriers([...uncovered].sort())
     setNotesByPolicyId((prev) => ({ ...prev, ...grouped }))
   }, [fetchNotes])
 
@@ -1379,8 +1468,15 @@ export default function PolicyAuditPage() {
                 )}
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                Active or commission-pending stage but deal value = $0. Check the carrier portal and commission reports.
+                Active or commission-pending stage, past the point a commission should exist (effective date for most carriers;
+                immediately for MOH, Sentinel, Americo, and AMAM, which pay on issue date), with no matching commission on file.
               </p>
+              {missingCommUncoveredCarriers.length > 0 && (
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                  Not checked yet — {missingCommUncoveredCarriers.join(', ')} {missingCommUncoveredCarriers.length === 1 ? 'isn\'t' : 'aren\'t'} synced
+                  into the commission ledger this check uses, so those policies are excluded rather than shown as a false "no missing commissions."
+                </p>
+              )}
             </CardHeader>
             <CardContent className="p-0">
               <div className="overflow-x-auto">
@@ -1392,6 +1488,7 @@ export default function PolicyAuditPage() {
                       <SortHeader field="carrier" label="Carrier" {...sharedSortProps} />
                       <SortHeader field="sales_agent" label="Agent" {...sharedSortProps} />
                       <TableHead className={cn(adminThPlain, 'min-w-[160px]')}>Stage</TableHead>
+                      <SortHeader field="deal_creation_date" label="Issue Date" {...sharedSortProps} />
                       <SortHeader field="effective_date" label="Effective Date" {...sharedSortProps} />
                       <TableHead className={adminThPlain}>Days Since Eff.</TableHead>
                       <TableHead className={adminThPlain}>Effective Passed?</TableHead>
@@ -1400,8 +1497,8 @@ export default function PolicyAuditPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {isLoading('missing-commission') ? <TabLoadingRow cols={10} /> :
-                      paginatedRows.length === 0 ? <EmptyRow cols={10} message="No active policies with missing commission." /> :
+                    {isLoading('missing-commission') ? <TabLoadingRow cols={11} /> :
+                      paginatedRows.length === 0 ? <EmptyRow cols={11} message="No active policies with missing commission." /> :
                         paginatedRows.map((row) => {
                           const notes = notesByPolicyId[row.id] || []
                           const daysSince = daysBetween(row.effective_date)
@@ -1412,6 +1509,9 @@ export default function PolicyAuditPage() {
                               {renderPolicyInfo(row)}
                               <TableCell className={adminTdMuted}>
                                 <span className="block max-w-[160px] truncate text-xs" title={row.ghl_stage || ''}>{row.ghl_stage || '—'}</span>
+                              </TableCell>
+                              <TableCell className={cn(adminTdMuted, 'whitespace-nowrap text-xs')}>
+                                {row.deal_creation_date ? formatStoredDateForDisplay(row.deal_creation_date) : '—'}
                               </TableCell>
                               {renderEffDate(row)}
                               <TableCell className={adminTdMuted}>
