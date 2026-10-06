@@ -22,6 +22,7 @@ import {
     ClipboardCheck,
     AlertTriangle,
     ScrollText,
+    Sheet,
     Mail,
     ShieldOff,
     type LucideIcon,
@@ -220,6 +221,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Invoices Ledger"
           icon={ScrollText}
           active={navActive('/invoicing-ledger')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/exports"
+          label="Exports"
+          icon={Sheet}
+          active={navActive('/exports')}
           collapsed={collapsed}
         />
         <NavRow href="/upload-tree" label="Org tree upload" icon={Upload} active={navActive('/upload-tree')} collapsed={collapsed} />
