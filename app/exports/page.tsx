@@ -50,6 +50,11 @@ import {
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 250]
 
+/** Preview tinting, keyed on the header so re-ordering columns cannot break it. */
+const ADVANCE_COLUMNS = new Set<string>(['Advance', 'Advance 2', 'Total Advances'])
+const CHARGEBACK_COLUMNS = new Set<string>(['Chargeback', 'Chargeback 2', 'Total Chargebacks'])
+const TOTAL_COLUMNS = new Set<string>(['Total Advances', 'Total Chargebacks'])
+
 const DATE_BASIS_LABELS: Record<DateBasis, string> = {
   any: 'Any advance or chargeback',
   advance: 'Advance date',
@@ -91,6 +96,7 @@ export default function ExportsPage() {
   const [salesAgents, setSalesAgents] = useState<string[]>([])
   const [agencies, setAgencies] = useState<string[]>([])
   const [productCodes, setProductCodes] = useState<string[]>([])
+  const [policyStatuses, setPolicyStatuses] = useState<string[]>([])
   const [activity, setActivity] = useState<ActivityFilter>('all')
   const [search, setSearch] = useState('')
 
@@ -108,7 +114,7 @@ export default function ExportsPage() {
         ),
         fetchAll<DealInfo>(
           'deal_tracker',
-          'agency_carrier_id, policy_number, call_center, policy_type, sales_agent, name, carrier, updated_at'
+          'agency_carrier_id, policy_number, call_center, policy_type, policy_status, sales_agent, name, carrier, updated_at'
         ),
         supabase.from('carriers').select('name, code'),
         supabase.from('agency_carriers').select('id, agencies ( name )'),
@@ -159,6 +165,7 @@ export default function ExportsPage() {
       salesAgents: collect((r) => r.salesAgent),
       agencies: collect((r) => r.agency),
       productCodes: collect((r) => r.productCode),
+      policyStatuses: collect((r) => r.policyStatus),
     }
   }, [allRows])
 
@@ -172,10 +179,11 @@ export default function ExportsPage() {
       salesAgents,
       agencies,
       productCodes,
+      policyStatuses,
       activity,
       search,
     }),
-    [dateFrom, dateTo, dateBasis, carriers, callCenters, salesAgents, agencies, productCodes, activity, search]
+    [dateFrom, dateTo, dateBasis, carriers, callCenters, salesAgents, agencies, productCodes, policyStatuses, activity, search]
   )
 
   const rows = useMemo(() => buildAdvanceChargebackRows(txns, deals, filters, ctx), [txns, deals, filters, ctx])
@@ -206,6 +214,7 @@ export default function ExportsPage() {
     salesAgents.length,
     agencies.length,
     productCodes.length,
+    policyStatuses.length,
     activity !== 'all',
     search.trim(),
   ].filter(Boolean).length
@@ -219,6 +228,7 @@ export default function ExportsPage() {
     setSalesAgents([])
     setAgencies([])
     setProductCodes([])
+    setPolicyStatuses([])
     setActivity('all')
     setSearch('')
   }
@@ -272,7 +282,10 @@ export default function ExportsPage() {
       )}
 
       {/* ─── Filters ─── */}
-      <Card>
+      {/* Both cards get a stacking context from Card's backdrop-blur, so the
+          dropdown's own z-index cannot lift it over the preview card below;
+          the card itself has to be raised. */}
+      <Card className="relative z-20">
         <CardHeader className={adminCardHeaderBar}>
           <FilterBarHeader
             title="Report filters"
@@ -283,7 +296,7 @@ export default function ExportsPage() {
         </CardHeader>
         <CardContent className="space-y-4 pt-6">
           <div className={cn(adminFilterWell, 'space-y-4 p-4')}>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 [&>*]:min-w-0">
               <label className="space-y-1.5">
                 <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">From</span>
                 <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className={adminDateInput} />
@@ -334,26 +347,30 @@ export default function ExportsPage() {
             />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 [&>*]:min-w-0">
             <label className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Carrier</span>
-              <MultiSelectFilter label="carrier" options={options.carriers} selected={carriers} onChange={setCarriers} allLabel="All carriers" />
+              <MultiSelectFilter label="carrier" options={options.carriers} selected={carriers} onChange={setCarriers} allLabel="All carriers" className="w-full" triggerClassName="w-full min-w-0" />
             </label>
             <label className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Call center</span>
-              <MultiSelectFilter label="call center" options={options.callCenters} selected={callCenters} onChange={setCallCenters} allLabel="All call centers" />
+              <MultiSelectFilter label="call center" options={options.callCenters} selected={callCenters} onChange={setCallCenters} allLabel="All call centers" className="w-full" triggerClassName="w-full min-w-0" />
             </label>
             <label className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Sales agent</span>
-              <MultiSelectFilter label="agent" options={options.salesAgents} selected={salesAgents} onChange={setSalesAgents} allLabel="All agents" />
+              <MultiSelectFilter label="agent" options={options.salesAgents} selected={salesAgents} onChange={setSalesAgents} allLabel="All agents" className="w-full" triggerClassName="w-full min-w-0" />
             </label>
             <label className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Agency</span>
-              <MultiSelectFilter label="agency" options={options.agencies} selected={agencies} onChange={setAgencies} allLabel="All agencies" />
+              <MultiSelectFilter label="agency" options={options.agencies} selected={agencies} onChange={setAgencies} allLabel="All agencies" className="w-full" triggerClassName="w-full min-w-0" />
             </label>
             <label className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Product code</span>
-              <MultiSelectFilter label="product code" options={options.productCodes} selected={productCodes} onChange={setProductCodes} allLabel="All products" />
+              <MultiSelectFilter label="product code" options={options.productCodes} selected={productCodes} onChange={setProductCodes} allLabel="All products" className="w-full" triggerClassName="w-full min-w-0" />
+            </label>
+            <label className="space-y-1.5">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Policy status</span>
+              <MultiSelectFilter label="policy status" options={options.policyStatuses} selected={policyStatuses} onChange={setPolicyStatuses} allLabel="All statuses" className="w-full" triggerClassName="w-full min-w-0" />
             </label>
             <label className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Search</span>
@@ -387,6 +404,7 @@ export default function ExportsPage() {
               ...salesAgents.map((v) => ({ key: `agent:${v}`, label: `Agent: ${v}`, onRemove: () => setSalesAgents(salesAgents.filter((c) => c !== v)) })),
               ...agencies.map((v) => ({ key: `agency:${v}`, label: `Agency: ${v}`, onRemove: () => setAgencies(agencies.filter((c) => c !== v)) })),
               ...productCodes.map((v) => ({ key: `product:${v}`, label: `Product: ${v}`, onRemove: () => setProductCodes(productCodes.filter((c) => c !== v)) })),
+              ...policyStatuses.map((v) => ({ key: `status:${v}`, label: `Status: ${v}`, onRemove: () => setPolicyStatuses(policyStatuses.filter((c) => c !== v)) })),
               ...(search.trim() ? [{ key: 'search', label: `Search: ${search.trim()}`, onRemove: () => setSearch('') }] : []),
             ]}
           />
@@ -394,7 +412,7 @@ export default function ExportsPage() {
       </Card>
 
       {/* ─── Preview ─── */}
-      <Card>
+      <Card className="relative z-10">
         <CardHeader className={cn(adminCardHeaderBar, 'flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between')}>
           <CardTitle className={adminCardTitle}>Commission Advance &amp; Chargeback</CardTitle>
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted-foreground">
@@ -435,20 +453,25 @@ export default function ExportsPage() {
                       const values = rowToCsvValues(row)
                       return (
                         <TableRow key={row.key}>
-                          {values.map((value, index) => (
-                            <TableCell
-                              key={ADVANCE_CHARGEBACK_HEADERS[index]}
-                              className={cn(
-                                'whitespace-nowrap',
-                                index === 16 ? 'text-amber-600 dark:text-amber-400' : null,
-                                index === 8 || index === 14 ? 'text-red-600 dark:text-red-400' : null,
-                                index === 2 || index === 7 ? adminTdStrong : adminTdMuted
-                              )}
-                              title={index === 16 ? value : undefined}
-                            >
-                              {value || <span className="text-muted-foreground/40">—</span>}
-                            </TableCell>
-                          ))}
+                          {values.map((value, index) => {
+                            const header = ADVANCE_CHARGEBACK_HEADERS[index]
+                            return (
+                              <TableCell
+                                key={header}
+                                className={cn(
+                                  'whitespace-nowrap',
+                                  header === 'Data Check' ? 'text-amber-600 dark:text-amber-400' : null,
+                                  CHARGEBACK_COLUMNS.has(header) ? 'text-red-600 dark:text-red-400' : null,
+                                  ADVANCE_COLUMNS.has(header) ? 'text-emerald-600 dark:text-emerald-400' : null,
+                                  header === 'Customer Name' ? adminTdStrong : adminTdMuted,
+                                  TOTAL_COLUMNS.has(header) ? 'font-semibold' : null
+                                )}
+                                title={header === 'Data Check' ? value : undefined}
+                              >
+                                {value || <span className="text-muted-foreground/40">—</span>}
+                              </TableCell>
+                            )
+                          })}
                         </TableRow>
                       )
                     })}

@@ -12,7 +12,7 @@ import {
   normalizeAgentName,
   normalizeCommissionRate,
   normalizePersonName,
-  policyLast3,
+  policyLast4,
   rowToCsvValues,
   rowsToCsv,
   toTitleCase,
@@ -33,7 +33,7 @@ const CTX: ReportContext = {
     ['SENTINEL', 'Sentinel'],
   ]),
   carrierNames: ['Aetna', 'Aflac', 'AHL', 'AMAM (American Amicable)', 'Americo', 'CoreBridge', 'Mutual of Omaha', 'Sentinel'],
-  agencyByAcId: new Map([['ac-1', 'Unlimited']]),
+  agencyByAcId: new Map([['ac-1', 'Unlimited Insurance']]),
 }
 
 function txn(partial: Partial<CommissionTxn> & Pick<CommissionTxn, 'policy_number' | 'date'>): CommissionTxn {
@@ -46,13 +46,13 @@ function deal(partial: Partial<DealInfo> & Pick<DealInfo, 'policy_number'>): Dea
 
 // ───────────────────────────── value helpers ─────────────────────────────
 
-test('policyLast3 takes the trailing three characters', () => {
-  assert.equal(policyLast3('AMH6304968'), '968')
-  assert.equal(policyLast3('0114280680'), '680')
-  assert.equal(policyLast3('ACC7162949'), '949')
-  assert.equal(policyLast3('0112650500'), '500')
-  assert.equal(policyLast3('12'), '12')
-  assert.equal(policyLast3(''), '')
+test('policyLast4 takes the trailing four characters', () => {
+  assert.equal(policyLast4('AMH6304968'), '4968')
+  assert.equal(policyLast4('0114280680'), '0680')
+  assert.equal(policyLast4('ACC7162949'), '2949')
+  assert.equal(policyLast4('0112650500'), '0500')
+  assert.equal(policyLast4('123'), '123', 'a short number is returned whole, not padded')
+  assert.equal(policyLast4(''), '')
 })
 
 test('formatUsDate converts stored dates without shifting the calendar day', () => {
@@ -120,18 +120,21 @@ test('name, agent, product and call center fall back to the deal tracker row', (
       sales_agent: 'FLINCHUM, BRANDON',
       call_center: 'NextPoint BPO',
       policy_type: 'Whole Life Insurance',
+      policy_status: 'Charge Back',
     })],
     {},
     CTX
   )
   assert.deepEqual(rowToCsvValues(rows[0]), [
     '06/12/2026',
-    '949',
+    '8949',
     'Diana Mercedes Campo',
     'CoreBridge',
+    'Unlimited Insurance',
     'Brandon Flinchum',
     '',
     'Whole Life Insurance',
+    'Charge Back',
     '820.69',
     '-638.31',
     'NextPoint BPO',
@@ -141,6 +144,8 @@ test('name, agent, product and call center fall back to the deal tracker row', (
     '',
     '',
     '',
+    '820.69',
+    '-638.31',
     'Missing commission rate; Generic product - no plan code on file',
   ])
 })
@@ -200,12 +205,14 @@ test('displayCarrier resolves codes and strips the parenthetical long name', () 
 test('header row matches the finance spreadsheet column order exactly', () => {
   assert.deepEqual(ADVANCE_CHARGEBACK_HEADERS.slice(), [
     'Date',
-    'Policy Last 3 Digits',
+    'Policy Last 4 Digits',
     'Customer Name',
     'Carrier',
+    'Agency',
     'Sales Agent',
     'Commission Rate',
     'Product Code',
+    'Policy Status',
     'Advance',
     'Chargeback',
     'Call Center Name',
@@ -215,8 +222,17 @@ test('header row matches the finance spreadsheet column order exactly', () => {
     'Commission Rate 2',
     'Chargeback 2',
     'Chargeback 2 Date',
+    'Total Advances',
+    'Total Chargebacks',
     'Data Check',
   ])
+})
+
+test('every header has a value slot, so the CSV can never shift columns', () => {
+  const rows = FILTER_FIXTURE()
+  for (const row of rows) {
+    assert.equal(rowToCsvValues(row).length, ADVANCE_CHARGEBACK_HEADERS.length)
+  }
 })
 
 test('an advance plus a later chargeback reproduces the sample AHL row', () => {
@@ -245,7 +261,7 @@ test('an advance plus a later chargeback reproduces the sample AHL row', () => {
         charge_back_amount: -365.16,
       }),
     ],
-    [deal({ policy_number: 'AMH6304968', call_center: 'Win BPO', policy_type: 'Final Exp' })],
+    [deal({ policy_number: 'AMH6304968', call_center: 'Win BPO', policy_type: 'Final Exp', policy_status: 'Charge Back' })],
     {},
     CTX
   )
@@ -253,12 +269,14 @@ test('an advance plus a later chargeback reproduces the sample AHL row', () => {
   assert.equal(rows.length, 1)
   assert.deepEqual(rowToCsvValues(rows[0]), [
     '04/04/2026',
-    '968',
+    '4968',
     'Carla Jefferson',
     'AHL',
+    'Unlimited Insurance',
     'Brandon Flinchum',
     '120',
     'Final Exp',
+    'Charge Back',
     '547.74',
     '-365.16',
     'Win BPO',
@@ -268,6 +286,8 @@ test('an advance plus a later chargeback reproduces the sample AHL row', () => {
     '',
     '',
     '',
+    '547.74',
+    '-365.16',
     'Generic product - no plan code on file',
   ])
 })
@@ -296,19 +316,21 @@ test('two advances fill the Advance 2 columns and leave the chargeback columns e
         advance_amount: 391.5,
       }),
     ],
-    [deal({ policy_number: '0114280680', call_center: 'TIC Service', policy_type: 'CCI3NFL' })],
+    [deal({ policy_number: '0114280680', call_center: 'TIC Service', policy_type: 'CCI3NFL', policy_status: 'Issued Paid' })],
     {},
     CTX
   )
 
   assert.deepEqual(rowToCsvValues(rows[0]), [
     '07/31/2026',
-    '680',
+    '0680',
     'Berenise C Gomez',
     'AMAM',
+    'Unlimited Insurance',
     'Daniel Vargas',
     '145',
     'CCI3NFL',
+    'Issued Paid',
     '43.50',
     '',
     'TIC Service',
@@ -317,6 +339,8 @@ test('two advances fill the Advance 2 columns and leave the chargeback columns e
     '391.50',
     '145',
     '',
+    '',
+    '435.00',
     '',
     '',
   ])
@@ -343,12 +367,14 @@ test('a repeated chargeback lands in the Chargeback 2 columns', () => {
     CTX
   )
 
-  const values = rowToCsvValues(rows[0])
-  assert.equal(values[8], '-646.40', 'first chargeback')
-  assert.equal(values[10], '08/12/2026')
-  assert.equal(values[14], '-646.40', 'second chargeback')
-  assert.equal(values[15], '08/15/2026')
-  assert.equal(values[16], 'Generic product - no plan code on file')
+  const at = (header: string) => rowToCsvValues(rows[0])[ADVANCE_CHARGEBACK_HEADERS.indexOf(header as never)]
+  assert.equal(at('Chargeback'), '-646.40', 'first chargeback')
+  assert.equal(at('Chargeback Date'), '08/12/2026')
+  assert.equal(at('Chargeback 2'), '-646.40', 'second chargeback')
+  assert.equal(at('Chargeback 2 Date'), '08/15/2026')
+  assert.equal(at('Total Chargebacks'), '-1292.80', 'both chargebacks are summed')
+  assert.equal(at('Total Advances'), '969.60')
+  assert.equal(at('Data Check'), 'Generic product - no plan code on file')
 })
 
 test('a missing commission rate is reported before the product note', () => {
@@ -415,6 +441,83 @@ test('a third advance or chargeback is flagged rather than dropped silently', ()
   assert.equal(rows[0].dataCheck, '1 more advance not shown; 2 more chargebacks not shown')
   assert.equal(rows[0].advanceTotal, 600)
   assert.equal(rows[0].chargebackTotal, -100)
+})
+
+test('the totals cover every transaction, including ones past the two columns', () => {
+  const rows = buildAdvanceChargebackRows(
+    [
+      txn({ id: '1', policy_number: 'T1', carrier: 'Aetna', date: '2026-01-01', commission_rate: 120, advance_amount: 100.1 }),
+      txn({ id: '2', policy_number: 'T1', carrier: 'Aetna', date: '2026-02-01', commission_rate: 120, advance_amount: 200.2 }),
+      txn({ id: '3', policy_number: 'T1', carrier: 'Aetna', date: '2026-03-01', commission_rate: 120, advance_amount: 300.3 }),
+      txn({ id: '4', policy_number: 'T1', carrier: 'Aetna', date: '2026-04-01', charge_back_amount: -50.05 }),
+      txn({ id: '5', policy_number: 'T1', carrier: 'Aetna', date: '2026-05-01', charge_back_amount: -25.25 }),
+      txn({ id: '6', policy_number: 'T1', carrier: 'Aetna', date: '2026-06-01', charge_back_amount: -10.1 }),
+    ],
+    [deal({ policy_number: 'T1', call_center: 'Plexi', policy_type: 'CCI3N' })],
+    {},
+    CTX
+  )
+  // Columns show 100.10 + 200.20 and -50.05 + -25.25; the totals show all six.
+  assert.equal(rows[0].advance, '100.10')
+  assert.equal(rows[0].advance2, '200.20')
+  assert.equal(rows[0].totalAdvances, '600.60')
+  assert.equal(rows[0].totalChargebacks, '-85.40')
+})
+
+test('a missing side leaves its total blank rather than printing 0.00', () => {
+  const rows = buildAdvanceChargebackRows(
+    [txn({ id: '1', policy_number: 'T2', carrier: 'Aetna', date: '2026-01-01', commission_rate: 120, advance_amount: 42 })],
+    [deal({ policy_number: 'T2', call_center: 'Plexi', policy_type: 'CCI3N' })],
+    {},
+    CTX
+  )
+  assert.equal(rows[0].totalAdvances, '42.00')
+  assert.equal(rows[0].totalChargebacks, '')
+})
+
+test('agency comes from the agency_carrier the transaction was booked under', () => {
+  const ctx = {
+    ...CTX,
+    agencyByAcId: new Map([
+      ['ac-1', 'Unlimited Insurance'],
+      ['ac-2', 'Safe Harbor Insurance'],
+      ['ac-3', 'Heritage Insurance'],
+    ]),
+  }
+  const rows = buildAdvanceChargebackRows(
+    [
+      { agency_carrier_id: 'ac-2', id: '1', policy_number: 'G1', carrier: 'Aetna', date: '2026-01-01', commission_rate: 120, advance_amount: 10 },
+      { agency_carrier_id: 'ac-3', id: '2', policy_number: 'G2', carrier: 'Aetna', date: '2026-01-02', commission_rate: 120, advance_amount: 20 },
+      { agency_carrier_id: 'ac-9', id: '3', policy_number: 'G3', carrier: 'Aetna', date: '2026-01-03', commission_rate: 120, advance_amount: 30 },
+    ],
+    [],
+    {},
+    ctx
+  )
+  const byPolicy = new Map(rows.map((r) => [r.policyNumber, r.agency]))
+  assert.equal(byPolicy.get('G1'), 'Safe Harbor Insurance')
+  assert.equal(byPolicy.get('G2'), 'Heritage Insurance')
+  assert.equal(byPolicy.get('G3'), '', 'an unmapped agency_carrier leaves the column empty, it never guesses')
+})
+
+test('policy status is carried through and can be filtered on', () => {
+  const build = (filters: Parameters<typeof buildAdvanceChargebackRows>[2]) =>
+    buildAdvanceChargebackRows(
+      [
+        txn({ id: '1', policy_number: 'S1', carrier: 'Aetna', date: '2026-01-01', commission_rate: 120, advance_amount: 10 }),
+        txn({ id: '2', policy_number: 'S2', carrier: 'Aetna', date: '2026-01-02', commission_rate: 120, advance_amount: 20 }),
+      ],
+      [
+        deal({ policy_number: 'S1', call_center: 'Plexi', policy_type: 'CCI3N', policy_status: 'Issued Paid' }),
+        deal({ policy_number: 'S2', call_center: 'Plexi', policy_type: 'CCI3N', policy_status: 'Charge Back' }),
+      ],
+      filters,
+      CTX
+    )
+
+  assert.deepEqual(build({}).map((r) => r.policyStatus).sort(), ['Charge Back', 'Issued Paid'])
+  assert.deepEqual(build({ policyStatuses: ['Charge Back'] }).map((r) => r.policyNumber), ['S2'])
+  assert.equal(build({ policyStatuses: ['Declined'] }).length, 0)
 })
 
 test('duplicate statement lines for the same day and amount are counted once', () => {
@@ -512,7 +615,7 @@ test('carrier, call centre, agent and product filters narrow the export', () => 
   assert.deepEqual(build({ callCenters: ['Everest BPO'] }).map((r) => r.policyNumber), ['A1'])
   assert.deepEqual(build({ salesAgents: ['Lydia Sutton'] }).map((r) => r.policyNumber), ['B2'])
   assert.deepEqual(build({ productCodes: ['CCI3N'] }).map((r) => r.policyNumber), ['B2'])
-  assert.deepEqual(build({ agencies: ['Unlimited'] }).map((r) => r.policyNumber).sort(), ['A1', 'B2'])
+  assert.deepEqual(build({ agencies: ['Unlimited Insurance'] }).map((r) => r.policyNumber).sort(), ['A1', 'B2'])
   assert.deepEqual(build({ agencies: ['Someone Else'] }), [])
 })
 
