@@ -35,6 +35,7 @@ export type DealInfo = {
   policy_number: string
   call_center?: string | null
   policy_type?: string | null
+  policy_status?: string | null
   sales_agent?: string | null
   name?: string | null
   carrier?: string | null
@@ -49,12 +50,13 @@ export type AdvanceChargebackRow = {
   agency: string
   /** First advance date (falls back to the earliest transaction), MM/DD/YYYY. */
   date: string
-  policyLast3: string
+  policyLast4: string
   customerName: string
   carrier: string
   salesAgent: string
   commissionRate: string
   productCode: string
+  policyStatus: string
   advance: string
   chargeback: string
   callCenter: string
@@ -64,6 +66,12 @@ export type AdvanceChargebackRow = {
   commissionRate2: string
   chargeback2: string
   chargeback2Date: string
+  /**
+   * Every advance / chargeback on the policy, not just the two that fit in the
+   * columns above, so the row still balances when a policy has three or more.
+   */
+  totalAdvances: string
+  totalChargebacks: string
   dataCheck: string
   /** Not exported; used for sorting and the preview totals. */
   sortDate: string
@@ -85,6 +93,7 @@ export type ReportFilters = {
   salesAgents?: string[]
   agencies?: string[]
   productCodes?: string[]
+  policyStatuses?: string[]
   activity?: ActivityFilter
   /** Policy number or customer name; a comma-separated list matches policy numbers exactly. */
   search?: string
@@ -100,12 +109,14 @@ export type ReportContext = {
 
 export const ADVANCE_CHARGEBACK_HEADERS = [
   'Date',
-  'Policy Last 3 Digits',
+  'Policy Last 4 Digits',
   'Customer Name',
   'Carrier',
+  'Agency',
   'Sales Agent',
   'Commission Rate',
   'Product Code',
+  'Policy Status',
   'Advance',
   'Chargeback',
   'Call Center Name',
@@ -115,6 +126,8 @@ export const ADVANCE_CHARGEBACK_HEADERS = [
   'Commission Rate 2',
   'Chargeback 2',
   'Chargeback 2 Date',
+  'Total Advances',
+  'Total Chargebacks',
   'Data Check',
 ] as const
 
@@ -210,9 +223,13 @@ export function formatRate(value: number | null): string {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)))
 }
 
-export function policyLast3(policyNumber: string): string {
+/**
+ * Enough of the policy number to match a row against a carrier commission
+ * statement by eye, without putting the whole number in a shared spreadsheet.
+ */
+export function policyLast4(policyNumber: string): string {
   const raw = String(policyNumber ?? '').trim()
-  return raw.length <= 3 ? raw : raw.slice(-3)
+  return raw.length <= 4 ? raw : raw.slice(-4)
 }
 
 function titleCaseToken(token: string): string {
@@ -431,6 +448,7 @@ export function buildAdvanceChargebackRows(
     const tidy = (value: unknown) => String(value ?? '').trim().replace(/\s+/g, ' ')
     const productCode = tidy(deal?.policy_type)
     const callCenter = tidy(deal?.call_center)
+    const policyStatus = tidy(deal?.policy_status)
     const agency = ctx.agencyByAcId?.get(first.agency_carrier_id) ?? ''
 
     const advance1 = advances[0] ?? null
@@ -441,18 +459,22 @@ export function buildAdvanceChargebackRows(
     // "Date" is the first advance; a chargeback-only policy anchors on its first chargeback.
     const anchorDate = advance1?.date || chargeback1?.date || ''
 
+    const advanceTotal = advances.reduce((sum, a) => sum + a.amount, 0)
+    const chargebackTotal = chargebacks.reduce((sum, c) => sum + c.amount, 0)
+
     rows.push({
       key,
       agencyCarrierId: first.agency_carrier_id,
       policyNumber,
       agency,
       date: formatUsDate(anchorDate),
-      policyLast3: policyLast3(policyNumber),
+      policyLast4: policyLast4(policyNumber),
       customerName,
       carrier,
       salesAgent,
       commissionRate: formatRate(advance1?.rate ?? null),
       productCode,
+      policyStatus,
       advance: formatAmount(advance1?.amount ?? null),
       chargeback: formatAmount(chargeback1?.amount ?? null),
       callCenter,
@@ -462,6 +484,10 @@ export function buildAdvanceChargebackRows(
       commissionRate2: formatRate(advance2?.rate ?? null),
       chargeback2: formatAmount(chargeback2?.amount ?? null),
       chargeback2Date: formatUsDate(chargeback2?.date ?? ''),
+      // Blank rather than 0.00 when there is nothing of that kind, so the totals
+      // read the same way as the single-transaction columns beside them.
+      totalAdvances: advances.length ? formatAmount(Math.round(advanceTotal * 100) / 100) : '',
+      totalChargebacks: chargebacks.length ? formatAmount(Math.round(chargebackTotal * 100) / 100) : '',
       dataCheck: buildDataCheck({
         dealFound: Boolean(deal),
         productCode,
@@ -471,8 +497,8 @@ export function buildAdvanceChargebackRows(
         extraChargebacks: Math.max(0, chargebacks.length - 2),
       }),
       sortDate: anchorDate,
-      advanceTotal: advances.reduce((sum, a) => sum + a.amount, 0),
-      chargebackTotal: chargebacks.reduce((sum, c) => sum + c.amount, 0),
+      advanceTotal,
+      chargebackTotal,
     })
   }
 
@@ -496,6 +522,7 @@ export function applyFilters(rows: AdvanceChargebackRow[], filters: ReportFilter
     salesAgents = [],
     agencies = [],
     productCodes = [],
+    policyStatuses = [],
     activity = 'all',
     search = '',
   } = filters
@@ -528,6 +555,7 @@ export function applyFilters(rows: AdvanceChargebackRow[], filters: ReportFilter
     if (salesAgents.length && !salesAgents.includes(row.salesAgent)) return false
     if (agencies.length && !agencies.includes(row.agency)) return false
     if (productCodes.length && !productCodes.includes(row.productCode)) return false
+    if (policyStatuses.length && !policyStatuses.includes(row.policyStatus)) return false
 
     const hasAdvance = Boolean(row.advance)
     const hasChargeback = Boolean(row.chargeback)
@@ -552,12 +580,14 @@ export function applyFilters(rows: AdvanceChargebackRow[], filters: ReportFilter
 export function rowToCsvValues(row: AdvanceChargebackRow): string[] {
   return [
     row.date,
-    row.policyLast3,
+    row.policyLast4,
     row.customerName,
     row.carrier,
+    row.agency,
     row.salesAgent,
     row.commissionRate,
     row.productCode,
+    row.policyStatus,
     row.advance,
     row.chargeback,
     row.callCenter,
@@ -567,6 +597,8 @@ export function rowToCsvValues(row: AdvanceChargebackRow): string[] {
     row.commissionRate2,
     row.chargeback2,
     row.chargeback2Date,
+    row.totalAdvances,
+    row.totalChargebacks,
     row.dataCheck,
   ]
 }
