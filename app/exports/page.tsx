@@ -373,6 +373,10 @@ export default function ExportsPage() {
               <MultiSelectFilter label="policy status" options={options.policyStatuses} selected={policyStatuses} onChange={setPolicyStatuses} allLabel="All statuses" className="w-full" triggerClassName="w-full min-w-0" />
             </label>
             <label className="space-y-1.5">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Policy status</span>
+              <MultiSelectFilter label="policy status" options={options.policyStatuses} selected={policyStatuses} onChange={setPolicyStatuses} allLabel="All statuses" />
+            </label>
+            <label className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Search</span>
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
