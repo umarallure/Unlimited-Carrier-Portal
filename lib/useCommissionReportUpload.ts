@@ -42,6 +42,41 @@ async function fetchDealTrackerByPolicies(
   return map
 }
 
+/** Prefer the most complete name available for Transamerica policies. */
+async function fetchTransamericaPolicyNames(
+  agencyCarrierId: string,
+  policyNumbers: string[],
+): Promise<Map<string, string>> {
+  const normalized = Array.from(new Set(policyNumbers.map((p) => (p || '').trim()).filter(Boolean)))
+  if (normalized.length === 0) return new Map()
+  const { data, error } = await supabase
+    .from('transamerica_policies')
+    .select('policy_number, insured_name, owner_name')
+    .eq('agency_carrier_id', agencyCarrierId)
+    .in('policy_number', normalized)
+  if (error) {
+    console.warn('[Commission Report] Transamerica policy-name lookup failed:', error.message)
+    return new Map()
+  }
+  const nameParts = (value: unknown) => String(value ?? '').trim().split(/\s+/).filter(Boolean).length
+  const names = new Map<string, string>()
+  for (const row of data || []) {
+    const candidates = [row.insured_name, row.owner_name]
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean)
+      .sort((a, b) => nameParts(b) - nameParts(a))
+    if (row.policy_number && candidates[0]) names.set(String(row.policy_number), candidates[0])
+  }
+  return names
+}
+
+function fullerName(...values: unknown[]): string {
+  return values
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean)
+    .sort((a, b) => b.split(/\s+/).filter(Boolean).length - a.split(/\s+/).filter(Boolean).length)[0] ?? ''
+}
+
 export type CommissionDisplayRow = {
   id?: string
   name: string
@@ -317,10 +352,26 @@ function looksLikeNumberOnly(val: unknown): boolean {
   return /^\d+$/.test(s)
 }
 
+function transamericaDisplayAmount(row: Record<string, any>): unknown {
+  const amount = row.comm_amount
+  const earnedAdvance = row.earned_adv_amount
+  const parsedAmount = amount != null && amount !== ''
+    ? Number.parseFloat(String(amount).replace(/,/g, ''))
+    : NaN
+  const parsedEarnedAdvance = earnedAdvance != null && earnedAdvance !== ''
+    ? Number.parseFloat(String(earnedAdvance).replace(/,/g, ''))
+    : NaN
+  if ((!Number.isFinite(parsedAmount) || parsedAmount === 0) && Number.isFinite(parsedEarnedAdvance) && parsedEarnedAdvance !== 0) {
+    return earnedAdvance
+  }
+  return amount ?? earnedAdvance
+}
+
 function dbRowToDisplay(
   row: Record<string, any>,
   carrierCode: string,
-  dealTrackerMap?: Map<string, DealTrackerRow>
+  dealTrackerMap?: Map<string, DealTrackerRow>,
+  transamericaNameMap?: Map<string, string>,
 ): CommissionDisplayRow {
   // For Corebridge and Americo, we intentionally do NOT take the name from the
   // commission file (Americo's name_desc is just an abbreviated last name, e.g.
@@ -346,6 +397,9 @@ function dbRowToDisplay(
     ''
   const policyNumber = String(row.policy_number ?? '')
   const dt = dealTrackerMap?.get(policyNumber)
+  if (carrierCode === 'TRANSAMERICA') {
+    name = fullerName(name, dt?.name, transamericaNameMap?.get(policyNumber))
+  }
   if (dt) {
     if (!name?.toString().trim()) name = dt.name ?? ''
     const useDtSalesAgent =
@@ -378,7 +432,7 @@ function dbRowToDisplay(
       : carrierCode === 'COREBRIDGE'
         ? (row.commission_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
         : carrierCode === 'TRANSAMERICA'
-          ? (row.comm_amount ?? row.commissionamount ?? row.advance ?? row['Advance'])
+          ? (transamericaDisplayAmount(row) ?? row.commissionamount ?? row.advance ?? row['Advance'])
           : carrierCode === 'AMERICO'
             ? row.amt
             : (row.commissionamount ?? row.advance ?? row.comm_amt ?? row.adv_comm ?? row['Advance'])
@@ -809,8 +863,11 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
             .map((r) => String((r as Record<string, unknown>).policy_number ?? '').trim())
             .filter(Boolean)
           const dealTrackerMap = await fetchDealTrackerByPolicies(agencyCarrierId, policyNumbers)
+          const transamericaNameMap = carrierCode === 'TRANSAMERICA'
+            ? await fetchTransamericaPolicyNames(agencyCarrierId, policyNumbers)
+            : undefined
           const rows = pending.map((r) =>
-            dbRowToDisplay(r as Record<string, any>, carrierCode, dealTrackerMap)
+            dbRowToDisplay(r as Record<string, any>, carrierCode, dealTrackerMap, transamericaNameMap)
           )
           setCommissionRows(mergeCommissionRowsByPolicy(rows))
           return
@@ -831,8 +888,11 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         const commissionData = data || []
         const policyNumbers = commissionData.map((r: Record<string, any>) => r.policy_number).filter(Boolean)
         const dealTrackerMap = await fetchDealTrackerByPolicies(agencyCarrierId, policyNumbers)
+        const transamericaNameMap = carrierCode === 'TRANSAMERICA'
+          ? await fetchTransamericaPolicyNames(agencyCarrierId, policyNumbers)
+          : undefined
         const rows = commissionData.map((r: Record<string, any>) =>
-          dbRowToDisplay(r, carrierCode, dealTrackerMap)
+          dbRowToDisplay(r, carrierCode, dealTrackerMap, transamericaNameMap)
         )
         setCommissionRows(mergeCommissionRowsByPolicy(rows))
       } finally {
@@ -895,11 +955,30 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
             .insert(chunk)
           if (insErr) throw insErr
         } else {
-          const upsertOptions = { onConflict: 'id', ignoreDuplicates: false }
           const { error } = await supabase
             .from(table)
-            .upsert(chunk, upsertOptions)
-          if (error) throw error
+            .upsert(chunk, { onConflict: 'id', ignoreDuplicates: false })
+          if (error) {
+            const errorText = String(error.message || error.details || '').toLowerCase()
+            const missingConflictConstraint = errorText.includes(
+              'no unique or exclusion constraint matching the on conflict specification',
+            )
+            if (!missingConflictConstraint) throw error
+
+            // Some deployed carrier tables do not have the expected unique constraint on id.
+            // Replace only this upload's rows, matching the deferred-save path above.
+            const { error: delErr } = await supabase
+              .from(table)
+              .delete()
+              .eq('agency_carrier_id', agencyCarrierId)
+              .eq('file_id', fileId)
+            if (delErr) throw delErr
+
+            const { error: insErr } = await supabase
+              .from(table)
+              .insert(chunk)
+            if (insErr) throw insErr
+          }
         }
         await syncCommissionTrackerForAgencyCarrier(agencyCarrierId, carrierCode, {
           fileId,
@@ -912,8 +991,16 @@ export function useCommissionReportUpload(options?: { onAfterSave?: () => void |
         setContext(null)
         await options?.onAfterSave?.()
       } catch (e) {
-        console.error('[Commission Report] Save error:', e)
-        throw e
+        const err = e as { message?: unknown; details?: unknown; hint?: unknown; code?: unknown }
+        const message = [err?.message, err?.details, err?.hint]
+          .filter((part) => typeof part === 'string' && part.trim())
+          .join(' ')
+        const code = typeof err?.code === 'string' ? ` (code ${err.code})` : ''
+        const summary = message || (e instanceof Error ? e.message : String(e)) || 'Unknown save error'
+        // Keep the diagnostic as a string: Next's dev console overlay serializes plain
+        // PostgREST error objects as `{}`, hiding the message/details needed to diagnose it.
+        console.error(`[Commission Report] Save error: ${summary}${code}`)
+        throw e instanceof Error ? e : new Error(message || 'Unknown commission save error')
       } finally {
         setSaving(false)
       }

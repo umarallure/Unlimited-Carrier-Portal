@@ -206,6 +206,22 @@ function buildCommissionRowsFromSource(
       row['comm_pct'] ?? // MOH / Transamerica
       null
 
+    const transamericaAmount = sourceTable === 'transamerica_commissions'
+      ? (() => {
+          const primary = row['comm_amount']
+          const earned = row['earned_adv_amount']
+          const primaryNumber = primary != null && primary !== ''
+            ? parseFloat(String(primary).replace(/,/g, ''))
+            : NaN
+          const earnedNumber = earned != null && earned !== ''
+            ? parseFloat(String(earned).replace(/,/g, ''))
+            : NaN
+          return (!Number.isFinite(primaryNumber) || primaryNumber === 0) && Number.isFinite(earnedNumber) && earnedNumber !== 0
+            ? earned
+            : primary ?? earned
+        })()
+      : null
+
     let advance =
       row['Advance'] ??
       row['advance'] ??
@@ -216,7 +232,7 @@ function buildCommissionRowsFromSource(
         sourceTable === 'ahl_commissions'
       ) ? row['commissionamount'] : null) ??
       (sourceTable === 'moh_commissions' ? row['comm_amt'] : null) ??
-      (sourceTable === 'transamerica_commissions' ? row['comm_amount'] : null) ??
+      transamericaAmount ??
       null
 
     let chargeBack: number | null = null
@@ -305,12 +321,17 @@ export async function syncCommissionTrackerForAgencyCarrier(
     .single()
 
   if (acError || !acRow) {
-    console.warn(
-      '[CommissionTracker] Failed to load agency_carrier for',
-      agencyCarrierId,
-      acError?.message,
+    if (!isTransamerica) {
+      console.warn(
+        '[CommissionTracker] Failed to load agency_carrier for',
+        agencyCarrierId,
+        acError?.message,
+      )
+      return
+    }
+    throw new Error(
+      `[CommissionTracker] Failed to load agency_carrier ${agencyCarrierId}: ${acError?.message || 'record not found'}`,
     )
-    return
   }
 
   // Supabase returns related rows as an array; pick the first carrier if present.
@@ -651,16 +672,16 @@ export async function syncCommissionTrackerForAgencyCarrier(
   const { data: rawRows, error: rawError } = await sourceQuery
 
   if (rawError || !rawRows || rawRows.length === 0) {
-    if (rawError) {
-      console.warn(
-        '[CommissionTracker] Failed to fetch',
-        sourceTable,
-        'rows for',
-        agencyCarrierId,
-        rawError.message,
-      )
+    if (!isTransamerica) {
+      if (rawError) {
+        console.warn('[CommissionTracker] Failed to fetch', sourceTable, 'rows for', agencyCarrierId, rawError.message)
+      }
+      return
     }
-    return
+    if (rawError) {
+      throw new Error(`[CommissionTracker] Failed to fetch ${sourceTable} rows: ${rawError.message}`)
+    }
+    throw new Error(`[CommissionTracker] No ${sourceTable} rows found for file ${options?.fileId || '(unspecified)'}`)
   }
 
   // Build one normalized commission_tracker row per *source* commission
@@ -674,7 +695,12 @@ export async function syncCommissionTrackerForAgencyCarrier(
     carrierName,
   )
 
-  if (!rows.length) return
+  if (!rows.length) {
+    if (!isTransamerica) return
+    throw new Error(
+      `[CommissionTracker] No reportable rows could be built from ${sourceTable} for file ${options?.fileId || '(unspecified)'}. Check policy numbers and statement dates.`,
+    )
+  }
 
   if (!options?.fileId) {
     console.warn('[CommissionTracker] Skipping sync for', sourceTable, ': fileId is required')
@@ -687,11 +713,14 @@ export async function syncCommissionTrackerForAgencyCarrier(
     options.fileId,
   )
   if (wipeError) {
-    console.error(
-      '[CommissionTracker] Failed to wipe existing commission_tracker rows before insert:',
-      wipeError.message,
-    )
-    return
+    if (!isTransamerica) {
+      console.error(
+        '[CommissionTracker] Failed to wipe existing commission_tracker rows before insert:',
+        wipeError.message,
+      )
+      return
+    }
+    throw new Error(`[CommissionTracker] Failed to replace existing rows for ${sourceTable}: ${wipeError.message}`)
   }
 
   const BATCH_SIZE = 500
@@ -699,11 +728,11 @@ export async function syncCommissionTrackerForAgencyCarrier(
     const batch = rows.slice(i, i + BATCH_SIZE)
     const { error } = await supabase.from('commission_tracker').insert(batch)
     if (error) {
-      console.error(
-        '[CommissionTracker] Failed to insert commission_tracker batch:',
-        error.message,
-      )
-      break
+      if (!isTransamerica) {
+        console.error('[CommissionTracker] Failed to insert commission_tracker batch:', error.message)
+        break
+      }
+      throw new Error(`[CommissionTracker] Failed to insert commission_tracker batch: ${error.message}`)
     }
   }
 }
