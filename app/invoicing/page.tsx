@@ -751,6 +751,29 @@ export default function InvoicingPage() {
     }
   }
 
+  /**
+   * How far the printed invoice total has drifted from what the database ledger
+   * would record for the same center.
+   *
+   * These have always been two separate calculations: the invoice prints
+   * leadValue from buildBpoInvoiceLines, while invoicing_call_center_ledger is
+   * built from buildInvoiceDraft's ccNet, with per-line edits and exclusions
+   * never reaching it. They disagree whenever a synthetic line exists or a line
+   * is edited. Harmless while escrow is only a preview, but escrow cannot be
+   * POSTED until they agree, or the amount held and the amount recorded as
+   * payable will differ and the balance will drift for good. Surfacing it now
+   * makes that visible rather than archaeological.
+   */
+  const basisDriftForGroup = (callCenter: string, subtotal: number): number | null => {
+    if (!visibleDraft) return null
+    const draftGroup = visibleDraft.groups.find(
+      (g) => normalizeCallCenterName(g.callCenter) === normalizeCallCenterName(callCenter),
+    )
+    if (!draftGroup) return null
+    const drift = round2(subtotal - draftGroup.ccInvoiceTotal)
+    return Math.abs(drift) < 0.01 ? null : drift
+  }
+
   /** The escrow block is only shown when the split accounts for every cent. */
   const escrowPreviewForGroup = (callCenter: string): EscrowComputation | null => {
     const result = escrowByCenter.get(callCenter)
@@ -2475,6 +2498,18 @@ export default function InvoicingPage() {
                     ${formatMoney(balanceDueForBpo(group.callCenter, group.subtotal))}
                   </span>
                 </div>
+
+                {(() => {
+                  const drift = basisDriftForGroup(group.callCenter, group.subtotal)
+                  if (drift == null) return null
+                  return (
+                    <p className="mt-1 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                      This invoice prints ${formatMoney(Math.abs(drift))} {drift > 0 ? 'more' : 'less'} than the
+                      figure the paid-batch ledger would record for this center. Pre-existing: the two are built
+                      from different calculations. It must be reconciled before escrow is posted.
+                    </p>
+                  )
+                })()}
 
                 {/* Escrow preview. Deliberately BELOW balance due and visually separate:
                     none of this is withheld yet and the center is still paid in full. */}
