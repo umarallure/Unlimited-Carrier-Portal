@@ -32,6 +32,15 @@ import {
   type UnpaidPreviousSlabCallCenter,
 } from '@/lib/invoicing'
 import { policyLookupCandidates } from '@/lib/leadNotesSync'
+import { computeEscrow, type EscrowComputation, type EscrowInputLine } from '@/lib/bpoEscrow'
+import {
+  DISABLED_ESCROW_CONTEXT,
+  accountStateForCallCenter,
+  fetchEscrowContext,
+  isUnrecognisedCallCenter,
+  settingsForCallCenter,
+  type EscrowContext,
+} from '@/lib/bpoEscrowAccounts'
 import { cn } from '@/lib/utils'
 
 function formatMoney(value: number): string {
@@ -145,6 +154,10 @@ export default function InvoicingPage() {
   const [previousPeriodsPaidCenters, setPreviousPeriodsPaidCenters] = useState<string[]>([])
   const [checkingUnpaidPreviousSlab, setCheckingUnpaidPreviousSlab] = useState(false)
   const [unpaidPreviousSlabCheckError, setUnpaidPreviousSlabCheckError] = useState<string | null>(null)
+  // Escrow is a preview in this phase: it never changes balance due and nothing
+  // is posted. Loaded on mount rather than inside generateInvoice, so a settings
+  // read can never block an invoice from being generated.
+  const [escrowContext, setEscrowContext] = useState<EscrowContext>(DISABLED_ESCROW_CONTEXT)
   const [auditLine, setAuditLine] = useState<BpoInvoiceLine | null>(null)
   const [mergePickFrom, setMergePickFrom] = useState('')
   const [mergePickTo, setMergePickTo] = useState('')
@@ -301,6 +314,19 @@ export default function InvoicingPage() {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      // Never throws: a missing table or an RLS problem comes back as a disabled
+      // context, so invoicing carries on exactly as it did before escrow existed.
+      const context = await fetchEscrowContext()
+      if (!cancelled) setEscrowContext(context)
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const balanceDueForBpo = (callCenter: string, subtotal: number): number => {
@@ -677,6 +703,63 @@ export default function InvoicingPage() {
           .filter((group) => group.salesLines.length > 0 || group.chargebackLines.length > 0),
       }
     : null
+
+  /**
+   * The escrow split per center, derived from the lines the center actually sees
+   * (post-exclusion, post-edit) rather than from the policy-level draft — the
+   * catch-up lines escrow acts on exist only in the BPO line set.
+   *
+   * PREVIEW ONLY. Nothing here reaches balance due, Mark Paid, the Excel export
+   * or invoicing_call_center_ledger.
+   */
+  const escrowByCenter = new Map<string, EscrowComputation>()
+  if (visibleBpoDetail) {
+    for (const group of visibleBpoDetail.groups) {
+      const lines: EscrowInputLine[] = [
+        ...group.salesLines.map((line) => ({
+          id: line.id,
+          leadValue: line.leadValue,
+          kind: 'sale' as const,
+          isRepay: Boolean(line.isRepay),
+          commissionDate: line.commissionDate ?? null,
+          amountBasis: line.amountBasis ?? null,
+        })),
+        ...group.chargebackLines.map((line) => ({
+          id: line.id,
+          leadValue: line.leadValue,
+          kind: 'chargeback' as const,
+          isRepay: Boolean(line.isRepay),
+          commissionDate: line.commissionDate ?? null,
+          amountBasis: line.amountBasis ?? null,
+        })),
+      ]
+      escrowByCenter.set(
+        group.callCenter,
+        computeEscrow({
+          lines,
+          cycleStart: visibleBpoDetail.startDate,
+          cycleEnd: visibleBpoDetail.endDate,
+          settings: settingsForCallCenter(escrowContext, group.callCenter),
+          account: accountStateForCallCenter(escrowContext, group.callCenter),
+        }),
+      )
+    }
+  }
+
+  /** The escrow block is only shown when the split accounts for every cent. */
+  const escrowPreviewForGroup = (callCenter: string): EscrowComputation | null => {
+    const result = escrowByCenter.get(callCenter)
+    if (!result || result.status !== 'applied' || !result.reconciles) return null
+    return result
+  }
+
+  /** Lines that left the payout, so the Escrow Deals table can show them. */
+  const escrowDealLinesForGroup = (group: BpoInvoiceDetailResult['groups'][number]): BpoInvoiceLine[] => {
+    const result = escrowByCenter.get(group.callCenter)
+    if (!result || result.status !== 'applied') return []
+    const ids = new Set(result.lines.filter((l) => l.klass === 'escrow_deal').map((l) => l.id))
+    return group.salesLines.filter((line) => ids.has(line.id))
+  }
 
   const policyKeyByLineId = new Map<string, string>()
   if (draft && bpoDetail) {
@@ -2447,6 +2530,52 @@ export default function InvoicingPage() {
               </div>
             </div>
 
+            {/* Escrow Deals — commissions the carrier paid before this cycle that were
+                never invoiced. In this phase they are listed here but still counted in
+                Sales above, so nothing about what is paid changes. */}
+            {(() => {
+              const escrow = escrowPreviewForGroup(group.callCenter)
+              const dealLines = escrowDealLinesForGroup(group)
+              if (!escrow || dealLines.length === 0) return null
+              return (
+                <div className="mt-4 overflow-hidden rounded-lg border border-amber-300/70 dark:border-amber-500/30">
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-100/80 px-3 py-2 dark:bg-amber-950/40">
+                    <span className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+                      Escrow Deals — commissioned before {visibleBpoDetail.rangeLabel}
+                    </span>
+                    <span className="text-xs text-amber-900/80 dark:text-amber-200/80">
+                      {dealLines.length} deal{dealLines.length === 1 ? '' : 's'} · $
+                      {formatMoney(escrow.escrowDealsCenterShare)} · still counted in Sales above
+                    </span>
+                  </div>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-xs">Insured</TableHead>
+                        <TableHead className="text-xs">Carrier</TableHead>
+                        <TableHead className="text-xs">Policy</TableHead>
+                        <TableHead className="text-xs">Commission received</TableHead>
+                        <TableHead className="text-right text-xs">Center share</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {dealLines.map((line) => (
+                        <TableRow key={line.id}>
+                          <TableCell className="text-sm">{line.insuredName}</TableCell>
+                          <TableCell className="text-sm">{line.carrier}</TableCell>
+                          <TableCell className="font-mono text-xs">{line.policyNumber}</TableCell>
+                          <TableCell className="text-sm tabular-nums">{line.commissionDate || '—'}</TableCell>
+                          <TableCell className="text-right text-sm font-medium tabular-nums">
+                            ${formatMoney(line.leadValue)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )
+            })()}
+
             {/* Summary — sample-style boxes */}
             <div className="flex flex-col items-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800">
               <div className="flex w-full max-w-md flex-col gap-2 text-sm">
@@ -2486,6 +2615,72 @@ export default function InvoicingPage() {
                     ${formatMoney(balanceDueForBpo(group.callCenter, group.subtotal))}
                   </span>
                 </div>
+
+                {/* Escrow preview. Deliberately BELOW balance due and visually separate:
+                    none of this is withheld yet and the center is still paid in full. */}
+                {(() => {
+                  const escrow = escrowPreviewForGroup(group.callCenter)
+                  if (!escrow) return null
+                  const unknownName = isUnrecognisedCallCenter(group.callCenter)
+                  return (
+                    <div className="mt-2 rounded-md border border-amber-300/70 bg-amber-50/70 px-3 py-2.5 dark:border-amber-500/30 dark:bg-amber-950/30">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-amber-900 dark:text-amber-200">
+                          Escrow preview
+                        </span>
+                        <span className="text-[11px] text-amber-900/80 dark:text-amber-200/80">
+                          nothing is held yet
+                        </span>
+                      </div>
+                      <div className="flex flex-col gap-1 text-[13px] text-amber-950 dark:text-amber-100">
+                        {escrow.escrowDealsToEscrow > 0 && (
+                          <div className="flex items-center justify-between gap-4">
+                            <span>Earlier unpaid deals to escrow</span>
+                            <span className="tabular-nums">${formatMoney(escrow.escrowDealsToEscrow)}</span>
+                          </div>
+                        )}
+                        {escrow.escrowDealsExcessToPayout > 0 && (
+                          <div className="flex items-center justify-between gap-4">
+                            <span>Over the cap, paid now</span>
+                            <span className="tabular-nums">${formatMoney(escrow.escrowDealsExcessToPayout)}</span>
+                          </div>
+                        )}
+                        {escrow.negativeBalanceApplied > 0 && (
+                          <div className="flex items-center justify-between gap-4">
+                            <span>Negative balance paid down</span>
+                            <span className="tabular-nums">${formatMoney(escrow.negativeBalanceApplied)}</span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between gap-4">
+                          <span>Holdback ({Math.round(escrow.holdRateUsed * 100)}%)</span>
+                          <span className="tabular-nums">${formatMoney(escrow.hold)}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-4 border-t border-amber-300/60 pt-1 font-semibold dark:border-amber-500/30">
+                          <span>Payout after escrow</span>
+                          <span className="tabular-nums">${formatMoney(escrow.payout)}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-4 text-[11px] text-amber-900/80 dark:text-amber-200/80">
+                          <span>
+                            Escrow balance after ${formatMoney(escrow.closingBalance)} of $
+                            {formatMoney(escrow.capAmount)} cap
+                          </span>
+                          <span>${formatMoney(escrow.capRemaining)} room left</span>
+                        </div>
+                        {unknownName && (
+                          <p className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">
+                            &ldquo;{group.callCenter}&rdquo; is not in the canonical call-center list, so a second
+                            spelling would get its own escrow account and its own cap.
+                          </p>
+                        )}
+                        {escrow.warnings.map((warning) => (
+                          <p key={warning} className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">
+                            {warning}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })()}
               </div>
             </div>
           </div>
