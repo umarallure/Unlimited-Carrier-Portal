@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Calendar, ChevronLeft, ChevronRight, ClipboardList, Loader2, Shield } from 'lucide-react'
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import * as XLSX from 'xlsx'
@@ -20,6 +20,8 @@ import {
   getPreviousChargebackByCallCenter,
   getCallCentersWithUnpaidPreviousSlab,
   markInvoiceBatchPaid,
+  unpostInvoiceBatch,
+  getPaidBatchesForPeriod,
   saveInvoiceDraftSnapshot,
   loadInvoiceDraftSnapshot,
   normalizeCallCenterName,
@@ -30,6 +32,9 @@ import {
   type InvoiceDraftResult,
   type BpoInvoiceDetailResult,
   type UnpaidPreviousSlabCallCenter,
+  type PaidBatchSummary,
+  type PostInvoiceGroup,
+  type PostInvoicePolicy,
 } from '@/lib/invoicing'
 import { policyLookupCandidates } from '@/lib/leadNotesSync'
 import { computeEscrow, type EscrowComputation, type EscrowInputLine } from '@/lib/bpoEscrow'
@@ -41,6 +46,7 @@ import {
 import {
   DISABLED_ESCROW_CONTEXT,
   accountStateForCallCenter,
+  escrowModeForCallCenter,
   fetchEscrowContext,
   isUnrecognisedCallCenter,
   settingsForCallCenter,
@@ -163,6 +169,9 @@ export default function InvoicingPage() {
   // is posted. Loaded on mount rather than inside generateInvoice, so a settings
   // read can never block an invoice from being generated.
   const [escrowContext, setEscrowContext] = useState<EscrowContext>(DISABLED_ESCROW_CONTEXT)
+  /** Paid batches for the period on screen, so a cycle can be un-paid. */
+  const [paidBatches, setPaidBatches] = useState<PaidBatchSummary[]>([])
+  const [unpayingBatchId, setUnpayingBatchId] = useState<string | null>(null)
   const [auditLine, setAuditLine] = useState<BpoInvoiceLine | null>(null)
   const [mergePickFrom, setMergePickFrom] = useState('')
   const [mergePickTo, setMergePickTo] = useState('')
@@ -513,45 +522,145 @@ export default function InvoicingPage() {
     }
   }
 
+  /**
+   * Turn what is on screen into what gets posted.
+   *
+   * Policy lines are aggregated by policy, because invoicing_policy_lines has
+   * always been one row per policy while the invoice shows one row per event - a
+   * policy with a sale and a chargeback in the same cycle is two lines but one
+   * row. The status kept is the last one reached, since the engine advances it
+   * through the cycle (a sale then a chargeback ends on the chargeback).
+   */
+  const buildPostGroups = (centers?: string[]): PostInvoiceGroup[] => {
+    if (!visibleBpoDetail) return []
+    const wanted = centers ? new Set(centers) : null
+
+    // Unedited amounts, so the ledger can record both what was invoiced and what
+    // it would have been before anyone touched it.
+    const rawLeadValueByLineId = new Map<string, number>()
+    for (const group of bpoDetail?.groups ?? []) {
+      for (const line of [...group.salesLines, ...group.chargebackLines]) {
+        rawLeadValueByLineId.set(line.id, line.leadValue)
+      }
+    }
+
+    const out: PostInvoiceGroup[] = []
+    for (const group of visibleBpoDetail.groups) {
+      if (wanted && !wanted.has(group.callCenter)) continue
+
+      const byPolicy = new Map<string, PostInvoicePolicy>()
+      for (const line of [...group.salesLines, ...group.chargebackLines]) {
+        // A row added by hand on the invoice has no policy identity. Its money is
+        // real and stays in the center's total, but it gets no policy line and no
+        // status-history row: a status row with no policy would feed the status
+        // machine a phantom, and these never reached invoicing_policy_lines before
+        // this change either, because policy rows came from the draft.
+        if (!line.agencyCarrierId || !String(line.policyNumber ?? '').trim()) continue
+
+        const key = `${line.agencyCarrierId}::${normalizePolicyNumberForMatch(line.policyNumber)}`
+        const existing = byPolicy.get(key)
+        const raw = rawLeadValueByLineId.get(line.id) ?? line.leadValue
+        if (existing) {
+          existing.leadValue = round2(existing.leadValue + line.leadValue)
+          existing.baseLeadValue = round2(existing.baseLeadValue + raw)
+          existing.status = line.invoicingStatus
+        } else {
+          byPolicy.set(key, {
+            agencyCarrierId: line.agencyCarrierId,
+            policyNumber: line.policyNumber,
+            carrier: line.carrier,
+            leadValue: round2(line.leadValue),
+            baseLeadValue: round2(raw),
+            status: line.invoicingStatus,
+          })
+        }
+      }
+
+      const escrow = escrowPreviewForGroup(group.callCenter)
+      const live = isEscrowLive(group.callCenter)
+      out.push({
+        callCenter: group.callCenter,
+        baseAmount: round2(group.subtotal),
+        grossAmount: round2(group.subtotal * 2),
+        previousChargeback: previousChargebackFor(group.callCenter),
+        escrow:
+          escrow && live
+            ? {
+                mode: 'live',
+                balanceBefore: escrow.openingBalance,
+                openingTransfer: escrow.escrowDealsToEscrow,
+                hold: escrow.hold,
+                holdRatePct: round2(escrow.holdRateUsed * 100),
+                negativeBalanceApplied: escrow.negativeBalanceApplied,
+                negativeBalanceRemaining: escrow.negativeBalanceRemaining,
+                shortfall: escrow.shortfall,
+                payout: escrow.payout,
+                balanceAfter: escrow.closingBalance,
+              }
+            : null,
+        policies: Array.from(byPolicy.values()),
+      })
+    }
+    return out
+  }
+
+  /** Centers whose holdback will actually be withheld by this posting. */
+  const liveCentersIn = (groups: PostInvoiceGroup[]): string[] =>
+    groups.filter((g) => g.escrow?.mode === 'live').map((g) => g.callCenter)
+
+  const confirmLivePosting = (groups: PostInvoiceGroup[]): boolean => {
+    const live = liveCentersIn(groups)
+    if (live.length === 0) return true
+    const held = round2(groups.reduce((sum, g) => sum + (g.escrow?.hold ?? 0) + (g.escrow?.openingTransfer ?? 0), 0))
+    return window.confirm(
+      `This will withhold $${formatMoney(held)} from ${live.join(', ')} and record it in the escrow ledger. ` +
+        `The payout is reduced by that amount. Continue?`,
+    )
+  }
+
+  /** Reloads whenever the period changes, or after a cycle is paid or un-paid. */
+  const loadPaidBatches = useCallback(async () => {
+    if (!dateFrom || !dateTo) {
+      setPaidBatches([])
+      return
+    }
+    try {
+      setPaidBatches(await getPaidBatchesForPeriod(dateFrom, dateTo))
+    } catch {
+      // Not being able to list paid batches must never stop invoicing; the
+      // un-pay panel simply stays empty.
+      setPaidBatches([])
+    }
+  }, [dateFrom, dateTo])
+
+  useEffect(() => {
+    void loadPaidBatches()
+  }, [loadPaidBatches])
+
   const markPaid = async () => {
-    if (!visibleDraft || visibleDraft.groups.length === 0) return
-    const missingPdfCenters = visibleDraft.groups
+    if (!visibleBpoDetail || visibleBpoDetail.groups.length === 0) return
+    const missingPdfCenters = visibleBpoDetail.groups
       .map((g) => g.callCenter)
       .filter((center) => !pdfExportedByCenter[center])
     if (missingPdfCenters.length > 0) {
       alert(`Please export PDF first for: ${missingPdfCenters.join(', ')}`)
       return
     }
+    const groups = buildPostGroups()
+    if (!groups.length) return
+    if (!confirmLivePosting(groups)) return
+
     setSaving(true)
     try {
       const { data } = await supabase.auth.getUser()
-      const previousChargebacks: Record<string, number> = {}
-      for (const [center, raw] of Object.entries(previousChargebackByCallCenter)) {
-        const parsed = Number.parseFloat(raw)
-        previousChargebacks[center] = Number.isNaN(parsed) ? 0 : parsed
-      }
-
-      const leadValueByPolicyKey: Record<string, number> = {}
-      if (visibleBpoDetail) {
-        for (const g of visibleBpoDetail.groups) {
-          for (const line of [...g.salesLines, ...g.chargebackLines]) {
-            const key = resolvePolicyKey(g.callCenter, line.policyNumber)
-            if (!key) continue
-            leadValueByPolicyKey[key] = round2((leadValueByPolicyKey[key] ?? 0) + line.leadValue)
-          }
-        }
-      }
-
       const { batchId } = await markInvoiceBatchPaid({
-        startDate: visibleDraft.startDate,
-        endDate: visibleDraft.endDate,
-        groups: visibleDraft.groups,
-        overridesByPolicyKey: {},
-        previousChargebackByCallCenter: previousChargebacks,
+        startDate: visibleBpoDetail.startDate,
+        endDate: visibleBpoDetail.endDate,
+        groups,
         paidByEmail: data.user?.email || null,
-        leadValueByPolicyKey,
       })
       alert(`Invoice batch marked as paid. Batch ID: ${batchId}`)
+      void loadPaidBatches()
       // Keep draft and saved snapshot on screen so users can review or re-export; do not clear.
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to mark invoice as paid.'
@@ -562,40 +671,26 @@ export default function InvoicingPage() {
   }
 
   const markGroupPaid = async (callCenter: string) => {
-    if (!visibleDraft) return
+    if (!visibleBpoDetail) return
     if (!pdfExportedByCenter[callCenter]) {
       alert(`Please export PDF for ${callCenter} before marking paid.`)
       return
     }
-    const group = visibleDraft.groups.find((g) => g.callCenter === callCenter)
-    if (!group) return
+    const groups = buildPostGroups([callCenter])
+    if (!groups.length) return
+    if (!confirmLivePosting(groups)) return
+
     setSaving(true)
     try {
       const { data } = await supabase.auth.getUser()
-      const prevRaw = previousChargebackByCallCenter[callCenter] ?? '0'
-      const parsed = Number.parseFloat(prevRaw)
-      const previousChargebacks: Record<string, number> = {
-        [callCenter]: Number.isNaN(parsed) ? 0 : parsed,
-      }
-      const leadValueByPolicyKey: Record<string, number> = {}
-      const bpoGroup = visibleBpoDetail?.groups.find((g) => g.callCenter === callCenter)
-      if (bpoGroup) {
-        for (const line of [...bpoGroup.salesLines, ...bpoGroup.chargebackLines]) {
-          const key = resolvePolicyKey(callCenter, line.policyNumber)
-          if (!key) continue
-          leadValueByPolicyKey[key] = round2((leadValueByPolicyKey[key] ?? 0) + line.leadValue)
-        }
-      }
       const { batchId } = await markInvoiceBatchPaid({
-        startDate: visibleDraft.startDate,
-        endDate: visibleDraft.endDate,
-        groups: [group],
-        overridesByPolicyKey: {},
-        previousChargebackByCallCenter: previousChargebacks,
+        startDate: visibleBpoDetail.startDate,
+        endDate: visibleBpoDetail.endDate,
+        groups,
         paidByEmail: data.user?.email || null,
-        leadValueByPolicyKey,
       })
       alert(`${callCenter} marked as paid. Batch ID: ${batchId}`)
+      void loadPaidBatches()
       // Keep draft and saved snapshot; do not remove groups or clear server draft.
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : `Failed to mark ${callCenter} as paid.`
@@ -604,6 +699,35 @@ export default function InvoicingPage() {
       setSaving(false)
     }
   }
+
+  /**
+   * Put a paid cycle back to being an unpaid draft.
+   *
+   * Everything is backed up first and the escrow is reversed rather than deleted,
+   * so what was held and later un-held both stay on the record. Until now this
+   * could only be done by hand-writing a SQL script per batch.
+   */
+  const markBatchUnpaid = async (batch: PaidBatchSummary) => {
+    const confirmed = window.confirm(
+      `Mark this invoice unpaid?\n\n${batch.callCenters.join(', ')}\n` +
+        `$${formatMoney(batch.ccTotal)} paid ${batch.paidAt ? new Date(batch.paidAt).toLocaleString() : ''}\n\n` +
+        `The batch is backed up first and any escrow it held is reversed. The period goes back to an unpaid draft.`,
+    )
+    if (!confirmed) return
+    const reason = window.prompt('Why is this being un-paid? (recorded with the backup)') || null
+
+    setUnpayingBatchId(batch.batchId)
+    try {
+      await unpostInvoiceBatch({ batchId: batch.batchId, reason })
+      alert('Invoice marked unpaid. The period is an unpaid draft again.')
+      await loadPaidBatches()
+    } catch (error: unknown) {
+      alert(error instanceof Error ? error.message : 'Failed to mark the invoice unpaid.')
+    } finally {
+      setUnpayingBatchId(null)
+    }
+  }
+
 
   const addManualRow = (callCenter: string, kind: 'sales' | 'chargeback') => {
     setBpoDetail((prev) => {
@@ -709,13 +833,19 @@ export default function InvoicingPage() {
       }
     : null
 
+  /** What a center owed us coming into this cycle, as edited on screen. */
+  const previousChargebackFor = (callCenter: string): number => {
+    const parsed = Number.parseFloat(previousChargebackByCallCenter[callCenter] ?? '0')
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+
   /**
    * The escrow split per center, derived from the lines the center actually sees
    * (post-exclusion, post-edit) rather than from the policy-level draft — the
    * catch-up lines escrow acts on exist only in the BPO line set.
    *
-   * PREVIEW ONLY. Nothing here reaches balance due, Mark Paid, the Excel export
-   * or invoicing_call_center_ledger.
+   * Whether this reduces what the center is paid depends on its mode. A center in
+   * preview is still paid in full and the split is shown for checking only.
    */
   const escrowByCenter = new Map<string, EscrowComputation>()
   if (visibleBpoDetail) {
@@ -745,7 +875,11 @@ export default function InvoicingPage() {
           cycleStart: visibleBpoDetail.startDate,
           cycleEnd: visibleBpoDetail.endDate,
           settings: settingsForCallCenter(escrowContext, group.callCenter),
-          account: accountStateForCallCenter(escrowContext, group.callCenter),
+          account: accountStateForCallCenter(
+            escrowContext,
+            group.callCenter,
+            previousChargebackFor(group.callCenter),
+          ),
         }),
       )
     }
@@ -773,6 +907,25 @@ export default function InvoicingPage() {
     const drift = round2(subtotal - draftGroup.ccInvoiceTotal)
     return Math.abs(drift) < 0.01 ? null : drift
   }
+
+  /**
+   * What the center is actually paid.
+   *
+   * For a center in preview this is the invoice subtotal less what it owed us,
+   * exactly as before. For a LIVE center the escrow calculation has already
+   * applied the debt and taken the holdback, so its payout IS the figure — do
+   * not subtract the debt a second time.
+   */
+  const payableForBpo = (callCenter: string, subtotal: number): number => {
+    const escrow = escrowByCenter.get(callCenter)
+    if (escrow && escrow.status === 'applied' && escrow.reconciles && escrowModeForCallCenter(escrowContext, callCenter) === 'live') {
+      return escrow.payout
+    }
+    return balanceDueForBpo(callCenter, subtotal)
+  }
+
+  const isEscrowLive = (callCenter: string): boolean =>
+    escrowModeForCallCenter(escrowContext, callCenter) === 'live' && escrowPreviewForGroup(callCenter) != null
 
   /** The escrow block is only shown when the split accounts for every cent. */
   const escrowPreviewForGroup = (callCenter: string): EscrowComputation | null => {
@@ -859,7 +1012,7 @@ export default function InvoicingPage() {
       newBusinessTotal: group.newBusinessTotal,
       chargebacksTotal: group.chargebacksTotal,
       previousNegativeBalance,
-      balanceDue: balanceDueForBpo(group.callCenter, group.subtotal),
+      balanceDue: payableForBpo(group.callCenter, group.subtotal),
       variant,
       escrow: escrow
         ? {
@@ -1016,7 +1169,7 @@ export default function InvoicingPage() {
       rows.push(['New Business Total', round2(group.newBusinessTotal)])
       rows.push(['Chargebacks Total', round2(group.chargebacksTotal)])
       rows.push(['Previous Chargeback', round2(prev)])
-      rows.push(['Balance Due', round2(balanceDueForBpo(group.callCenter, group.subtotal))])
+      rows.push(['Balance Due', round2(payableForBpo(group.callCenter, group.subtotal))])
 
       const sheetName = group.callCenter.slice(0, 31) || 'CallCenter'
       const ws = XLSX.utils.aoa_to_sheet(rows)
@@ -1140,7 +1293,7 @@ export default function InvoicingPage() {
       if (visibleBpoDetail) {
         for (const group of visibleBpoDetail.groups) {
           const center = normalizeCallCenterName(group.callCenter)
-          const payment = round2(balanceDueForBpo(group.callCenter, group.subtotal))
+          const payment = round2(payableForBpo(group.callCenter, group.subtotal))
           merged.set(center, { payment, updatedAt: new Date().toISOString() })
         }
       }
@@ -1959,6 +2112,50 @@ export default function InvoicingPage() {
         </div>
       )}
 
+      {/* Paid cycles for this period, so one can be put back to a draft without
+          anyone hand-writing a SQL script. */}
+      {paidBatches.length > 0 && (
+        <Card className="print:hidden">
+          <CardHeader>
+            <CardTitle>Already paid for {dateFrom} → {dateTo}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-5">
+            {paidBatches.map((batch) => (
+              <div
+                key={batch.batchId}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5 text-sm dark:border-slate-800"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-foreground dark:text-slate-100">
+                    {batch.callCenters.length ? batch.callCenters.join(', ') : '(no call centers recorded)'}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    ${formatMoney(batch.ccTotal)} paid
+                    {batch.paidAt ? ` ${new Date(batch.paidAt).toLocaleString()}` : ''}
+                    {batch.paidByEmail ? ` by ${batch.paidByEmail}` : ''}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={unpayingBatchId != null}
+                  onClick={() => void markBatchUnpaid(batch)}
+                >
+                  {unpayingBatchId === batch.batchId ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : null}
+                  Mark unpaid
+                </Button>
+              </div>
+            ))}
+            <p className="text-xs text-muted-foreground">
+              Un-paying backs the batch up first and reverses any escrow it held, then returns the period to an
+              unpaid draft.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {showWeekScript && (
         <Card className="print:hidden">
           <CardHeader>
@@ -2493,9 +2690,14 @@ export default function InvoicingPage() {
                   />
                 </div>
                 <div className="flex items-center justify-between gap-4 rounded-md bg-slate-900 px-3 py-2.5 text-white dark:bg-black">
-                  <span className="font-medium">Balance due</span>
+                  <span className="font-medium">
+                    Balance due
+                    {isEscrowLive(group.callCenter) && (
+                      <span className="ml-2 text-[11px] font-normal text-amber-300">after holdback</span>
+                    )}
+                  </span>
                   <span className="text-lg font-bold tabular-nums">
-                    ${formatMoney(balanceDueForBpo(group.callCenter, group.subtotal))}
+                    ${formatMoney(payableForBpo(group.callCenter, group.subtotal))}
                   </span>
                 </div>
 
@@ -2516,15 +2718,16 @@ export default function InvoicingPage() {
                 {(() => {
                   const escrow = escrowPreviewForGroup(group.callCenter)
                   if (!escrow) return null
+                  const live = isEscrowLive(group.callCenter)
                   const unknownName = isUnrecognisedCallCenter(group.callCenter)
                   return (
                     <div className="mt-2 rounded-md border border-amber-300/70 bg-amber-50/70 px-3 py-2.5 dark:border-amber-500/30 dark:bg-amber-950/30">
                       <div className="mb-2 flex items-center justify-between gap-2">
                         <span className="text-xs font-semibold uppercase tracking-wide text-amber-900 dark:text-amber-200">
-                          Escrow preview
+                          {live ? 'Escrow — live' : 'Escrow preview'}
                         </span>
                         <span className="text-[11px] text-amber-900/80 dark:text-amber-200/80">
-                          nothing is held yet
+                          {live ? 'withheld when this invoice is marked paid' : 'nothing is held yet'}
                         </span>
                       </div>
                       <div className="flex flex-col gap-1 text-[13px] text-amber-950 dark:text-amber-100">
@@ -2550,10 +2753,12 @@ export default function InvoicingPage() {
                           <span>Holdback ({Math.round(escrow.holdRateUsed * 100)}%)</span>
                           <span className="tabular-nums">${formatMoney(escrow.hold)}</span>
                         </div>
-                        <div className="flex items-center justify-between gap-4 border-t border-amber-300/60 pt-1 font-semibold dark:border-amber-500/30">
-                          <span>Payout after escrow</span>
-                          <span className="tabular-nums">${formatMoney(escrow.payout)}</span>
-                        </div>
+                        {!live && (
+                          <div className="flex items-center justify-between gap-4 border-t border-amber-300/60 pt-1 font-semibold dark:border-amber-500/30">
+                            <span>Payout after escrow</span>
+                            <span className="tabular-nums">${formatMoney(escrow.payout)}</span>
+                          </div>
+                        )}
                         <div className="flex items-center justify-between gap-4 text-[11px] text-amber-900/80 dark:text-amber-200/80">
                           <span>
                             Escrow balance after ${formatMoney(escrow.closingBalance)} of $
