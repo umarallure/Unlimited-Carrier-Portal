@@ -134,6 +134,7 @@ export default function EscrowSettingsPage() {
 
   const configuredCount = accounts.length
   const exemptCount = accounts.filter((a) => a.exempt || a.status === 'ended').length
+  const liveCount = accounts.filter((a) => a.mode === 'live' && !a.exempt && a.status !== 'ended').length
 
   const handleSaveSettings = async () => {
     setSavingSettings(true)
@@ -188,7 +189,7 @@ export default function EscrowSettingsPage() {
         capAmountOverride: capOverrideRaw.trim() === '' ? null : num(capOverrideRaw, 0),
         holdRateOverride: holdOverrideRaw.trim() === '' ? null : num(holdOverrideRaw, 0),
         openingBalance: num(valueFor(center, 'opening_balance', 0), 0),
-        negativeBalance: num(valueFor(center, 'negative_balance', 0), 0),
+        mode: (valueFor(center, 'mode', 'preview') as 'preview' | 'live') || 'preview',
         status: (valueFor(center, 'status', 'active') as 'active' | 'ended') || 'active',
         notes: (String(valueFor(center, 'notes', '') ?? '').trim() || null) as string | null,
       })
@@ -308,6 +309,9 @@ export default function EscrowSettingsPage() {
           <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
             <span>{configuredCount} configured</span>
             <span>{exemptCount} exempt</span>
+            <span className={liveCount > 0 ? 'font-medium text-emerald-600 dark:text-emerald-400' : undefined}>
+              {liveCount} live
+            </span>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -323,7 +327,10 @@ export default function EscrowSettingsPage() {
           <p className="mb-4 text-xs text-muted-foreground">
             A center with no row here uses the global settings and is not exempt. Opening balance is the agreed
             starting point; every movement after that belongs in the escrow ledger, so do not keep editing it once
-            posting is live.
+            posting is live. <strong>Preview</strong> shows the split but the center is still paid in full;{' '}
+            <strong>Live</strong> actually withholds the holdback and posts it to the escrow ledger when the
+            invoice is marked paid. What a center owes us is not set here — it is the chargeback balance carried
+            forward on the invoice screen.
           </p>
           {loading ? (
             <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
@@ -337,7 +344,7 @@ export default function EscrowSettingsPage() {
                     <TableHead className={adminThPlain}>Call center</TableHead>
                     <TableHead className={adminThPlain}>Exempt</TableHead>
                     <TableHead className={adminThPlain}>Opening balance</TableHead>
-                    <TableHead className={adminThPlain}>Owed to us</TableHead>
+                    <TableHead className={adminThPlain}>Holdback</TableHead>
                     <TableHead className={adminThPlain}>Cap override</TableHead>
                     <TableHead className={adminThPlain}>Hold override</TableHead>
                     <TableHead className={adminThPlain}>Balance now</TableHead>
@@ -373,12 +380,19 @@ export default function EscrowSettingsPage() {
                           />
                         </TableCell>
                         <TableCell>
-                          <Input
-                            value={String(valueFor(center, 'negative_balance', 0) ?? 0)}
-                            onChange={(e) => setField(center, 'negative_balance', e.target.value)}
-                            className="h-8 w-28 text-right font-mono text-xs"
-                            inputMode="decimal"
-                          />
+                          <select
+                            value={String(valueFor(center, 'mode', 'preview') ?? 'preview')}
+                            onChange={(e) => setField(center, 'mode', e.target.value as 'preview' | 'live')}
+                            className={cn(
+                              'h-8 rounded-md border px-2 text-xs',
+                              valueFor(center, 'mode', 'preview') === 'live'
+                                ? 'border-emerald-500/50 bg-emerald-500/10 font-medium text-emerald-700 dark:text-emerald-300'
+                                : 'border-input bg-background text-muted-foreground dark:border-slate-800 dark:bg-slate-950',
+                            )}
+                          >
+                            <option value="preview">Preview</option>
+                            <option value="live">Live — withhold</option>
+                          </select>
                         </TableCell>
                         <TableCell>
                           <Input

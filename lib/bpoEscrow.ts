@@ -96,6 +96,12 @@ export type EscrowComputation = {
   negativeBalanceOpening: number
   negativeBalanceApplied: number
   negativeBalanceRemaining: number
+  /**
+   * The part of this cycle that went unpaid because chargebacks outran
+   * commissions. Carried into negativeBalanceRemaining, and needed to check the
+   * split balances: the parts sum to the whole only once it is subtracted.
+   */
+  shortfall: number
 
   // Steps 5-6 — hold, then pay
   positiveRemainder: number
@@ -190,6 +196,7 @@ function emptyComputation(
     negativeBalanceOpening: account.negativeBalance,
     negativeBalanceApplied: 0,
     negativeBalanceRemaining: account.negativeBalance,
+    shortfall: 0,
     positiveRemainder: 0,
     hold: 0,
     payout: 0,
@@ -309,6 +316,7 @@ export function computeEscrow(input: {
     negativeBalanceOpening,
     negativeBalanceApplied,
     negativeBalanceRemaining,
+    shortfall,
     positiveRemainder,
     hold,
     payout,
