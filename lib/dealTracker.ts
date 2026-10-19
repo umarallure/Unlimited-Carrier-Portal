@@ -1013,6 +1013,73 @@ export async function fetchAllPaginated<T = any>(queryFactory: () => any): Promi
 }
 
 /**
+ * Fetch existing deal_tracker rows in small policy-number batches.
+ * Avoids oversized PostgREST URLs when carrier files contain thousands of policies.
+ * Errors intentionally propagate: continuing with an empty result would incorrectly
+ * classify existing policies as new and could overwrite DDF/GHL-derived fields.
+ */
+async function fetchExistingDealTracker(
+  agencyCarrierId: string,
+  policyNumbers: string[],
+): Promise<any[]> {
+  const CHUNK_SIZE = 200
+  const uniquePolicyNumbers = Array.from(
+    new Set((policyNumbers ?? []).map((n) => String(n ?? '').trim()).filter(Boolean)),
+  )
+  const out: any[] = []
+
+  for (let i = 0; i < uniquePolicyNumbers.length; i += CHUNK_SIZE) {
+    const chunk = uniquePolicyNumbers.slice(i, i + CHUNK_SIZE)
+    const { data, error } = await supabase
+      .from('deal_tracker')
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .in('policy_number', chunk)
+      .order('id', { ascending: true })
+
+    if (error) {
+      throw new Error(
+        `Failed to load existing deal_tracker rows (batch ${Math.floor(i / CHUNK_SIZE) + 1}, ${chunk.length} policy numbers): ${error.message}`,
+      )
+    }
+    out.push(...(data ?? []))
+  }
+
+  return out
+}
+
+/** Fetch carrier policy rows in batches too, so large commission files don't create oversized URLs. */
+async function fetchPoliciesByPolicyNumbers(
+  tableName: 'amam_policies',
+  agencyCarrierId: string,
+  policyNumbers: string[],
+): Promise<any[]> {
+  const CHUNK_SIZE = 200
+  const uniquePolicyNumbers = Array.from(
+    new Set((policyNumbers ?? []).map((n) => String(n ?? '').trim()).filter(Boolean)),
+  )
+  const out: any[] = []
+
+  for (let i = 0; i < uniquePolicyNumbers.length; i += CHUNK_SIZE) {
+    const chunk = uniquePolicyNumbers.slice(i, i + CHUNK_SIZE)
+    const { data, error } = await supabase
+      .from(tableName)
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .in('policy_number', chunk)
+
+    if (error) {
+      throw new Error(
+        `Failed to load ${tableName} rows (batch ${Math.floor(i / CHUNK_SIZE) + 1}, ${chunk.length} policy numbers): ${error.message}`,
+      )
+    }
+    out.push(...(data ?? []))
+  }
+
+  return out
+}
+
+/**
  * Fetch raw daily_deal_flow rows for a carrier (server-side only).
  * Exported for /api/ddf-lookup to cache and reuse across chunked requests.
  */
@@ -2164,19 +2231,7 @@ export async function processAmamFilesForDealTracker(
 
   const policyNumbers = policies.map(p => p.policy_number)
 
-  let existingEntries: any[] = []
-  try {
-    existingEntries = await fetchAllPaginated(() =>
-      supabase
-        .from('deal_tracker')
-        .select('*')
-        .eq('agency_carrier_id', agencyCarrierId)
-        .in('policy_number', policyNumbers)
-        .order('id', { ascending: true })
-    )
-  } catch (existingError: any) {
-    console.warn('[Deal Tracker] Failed to fetch existing deal_tracker entries:', existingError?.message)
-  }
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
 
   const existingMap = new Map<string, any>()
   if (existingEntries) {
@@ -2398,11 +2453,7 @@ export async function processAmamFilesForDealTrackerFromRows(
   const policyNumbers = policyRows.map((p: any) => p.policy_number)
 
   let stepStart = Date.now()
-  const { data: existingEntries } = await supabase
-    .from('deal_tracker')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
   console.log('[Deal Tracker] FromRows: existing deal_tracker fetch', policyNumbers.length, 'policies took', Math.round((Date.now() - stepStart) / 1000), 's')
   const existingMap = new Map<string, any>()
   if (existingEntries) existingEntries.forEach((e: any) => existingMap.set(e.policy_number, e))
@@ -2624,15 +2675,7 @@ export async function processAmamCommissionsForDealTracker(
 
   const typedCommissions = commissions as Array<{ policy_number: string; advance?: string | number | null; created_at?: string | null }>
   const policyNumbers = Array.from(new Set(typedCommissions.map((c) => c.policy_number)))
-  const { data: existingEntries, error: existingError } = await supabase
-    .from('deal_tracker')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
-
-  if (existingError) {
-    console.warn('[Deal Tracker] Failed to fetch existing entries:', existingError)
-  }
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
 
   const existingMap = new Map<string, any>()
   if (existingEntries) {
@@ -2670,17 +2713,11 @@ export async function processAmamCommissionsForDealTracker(
 
   let policiesMap = new Map<string, any>()
   if (allCommissionPolicyNumbers.length > 0) {
-    const { data: policies } = await supabase
-      .from('amam_policies')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .in('policy_number', allCommissionPolicyNumbers)
-    if (policies) {
-      const typedPolicies = policies as Array<{ policy_number: string }>
-      typedPolicies.forEach((p) => {
-        policiesMap.set(p.policy_number, p)
-      })
-    }
+    const policies = await fetchPoliciesByPolicyNumbers('amam_policies', agencyCarrierId, allCommissionPolicyNumbers)
+    const typedPolicies = policies as Array<{ policy_number: string }>
+    typedPolicies.forEach((p) => {
+      policiesMap.set(p.policy_number, p)
+    })
     console.log(
       '[Deal Tracker] AMAM commissions: loaded',
       policiesMap.size,
@@ -3041,11 +3078,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
   })
 
   const policyNumbers = Array.from(commissionMap.keys())
-  const { data: existingEntries } = await supabase
-    .from('deal_tracker')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
   const existingMap = new Map<string, any>()
   if (existingEntries) existingEntries.forEach((e: any) => existingMap.set(e.policy_number, e))
 
@@ -3058,12 +3091,8 @@ export async function processAmamCommissionsForDealTrackerFromRows(
   const allCommissionPolicyNumbers = Array.from(new Set(commissionMap.keys()))
   let policiesMap = new Map<string, any>()
   if (allCommissionPolicyNumbers.length > 0) {
-    const { data: policies } = await supabase
-      .from('amam_policies')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .in('policy_number', allCommissionPolicyNumbers)
-    if (policies) policies.forEach((p: any) => policiesMap.set(p.policy_number, p))
+    const policies = await fetchPoliciesByPolicyNumbers('amam_policies', agencyCarrierId, allCommissionPolicyNumbers)
+    policies.forEach((p: any) => policiesMap.set(p.policy_number, p))
   }
 
   let statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
