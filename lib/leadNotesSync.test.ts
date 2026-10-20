@@ -107,32 +107,56 @@ type FakeLead = {
  *   from(t).select(cols)                      (pipeline_stages: no filter)
  *   from(t).select(cols).in(col, vals)         (leads by policy_id)
  *   from(t).select(cols).not(col, 'is', null)  (leads with non-null tracking_id)
+ *     .order(col).range(from, to)              (paged)
  *   from(t).update(payload).eq('id', id)
  */
-function makeFakeDdfClient(tables: { leads: FakeLead[]; pipeline_stages: PipelineStageRow[] }) {
-  function builder(rows: any[], filters: ((r: any) => boolean)[], mode: 'select' | 'update', updatePayload: any) {
+function makeFakeDdfClient(
+  tables: { leads: FakeLead[]; pipeline_stages: PipelineStageRow[] },
+  // Like the real API: an .in() list longer than this fails (URL too long) and
+  // a select returns at most `maxRows` rows.
+  limits: { maxInList?: number; maxRows?: number } = {},
+) {
+  type Page = { orderBy?: string; from?: number; to?: number; tooLong?: boolean }
+  function builder(rows: any[], filters: ((r: any) => boolean)[], mode: 'select' | 'update', updatePayload: any, page: Page = {}) {
     const self = {
       select(_cols: string) {
-        return builder(rows, filters, 'select', null)
+        return builder(rows, filters, 'select', null, page)
       },
       in(col: string, vals: unknown[]) {
-        return builder(rows, [...filters, (r: any) => vals.includes(r[col])], mode, updatePayload)
+        const tooLong = page.tooLong || (limits.maxInList != null && vals.length > limits.maxInList)
+        return builder(rows, [...filters, (r: any) => vals.includes(r[col])], mode, updatePayload, { ...page, tooLong })
       },
       not(col: string, _op: string, _val: unknown) {
-        return builder(rows, [...filters, (r: any) => r[col] != null], mode, updatePayload)
+        return builder(rows, [...filters, (r: any) => r[col] != null], mode, updatePayload, page)
       },
       update(payload: any) {
-        return builder(rows, filters, 'update', payload)
+        return builder(rows, filters, 'update', payload, page)
       },
       eq(col: string, val: unknown) {
-        return builder(rows, [...filters, (r: any) => r[col] === val], mode, updatePayload)
+        return builder(rows, [...filters, (r: any) => r[col] === val], mode, updatePayload, page)
+      },
+      order(col: string) {
+        return builder(rows, filters, mode, updatePayload, { ...page, orderBy: col })
+      },
+      range(from: number, to: number) {
+        return builder(rows, filters, mode, updatePayload, { ...page, from, to })
       },
       then(resolve: (v: any) => void, reject?: (e: unknown) => void) {
         try {
-          const matched = rows.filter(r => filters.every(f => f(r)))
+          if (page.tooLong) {
+            resolve({ data: null, error: { message: 'Bad Request' } })
+            return
+          }
+          let matched = rows.filter(r => filters.every(f => f(r)))
           if (mode === 'update') {
             for (const row of matched) Object.assign(row, updatePayload)
           }
+          if (page.orderBy) {
+            const col = page.orderBy
+            matched = [...matched].sort((a, b) => String(a[col]).localeCompare(String(b[col])))
+          }
+          if (page.from != null && page.to != null) matched = matched.slice(page.from, page.to + 1)
+          if (mode === 'select' && limits.maxRows != null) matched = matched.slice(0, limits.maxRows)
           resolve({ data: matched.map(r => ({ ...r })), error: null })
         } catch (e) {
           if (reject) reject(e)
@@ -479,4 +503,41 @@ test('attachPolicyToLeadById: re-confirming the same policy_id the lead already 
 
   assert.equal(result.ok, true)
   assert.equal(lead.stage_id, 1)
+})
+
+test('findLeadsForPolicyNumbers: a whole carrier file of policy numbers still matches by policy_id (lookup is batched)', async () => {
+  const leads = Array.from({ length: 450 }, (_, i) => baseLead({ id: `lead-${i}`, policy_id: `POL-${i}` }))
+  const ddf = makeFakeDdfClient({ leads, pipeline_stages: PIPELINE_STAGES }, { maxInList: 250 })
+
+  const result = await findLeadsForPolicyNumbers(ddf as any, leads.map((l) => l.policy_id!))
+
+  assert.equal(result.matchedByPolicy.size, 450)
+  assert.deepEqual(result.unmatchedPolicyNumbers, [])
+})
+
+test('findLeadsForPolicyNumbers: tracking_id scan pages past the 1,000-row response cap', async () => {
+  const leads = Array.from({ length: 2500 }, (_, i) =>
+    baseLead({ id: `lead-${String(i).padStart(5, '0')}`, tracking_id: `POL-T${i}`, policy_id: null }),
+  )
+  const ddf = makeFakeDdfClient({ leads, pipeline_stages: PIPELINE_STAGES }, { maxRows: 1000 })
+
+  const result = await findLeadsForPolicyNumbers(ddf as any, ['POL-T5', 'POL-T1500', 'POL-T2499'])
+
+  assert.equal(result.matchedByPolicy.get('POL-T1500')?.id, 'lead-01500')
+  assert.equal(result.matchedByPolicy.get('POL-T2499')?.id, 'lead-02499')
+  assert.deepEqual(result.unmatchedPolicyNumbers, [])
+})
+
+test('syncLeadStagesFromDdfStatus: reports how many leads were actually written', async () => {
+  const moved = baseLead({ id: 'lead-m', policy_id: 'POL-M', pipeline_id: 4, stage_id: 128, stage: 'Pending Approval' })
+  const already = baseLead({ id: 'lead-a', policy_id: 'POL-S', pipeline_id: 1, stage_id: 1, stage: 'FDPF Pending Reason' })
+  const ddf = makeFakeDdfClient({ leads: [moved, already], pipeline_stages: PIPELINE_STAGES })
+
+  const result = await syncLeadStagesFromDdfStatus(ddf as any, [
+    { trackingId: 'POL-M', status: 'FDPF Pending Reason' },
+    { trackingId: 'POL-S', status: 'FDPF Pending Reason' },
+  ])
+
+  assert.equal(result.matchedCount, 2)
+  assert.equal(result.updatedCount, 1)
 })

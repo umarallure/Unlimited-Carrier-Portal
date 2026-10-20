@@ -17,6 +17,7 @@ import { getDdfClient } from '@/lib/ddfSource'
 import { fetchDdfCandidatePool, scoreDdfCandidatesFromPool, type ScoredDdfCandidate } from '@/lib/leadMatchCandidates'
 import { aiMatchConfigured, suggestDdfMatch } from '@/lib/aiLeadMatch'
 import type { DdfCarrierRecord } from '@/lib/dealTracker'
+import { mapWithConcurrency } from '@/lib/concurrency'
 
 export const dynamic = 'force-dynamic'
 
@@ -48,20 +49,6 @@ function toCandidateShape(c: ScoredDdfCandidate) {
     agent: c.licensed_agent_account ?? null,
     score: c.score,
   }
-}
-
-/** Runs `fn` over `items` with at most `limit` in flight at once, preserving input order in the result array. */
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length)
-  let next = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const i = next++
-      results[i] = await fn(items[i])
-    }
-  })
-  await Promise.all(workers)
-  return results
 }
 
 export async function POST(request: NextRequest) {

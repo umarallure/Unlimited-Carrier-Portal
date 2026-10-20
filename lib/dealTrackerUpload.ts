@@ -31,6 +31,7 @@ import { processAhlFilesForDealTracker, processAhlCommissionsForDealTracker } fr
 import { processAmericoFilesForDealTracker, processAmericoCommissionsForDealTracker } from './dealTracker.americo'
 import { supabase } from './supabaseClient'
 import { fetchExceptionIndex, partitionByException } from './policyExceptions'
+import { mapWithConcurrency } from './concurrency'
 
 /** In-memory commission/policy rows + target table + file id when DB insert is deferred until Commission Report Save. */
 export interface PendingRowsPayload {
@@ -262,10 +263,48 @@ async function syncEditedEntriesToCommissionTracker(
     (e) => e.source_commission_table && e.source_commission_id,
   )
   if (!editable.length) return
-  onProgress?.('Syncing edited commission metadata to commission tracker...')
+  onProgress?.(`Checking ${editable.length.toLocaleString()} linked commission rows for edits...`)
+
+  // Current commission_tracker values for every linked row, fetched in small
+  // batches (one .in() per batch keeps the URL short). Only rows whose metadata
+  // actually differs get written — a policy-file save usually changes none.
+  const CHUNK_SIZE = 200
+  const currentByKey = new Map<string, Array<Record<string, unknown>>>()
+  const idsByTable = new Map<string, string[]>()
+  for (const e of editable) {
+    const table = String(e.source_commission_table)
+    const list = idsByTable.get(table) ?? []
+    list.push(String(e.source_commission_id))
+    idsByTable.set(table, list)
+  }
+  for (const [table, idsAll] of idsByTable) {
+    const ids = Array.from(new Set(idsAll))
+    for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+      const { data, error } = await supabase
+        .from('commission_tracker')
+        .select('source_row_id, policy_number, carrier, name, sales_agent, date')
+        .eq('source_table', table)
+        .in('source_row_id', ids.slice(i, i + CHUNK_SIZE))
+      if (error) {
+        throw new Error(`Failed to load commission_tracker rows for ${table}: ${error.message}`)
+      }
+      for (const row of data ?? []) {
+        const key = `${table}\0${row.source_row_id}`
+        const list = currentByKey.get(key) ?? []
+        list.push(row)
+        currentByKey.set(key, list)
+      }
+    }
+  }
+
+  const same = (a: unknown, b: unknown) => String(a ?? '').trim() === String(b ?? '').trim()
+  const pending: Array<{ entry: DealTrackerPreviewEntry; sourceTable: string; sourceRowId: string; payload: Record<string, unknown> }> = []
   for (const entry of editable) {
     const sourceTable = String(entry.source_commission_table)
     const sourceRowId = String(entry.source_commission_id)
+    const current = currentByKey.get(`${sourceTable}\0${sourceRowId}`)
+    // No commission_tracker row for this source: the update would match nothing.
+    if (!current?.length) continue
     // Keep financial transaction amounts in commission_tracker sourced from
     // carrier commission tables only. deal_tracker values are policy-level
     // aggregates and can otherwise duplicate advance on chargeback rows.
@@ -274,11 +313,25 @@ async function syncEditedEntriesToCommissionTracker(
       carrier: entry.carrier,
       name: entry.name ?? null,
       sales_agent: entry.sales_agent ?? null,
-      updated_at: now,
     }
     if (entry.commission_date && String(entry.commission_date).trim() !== '') {
       payload.date = String(entry.commission_date).trim()
     }
+    const changed = current.some((row) =>
+      Object.entries(payload).some(([field, value]) => !same(row[field], value)),
+    )
+    if (!changed) continue
+    pending.push({ entry, sourceTable, sourceRowId, payload: { ...payload, updated_at: now } })
+  }
+
+  if (!pending.length) {
+    onProgress?.('Commission tracker already up to date — no edits to sync.')
+    return
+  }
+
+  onProgress?.(`Syncing ${pending.length.toLocaleString()} edited commission rows to commission tracker...`)
+  let done = 0
+  await mapWithConcurrency(pending, 10, async ({ entry, sourceTable, sourceRowId, payload }) => {
     const { error } = await supabase
       .from('commission_tracker')
       .update(payload)
@@ -287,7 +340,11 @@ async function syncEditedEntriesToCommissionTracker(
     if (error) {
       throw new Error(`Failed to sync commission_tracker for ${entry.policy_number}: ${error.message}`)
     }
-  }
+    done++
+    if (done % 100 === 0 || done === pending.length) {
+      onProgress?.(`Synced ${done.toLocaleString()}/${pending.length.toLocaleString()} commission rows`)
+    }
+  })
 }
 
 /**
@@ -299,7 +356,10 @@ async function syncEditedEntriesToCommissionTracker(
  * Best-effort: never blocks or fails the deal_tracker save. The server matches each
  * policy_number to its lead (via tracking_id) and applies the ghl_stage as the stage.
  */
-async function syncLeadStagesForSavedEntries(entries: DealTrackerPreviewEntry[]): Promise<void> {
+async function syncLeadStagesForSavedEntries(
+  entries: DealTrackerPreviewEntry[],
+  onProgress?: (message: string) => void,
+): Promise<void> {
   try {
     const seen = new Set<string>()
     const updates: { policyNumber: string; ghlStage: string }[] = []
@@ -312,15 +372,23 @@ async function syncLeadStagesForSavedEntries(entries: DealTrackerPreviewEntry[])
       updates.push({ policyNumber, ghlStage })
     }
     if (updates.length === 0) return
+    onProgress?.(`Updating CRM lead stages for ${updates.length.toLocaleString()} policies...`)
     const res = await fetch('/api/deal-tracker/sync-lead-stages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ updates }),
     })
+    const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      const data = await res.json().catch(() => ({}))
       console.error('[deal-tracker] lead stage sync failed:', data?.error || res.statusText)
+      onProgress?.('CRM lead stage sync failed — deal tracker is saved; see console for details.')
+      return
     }
+    onProgress?.(
+      `CRM lead stages synced: ${Number(data?.updated ?? 0).toLocaleString()} updated, ` +
+      `${Number(data?.synced ?? 0).toLocaleString()} matched, ` +
+      `${Array.isArray(data?.unmatched) ? data.unmatched.length.toLocaleString() : 0} with no lead.`,
+    )
   } catch (error) {
     console.error('[deal-tracker] lead stage sync error:', error instanceof Error ? error.message : error)
   }
@@ -356,7 +424,7 @@ export async function saveDealTrackerAfterConfirmation(
     if (options?.dealTrackerOnly) {
       try {
         const result = await saveDealTrackerEntries(entries, { onProgress, triggerFileId, exceptionIndex })
-        await syncLeadStagesForSavedEntries(unfrozen(entries))
+        await syncLeadStagesForSavedEntries(unfrozen(entries), onProgress)
         return {
           success: true,
           ...result,
@@ -456,7 +524,7 @@ export async function saveDealTrackerAfterConfirmation(
     if (!isCommissionPendingFlow) {
       await syncEditedEntriesToCommissionTracker(syncableEntries, onProgress)
     }
-    await syncLeadStagesForSavedEntries(syncableEntries)
+    await syncLeadStagesForSavedEntries(syncableEntries, onProgress)
     return {
       success: true,
       ...result,
