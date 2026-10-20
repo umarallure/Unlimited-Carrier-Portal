@@ -46,7 +46,11 @@ export async function POST(request: NextRequest) {
   try {
     const { client } = getDdfClient('new')
     const result = await syncLeadStagesFromDdfStatus(client, updates)
-    return NextResponse.json({ synced: result.matchedCount, unmatched: result.unmatchedPolicyNumbers })
+    return NextResponse.json({
+      synced: result.matchedCount,
+      updated: result.updatedCount,
+      unmatched: result.unmatchedPolicyNumbers,
+    })
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'lead stage sync failed'
     console.error('[sync-lead-stages]', message)
