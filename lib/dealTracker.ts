@@ -1013,6 +1013,115 @@ export async function fetchAllPaginated<T = any>(queryFactory: () => any): Promi
 }
 
 /**
+ * Fetch existing deal_tracker rows in small policy-number batches.
+ * Avoids oversized PostgREST URLs when carrier files contain thousands of policies.
+ * Errors intentionally propagate: continuing with an empty result would incorrectly
+ * classify existing policies as new and could overwrite DDF/GHL-derived fields.
+ */
+async function fetchExistingDealTracker(
+  agencyCarrierId: string,
+  policyNumbers: string[],
+): Promise<any[]> {
+  const CHUNK_SIZE = 200
+  const uniquePolicyNumbers = Array.from(
+    new Set((policyNumbers ?? []).map((n) => String(n ?? '').trim()).filter(Boolean)),
+  )
+  const out: any[] = []
+
+  for (let i = 0; i < uniquePolicyNumbers.length; i += CHUNK_SIZE) {
+    const chunk = uniquePolicyNumbers.slice(i, i + CHUNK_SIZE)
+    const { data, error } = await supabase
+      .from('deal_tracker')
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .in('policy_number', chunk)
+      .order('id', { ascending: true })
+
+    if (error) {
+      throw new Error(
+        `Failed to load existing deal_tracker rows (batch ${Math.floor(i / CHUNK_SIZE) + 1}, ${chunk.length} policy numbers): ${error.message}`,
+      )
+    }
+    out.push(...(data ?? []))
+  }
+
+  return out
+}
+
+/**
+ * Existing deal_tracker rows for the (agency_carrier_id, policy_number) pairs a save
+ * is about to write, keyed `${agency_carrier_id}\0${policy_number}`. Only the columns
+ * saveDealTrackerEntries' preserve/guard steps read.
+ */
+async function fetchExistingDealTrackerForSave(
+  entries: Array<{ agency_carrier_id?: string | null; policy_number?: string | null }>,
+): Promise<Map<string, any>> {
+  const CHUNK_SIZE = 200
+  const byAgency = new Map<string, Set<string>>()
+  for (const e of entries) {
+    if (!e.agency_carrier_id || !e.policy_number) continue
+    const set = byAgency.get(e.agency_carrier_id) ?? new Set<string>()
+    set.add(e.policy_number)
+    byAgency.set(e.agency_carrier_id, set)
+  }
+
+  const out = new Map<string, any>()
+  for (const [agencyCarrierId, policySet] of byAgency) {
+    const policyNumbers = Array.from(policySet)
+    for (let i = 0; i < policyNumbers.length; i += CHUNK_SIZE) {
+      const chunk = policyNumbers.slice(i, i + CHUNK_SIZE)
+      const { data, error } = await supabase
+        .from('deal_tracker')
+        .select(
+          'id, agency_carrier_id, policy_number, carrier, deal_value, cc_value, charge_back, status, effective_date, notes, ghl_name, ghl_stage, policy_status',
+        )
+        .eq('agency_carrier_id', agencyCarrierId)
+        .in('policy_number', chunk)
+      if (error) {
+        throw new Error(
+          `Failed to load existing deal_tracker rows before saving (${chunk.length} policy numbers): ${error.message}`,
+        )
+      }
+      for (const row of data ?? []) {
+        out.set(`${row.agency_carrier_id}\0${row.policy_number}`, row)
+      }
+    }
+  }
+  return out
+}
+
+/** Fetch carrier policy rows in batches too, so large commission files don't create oversized URLs. */
+async function fetchPoliciesByPolicyNumbers(
+  tableName: 'amam_policies',
+  agencyCarrierId: string,
+  policyNumbers: string[],
+): Promise<any[]> {
+  const CHUNK_SIZE = 200
+  const uniquePolicyNumbers = Array.from(
+    new Set((policyNumbers ?? []).map((n) => String(n ?? '').trim()).filter(Boolean)),
+  )
+  const out: any[] = []
+
+  for (let i = 0; i < uniquePolicyNumbers.length; i += CHUNK_SIZE) {
+    const chunk = uniquePolicyNumbers.slice(i, i + CHUNK_SIZE)
+    const { data, error } = await supabase
+      .from(tableName)
+      .select('*')
+      .eq('agency_carrier_id', agencyCarrierId)
+      .in('policy_number', chunk)
+
+    if (error) {
+      throw new Error(
+        `Failed to load ${tableName} rows (batch ${Math.floor(i / CHUNK_SIZE) + 1}, ${chunk.length} policy numbers): ${error.message}`,
+      )
+    }
+    out.push(...(data ?? []))
+  }
+
+  return out
+}
+
+/**
  * Fetch raw daily_deal_flow rows for a carrier (server-side only).
  * Exported for /api/ddf-lookup to cache and reuse across chunked requests.
  */
@@ -2164,19 +2273,7 @@ export async function processAmamFilesForDealTracker(
 
   const policyNumbers = policies.map(p => p.policy_number)
 
-  let existingEntries: any[] = []
-  try {
-    existingEntries = await fetchAllPaginated(() =>
-      supabase
-        .from('deal_tracker')
-        .select('*')
-        .eq('agency_carrier_id', agencyCarrierId)
-        .in('policy_number', policyNumbers)
-        .order('id', { ascending: true })
-    )
-  } catch (existingError: any) {
-    console.warn('[Deal Tracker] Failed to fetch existing deal_tracker entries:', existingError?.message)
-  }
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
 
   const existingMap = new Map<string, any>()
   if (existingEntries) {
@@ -2398,11 +2495,7 @@ export async function processAmamFilesForDealTrackerFromRows(
   const policyNumbers = policyRows.map((p: any) => p.policy_number)
 
   let stepStart = Date.now()
-  const { data: existingEntries } = await supabase
-    .from('deal_tracker')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
   console.log('[Deal Tracker] FromRows: existing deal_tracker fetch', policyNumbers.length, 'policies took', Math.round((Date.now() - stepStart) / 1000), 's')
   const existingMap = new Map<string, any>()
   if (existingEntries) existingEntries.forEach((e: any) => existingMap.set(e.policy_number, e))
@@ -2624,15 +2717,7 @@ export async function processAmamCommissionsForDealTracker(
 
   const typedCommissions = commissions as Array<{ policy_number: string; advance?: string | number | null; created_at?: string | null }>
   const policyNumbers = Array.from(new Set(typedCommissions.map((c) => c.policy_number)))
-  const { data: existingEntries, error: existingError } = await supabase
-    .from('deal_tracker')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
-
-  if (existingError) {
-    console.warn('[Deal Tracker] Failed to fetch existing entries:', existingError)
-  }
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
 
   const existingMap = new Map<string, any>()
   if (existingEntries) {
@@ -2670,17 +2755,11 @@ export async function processAmamCommissionsForDealTracker(
 
   let policiesMap = new Map<string, any>()
   if (allCommissionPolicyNumbers.length > 0) {
-    const { data: policies } = await supabase
-      .from('amam_policies')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .in('policy_number', allCommissionPolicyNumbers)
-    if (policies) {
-      const typedPolicies = policies as Array<{ policy_number: string }>
-      typedPolicies.forEach((p) => {
-        policiesMap.set(p.policy_number, p)
-      })
-    }
+    const policies = await fetchPoliciesByPolicyNumbers('amam_policies', agencyCarrierId, allCommissionPolicyNumbers)
+    const typedPolicies = policies as Array<{ policy_number: string }>
+    typedPolicies.forEach((p) => {
+      policiesMap.set(p.policy_number, p)
+    })
     console.log(
       '[Deal Tracker] AMAM commissions: loaded',
       policiesMap.size,
@@ -3041,11 +3120,7 @@ export async function processAmamCommissionsForDealTrackerFromRows(
   })
 
   const policyNumbers = Array.from(commissionMap.keys())
-  const { data: existingEntries } = await supabase
-    .from('deal_tracker')
-    .select('*')
-    .eq('agency_carrier_id', agencyCarrierId)
-    .in('policy_number', policyNumbers)
+  const existingEntries = await fetchExistingDealTracker(agencyCarrierId, policyNumbers)
   const existingMap = new Map<string, any>()
   if (existingEntries) existingEntries.forEach((e: any) => existingMap.set(e.policy_number, e))
 
@@ -3058,12 +3133,8 @@ export async function processAmamCommissionsForDealTrackerFromRows(
   const allCommissionPolicyNumbers = Array.from(new Set(commissionMap.keys()))
   let policiesMap = new Map<string, any>()
   if (allCommissionPolicyNumbers.length > 0) {
-    const { data: policies } = await supabase
-      .from('amam_policies')
-      .select('*')
-      .eq('agency_carrier_id', agencyCarrierId)
-      .in('policy_number', allCommissionPolicyNumbers)
-    if (policies) policies.forEach((p: any) => policiesMap.set(p.policy_number, p))
+    const policies = await fetchPoliciesByPolicyNumbers('amam_policies', agencyCarrierId, allCommissionPolicyNumbers)
+    policies.forEach((p: any) => policiesMap.set(p.policy_number, p))
   }
 
   let statusMappingMap = await bulkFetchStatusMappings(carrierId, carrierCode)
@@ -3474,30 +3545,24 @@ export async function saveDealTrackerEntries(
     }
   })
 
+  // One snapshot of the existing rows for exactly the policies being saved. Every
+  // preserve/guard step below reads from it. Fetched by policy number in small
+  // batches: loading whole agencies hit the 1,000-row response cap and silently
+  // skipped the rest. Throws on error so a failed read cannot overwrite data.
+  const existingRowsByKey = await fetchExistingDealTrackerForSave(cleanEntries)
+
   // When incoming deal_value is 0, preserve existing deal_value only (do not overwrite with 0).
   const needsDealValuePreserve = cleanEntries.filter(
     e => e.agency_carrier_id && e.policy_number && (e.deal_value === 0 || e.deal_value === '0')
   )
   if (needsDealValuePreserve.length > 0) {
-    const keySet = new Set(needsDealValuePreserve.map(e => `${e.agency_carrier_id}\0${e.policy_number}`))
-    const agencyCarrierIds = [...new Set(needsDealValuePreserve.map(e => e.agency_carrier_id))]
     const existingMap = new Map<string, { deal_value: number | null }>()
-    const CHUNK = 100
-    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
-      const ids = agencyCarrierIds.slice(i, i + CHUNK)
-      const { data: rows } = await supabase
-        .from('deal_tracker')
-        .select('agency_carrier_id, policy_number, deal_value')
-        .in('agency_carrier_id', ids)
-      if (rows) {
-        for (const row of rows) {
-          const key = `${row.agency_carrier_id}\0${row.policy_number}`
-          if (keySet.has(key)) {
-            const dv = row.deal_value != null ? (typeof row.deal_value === 'string' ? parseFloat(row.deal_value) : row.deal_value) : null
-            existingMap.set(key, { deal_value: Number.isNaN(dv as number) ? null : (dv as number) })
-          }
-        }
-      }
+    for (const e of needsDealValuePreserve) {
+      const key = `${e.agency_carrier_id}\0${e.policy_number}`
+      const row = existingRowsByKey.get(key)
+      if (!row) continue
+      const dv = row.deal_value != null ? (typeof row.deal_value === 'string' ? parseFloat(row.deal_value) : row.deal_value) : null
+      existingMap.set(key, { deal_value: Number.isNaN(dv as number) ? null : (dv as number) })
     }
     cleanEntries = cleanEntries.map(e => {
       if (!e.agency_carrier_id || !e.policy_number) return e
@@ -3516,40 +3581,16 @@ export async function saveDealTrackerEntries(
     string,
     { deal_value: number | null; cc_value: number | null; charge_back: number | null; status: string | null }
   >()
-  const byAgency = new Map<string, string[]>()
-  for (const e of cleanEntries) {
-    if (!e.agency_carrier_id || !e.policy_number) continue
-    const list = byAgency.get(e.agency_carrier_id) ?? []
-    list.push(e.policy_number)
-    byAgency.set(e.agency_carrier_id, list)
-  }
-
-  for (const [agencyCarrierId, policyNumbersAll] of byAgency.entries()) {
-    // Dedup policy numbers
-    const uniq = Array.from(new Set(policyNumbersAll)).filter(Boolean)
-    const CHUNK = 500
-    for (let i = 0; i < uniq.length; i += CHUNK) {
-      const nums = uniq.slice(i, i + CHUNK)
-      const { data: rows } = await supabase
-        .from('deal_tracker')
-        .select('agency_carrier_id, policy_number, deal_value, cc_value, charge_back, status')
-        .eq('agency_carrier_id', agencyCarrierId)
-        .in('policy_number', nums)
-      if (rows) {
-        for (const row of rows as any[]) {
-          const key = `${row.agency_carrier_id}\0${row.policy_number}`
-          const dv = row.deal_value != null ? (typeof row.deal_value === 'number' ? row.deal_value : parseFloat(String(row.deal_value))) : null
-          const ccDb = row.cc_value != null ? (typeof row.cc_value === 'number' ? row.cc_value : parseFloat(String(row.cc_value))) : null
-          const cb = row.charge_back != null ? (typeof row.charge_back === 'number' ? row.charge_back : parseFloat(String(row.charge_back))) : null
-          existingFinanceMap.set(key, {
-            deal_value: Number.isFinite(dv as number) ? (dv as number) : null,
-            cc_value: Number.isFinite(ccDb as number) ? (ccDb as number) : null,
-            charge_back: Number.isFinite(cb as number) ? (cb as number) : null,
-            status: row.status ?? null,
-          })
-        }
-      }
-    }
+  for (const [key, row] of existingRowsByKey) {
+    const dv = row.deal_value != null ? (typeof row.deal_value === 'number' ? row.deal_value : parseFloat(String(row.deal_value))) : null
+    const ccDb = row.cc_value != null ? (typeof row.cc_value === 'number' ? row.cc_value : parseFloat(String(row.cc_value))) : null
+    const cb = row.charge_back != null ? (typeof row.charge_back === 'number' ? row.charge_back : parseFloat(String(row.charge_back))) : null
+    existingFinanceMap.set(key, {
+      deal_value: Number.isFinite(dv as number) ? (dv as number) : null,
+      cc_value: Number.isFinite(ccDb as number) ? (ccDb as number) : null,
+      charge_back: Number.isFinite(cb as number) ? (cb as number) : null,
+      status: row.status ?? null,
+    })
   }
 
   const sameNum = (a: any, b: any) => {
@@ -3617,22 +3658,12 @@ export async function saveDealTrackerEntries(
     e => (e.effective_date == null || e.effective_date === '') && e.agency_carrier_id && e.policy_number
   )
   if (needsEffectiveDatePreserve.length > 0) {
-    const keySet = new Set(needsEffectiveDatePreserve.map(e => `${e.agency_carrier_id}\0${e.policy_number}`))
-    const agencyCarrierIds = [...new Set(needsEffectiveDatePreserve.map(e => e.agency_carrier_id))]
     const existingMap = new Map<string, string>()
-    const CHUNK = 100
-    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
-      const ids = agencyCarrierIds.slice(i, i + CHUNK)
-      const { data: rows } = await supabase
-        .from('deal_tracker')
-        .select('agency_carrier_id, policy_number, effective_date')
-        .in('agency_carrier_id', ids)
-      if (rows) {
-        for (const row of rows) {
-          if (row.effective_date != null && row.effective_date !== '' && keySet.has(`${row.agency_carrier_id}\0${row.policy_number}`)) {
-            existingMap.set(`${row.agency_carrier_id}\0${row.policy_number}`, row.effective_date)
-          }
-        }
+    for (const e of needsEffectiveDatePreserve) {
+      const key = `${e.agency_carrier_id}\0${e.policy_number}`
+      const row = existingRowsByKey.get(key)
+      if (row && row.effective_date != null && row.effective_date !== '') {
+        existingMap.set(key, row.effective_date)
       }
     }
     cleanEntries = cleanEntries.map(e => {
@@ -3648,23 +3679,12 @@ export async function saveDealTrackerEntries(
     e => e.agency_carrier_id && e.policy_number && (e.notes == null || String(e.notes).trim() === '')
   )
   if (needsNotesPreserve.length > 0) {
-    const keySet = new Set(needsNotesPreserve.map(e => `${e.agency_carrier_id}\0${e.policy_number}`))
-    const agencyCarrierIds = [...new Set(needsNotesPreserve.map(e => e.agency_carrier_id))]
     const existingNotesMap = new Map<string, string | null>()
-    const CHUNK = 100
-    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
-      const ids = agencyCarrierIds.slice(i, i + CHUNK)
-      const { data: rows } = await supabase
-        .from('deal_tracker')
-        .select('agency_carrier_id, policy_number, notes')
-        .in('agency_carrier_id', ids)
-      if (rows) {
-        for (const row of rows) {
-          const key = `${row.agency_carrier_id}\0${row.policy_number}`
-          if (keySet.has(key) && row.notes != null && String(row.notes).trim() !== '') {
-            existingNotesMap.set(key, row.notes)
-          }
-        }
+    for (const e of needsNotesPreserve) {
+      const key = `${e.agency_carrier_id}\0${e.policy_number}`
+      const row = existingRowsByKey.get(key)
+      if (row && row.notes != null && String(row.notes).trim() !== '') {
+        existingNotesMap.set(key, row.notes)
       }
     }
     cleanEntries = cleanEntries.map(e => {
@@ -3685,30 +3705,18 @@ export async function saveDealTrackerEntries(
     e => e.agency_carrier_id && e.policy_number && (isEmptyOrDash(e.ghl_name) || isEmptyOrDash(e.ghl_stage))
   )
   if (needsGhlPreserve.length > 0) {
-    const keySet = new Set(needsGhlPreserve.map(e => `${e.agency_carrier_id}\0${e.policy_number}`))
-    const agencyCarrierIds = [...new Set(needsGhlPreserve.map(e => e.agency_carrier_id))]
     const existingGhlMap = new Map<string, { ghl_name: string | null; ghl_stage: string | null; policy_status: string | null }>()
-    const CHUNK = 100
-    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
-      const ids = agencyCarrierIds.slice(i, i + CHUNK)
-      const { data: rows } = await supabase
-        .from('deal_tracker')
-        .select('agency_carrier_id, policy_number, ghl_name, ghl_stage, policy_status')
-        .in('agency_carrier_id', ids)
-      if (rows) {
-        for (const row of rows as any[]) {
-          const key = `${row.agency_carrier_id}\0${row.policy_number}`
-          if (keySet.has(key)) {
-            const gname = row.ghl_name != null ? String(row.ghl_name).trim() : null
-            const gstage = row.ghl_stage != null ? String(row.ghl_stage).trim() : null
-            existingGhlMap.set(key, {
-              ghl_name: gname && gname !== '-' ? row.ghl_name : null,
-              ghl_stage: gstage && gstage !== '-' ? row.ghl_stage : null,
-              policy_status: row.policy_status != null ? String(row.policy_status) : null,
-            })
-          }
-        }
-      }
+    for (const e of needsGhlPreserve) {
+      const key = `${e.agency_carrier_id}\0${e.policy_number}`
+      const row = existingRowsByKey.get(key)
+      if (!row) continue
+      const gname = row.ghl_name != null ? String(row.ghl_name).trim() : null
+      const gstage = row.ghl_stage != null ? String(row.ghl_stage).trim() : null
+      existingGhlMap.set(key, {
+        ghl_name: gname && gname !== '-' ? row.ghl_name : null,
+        ghl_stage: gstage && gstage !== '-' ? row.ghl_stage : null,
+        policy_status: row.policy_status != null ? String(row.policy_status) : null,
+      })
     }
     cleanEntries = cleanEntries.map(e => {
       if (!e.agency_carrier_id || !e.policy_number) return e
@@ -3732,23 +3740,9 @@ export async function saveDealTrackerEntries(
 
   // Snapshot each existing row's ghl_stage before saving, so we can log stage
   // movement (deal_tracker_status_history) for whatever the upsert actually changes.
-  const ghlHistoryKeys = cleanEntries.filter(e => e.agency_carrier_id && e.policy_number)
   const existingGhlStageForHistory = new Map<string, { id: string; ghl_stage: string | null; carrier: string | null }>()
-  {
-    const agencyCarrierIds = [...new Set(ghlHistoryKeys.map(e => e.agency_carrier_id))]
-    const CHUNK = 100
-    for (let i = 0; i < agencyCarrierIds.length; i += CHUNK) {
-      const ids = agencyCarrierIds.slice(i, i + CHUNK)
-      const { data: rows } = await supabase
-        .from('deal_tracker')
-        .select('id, agency_carrier_id, policy_number, ghl_stage, carrier')
-        .in('agency_carrier_id', ids)
-      if (rows) {
-        for (const row of rows as any[]) {
-          existingGhlStageForHistory.set(`${row.agency_carrier_id}\0${row.policy_number}`, row)
-        }
-      }
-    }
+  for (const [key, row] of existingRowsByKey) {
+    existingGhlStageForHistory.set(key, { id: row.id, ghl_stage: row.ghl_stage ?? null, carrier: row.carrier ?? null })
   }
 
   // Final save-time guard, independent of carrier or how ghl_stage was computed
