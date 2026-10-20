@@ -1,8 +1,15 @@
 import { getDdfClient } from '@/lib/ddfSource'
 import { decryptTrackingIdSafe } from '@/lib/trackingIdCrypto'
+import { mapWithConcurrency } from '@/lib/concurrency'
 
 const LEADS_TABLE = process.env.NEW_DDF_LEADS_TABLE || 'leads'
 const LEAD_NOTES_TABLE = process.env.NEW_DDF_LEAD_NOTES_TABLE || 'lead_notes'
+/** Policy numbers per `.in('policy_id', …)` request — keeps the URL well under the server limit. */
+const LEAD_LOOKUP_CHUNK = 200
+/** Rows per page when scanning leads; must not exceed the API's max rows per response. */
+const LEAD_SCAN_PAGE = 1000
+/** Lead updates in flight at once during a bulk stage sync. */
+const LEAD_WRITE_CONCURRENCY = 10
 
 function trimPolicy(value: unknown): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim()
@@ -185,6 +192,8 @@ export type DdfStatusStageSync = {
  */
 export type SyncLeadStagesResult = {
   matchedCount: number
+  /** Leads actually written (matched leads already on the right stage are skipped). */
+  updatedCount: number
   unmatchedPolicyNumbers: string[]
 }
 
@@ -283,16 +292,22 @@ export async function findLeadsForPolicyNumbers(
   const processedLeadIds = new Set<string>()
 
   // ── Path 1: already-attached leads — exact policy_id match ─────────────────
+  // Batched: a single .in() over a whole carrier file (~2,000 policy numbers)
+  // overflows the request URL and comes back as a 400, matching nothing.
   {
-    const { data: rows, error } = await ddf
-      .from(LEADS_TABLE)
-      .select('id, policy_id, stage_id, pipeline_id')
-      .in('policy_id', Array.from(wanted))
+    const wantedList = Array.from(wanted)
+    const rows: LeadRow[] = []
+    for (let i = 0; i < wantedList.length; i += LEAD_LOOKUP_CHUNK) {
+      const { data, error } = await ddf
+        .from(LEADS_TABLE)
+        .select('id, policy_id, stage_id, pipeline_id')
+        .in('policy_id', wantedList.slice(i, i + LEAD_LOOKUP_CHUNK))
+      if (error) console.error('[leadMatch] policy_id lookup error:', error.message)
+      rows.push(...((data ?? []) as LeadRow[]))
+    }
+    console.log(`[leadMatch] policy_id path found ${rows.length} lead(s)`)
 
-    if (error) console.error('[leadMatch] policy_id lookup error:', error.message)
-    console.log(`[leadMatch] policy_id path found ${(rows ?? []).length} lead(s)`)
-
-    for (const raw of (rows ?? []) as LeadRow[]) {
+    for (const raw of rows) {
       const policyNumber = trimPolicy(raw.policy_id)
       if (!policyNumber || !wanted.has(policyNumber)) continue
       processedLeadIds.add(raw.id)
@@ -302,17 +317,29 @@ export async function findLeadsForPolicyNumbers(
 
   // ── Path 2: new/unattached leads — decrypt tracking_id ──────────────────────
   // Scans every lead with a non-null tracking_id and decrypts to compare — the
-  // only way to find a lead that has no policy_id yet.
-  {
-    const { data: rows, error } = await ddf
-      .from(LEADS_TABLE)
-      .select('id, tracking_id, policy_id, stage_id, pipeline_id')
-      .not('tracking_id', 'is', null)
+  // only way to find a lead that has no policy_id yet. Paged, because a single
+  // read stops at the API's 1,000-row cap and silently misses later leads.
+  // Skipped entirely when path 1 already matched every policy.
+  if (matchedByPolicy.size < wanted.size) {
+    const rows: LeadRow[] = []
+    for (let from = 0; ; from += LEAD_SCAN_PAGE) {
+      const { data, error } = await ddf
+        .from(LEADS_TABLE)
+        .select('id, tracking_id, policy_id, stage_id, pipeline_id')
+        .not('tracking_id', 'is', null)
+        .order('id')
+        .range(from, from + LEAD_SCAN_PAGE - 1)
+      if (error) {
+        console.error('[leadMatch] tracking_id fetch error:', error.message)
+        break
+      }
+      const page = (data ?? []) as LeadRow[]
+      rows.push(...page)
+      if (page.length < LEAD_SCAN_PAGE) break
+    }
+    console.log(`[leadMatch] tracking_id path: scanning ${rows.length} leads with non-null tracking_id`)
 
-    if (error) console.error('[leadMatch] tracking_id fetch error:', error.message)
-    console.log(`[leadMatch] tracking_id path: scanning ${(rows ?? []).length} leads with non-null tracking_id`)
-
-    for (const raw of (rows ?? []) as LeadRow[]) {
+    for (const raw of rows) {
       if (!raw.tracking_id || processedLeadIds.has(raw.id)) continue
       const policyNumber = trimPolicy(decryptTrackingIdSafe(raw.tracking_id))
       if (!policyNumber || !wanted.has(policyNumber) || matchedByPolicy.has(policyNumber)) continue
@@ -379,7 +406,7 @@ export async function syncLeadStagesFromDdfStatus(
     byPolicyNumber.set(policyNumber, trimPolicy(u.status))
   }
 
-  if (byPolicyNumber.size === 0) return { matchedCount: 0, unmatchedPolicyNumbers: [] }
+  if (byPolicyNumber.size === 0) return { matchedCount: 0, updatedCount: 0, unmatchedPolicyNumbers: [] }
 
   console.log(`[sync] byPolicyNumber size=${byPolicyNumber.size}`)
 
@@ -391,16 +418,22 @@ export async function syncLeadStagesFromDdfStatus(
   // ── resolve pipeline stages once, across every pipeline ────────────────────
   const stageMatchesByName = await fetchPipelineStagesByName(ddf)
 
-  for (const [policyNumber, lead] of matchedByPolicy) {
-    const status = byPolicyNumber.get(policyNumber) ?? ''
-    await resolveAndWriteLeadUpdate(ddf, stageMatchesByName, lead, policyNumber, status)
-  }
+  // Leads already on the right stage are skipped inside resolveAndWriteLeadUpdate,
+  // so only real changes cost a round trip; those run a few at a time.
+  const results = await mapWithConcurrency(
+    Array.from(matchedByPolicy),
+    LEAD_WRITE_CONCURRENCY,
+    ([policyNumber, lead]) =>
+      resolveAndWriteLeadUpdate(ddf, stageMatchesByName, lead, policyNumber, byPolicyNumber.get(policyNumber) ?? ''),
+  )
+  const updatedCount = results.filter((r) => r.wrote).length
+  console.log(`[sync] matched ${matchedByPolicy.size} lead(s), updated ${updatedCount}`)
 
   if (unmatchedPolicyNumbers.length > 0) {
     console.log(`[sync] ${unmatchedPolicyNumbers.length} polic${unmatchedPolicyNumbers.length === 1 ? 'y' : 'ies'} matched no lead (needs manual attach):`, unmatchedPolicyNumbers)
   }
 
-  return { matchedCount: matchedByPolicy.size, unmatchedPolicyNumbers }
+  return { matchedCount: matchedByPolicy.size, updatedCount, unmatchedPolicyNumbers }
 }
 
 export type AttachPolicyResult = { ok: boolean; error?: string }
