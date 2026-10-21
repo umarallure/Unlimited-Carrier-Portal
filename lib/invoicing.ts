@@ -623,6 +623,10 @@ type LatestCommissionSignal = {
   latestKind: 'sale' | 'chargeback' | null
   latestSaleGross: number | null
   latestChargebackGross: number | null
+  /** Statement date latestSaleGross came from (yyyy-mm-dd). Escrow needs this. */
+  latestSaleDate: string | null
+  /** Statement date latestChargebackGross came from (yyyy-mm-dd). */
+  latestChargebackDate: string | null
 }
 
 type CommissionFacts = {
@@ -678,13 +682,21 @@ async function batchFetchCommissionFacts(
           latestKind: null,
           latestSaleGross: null,
           latestChargebackGross: null,
+          latestSaleDate: null,
+          latestChargebackDate: null,
         }
       if (cur.latestKind == null) {
         if (cbGross < 0) cur.latestKind = 'chargeback'
         else if (advance > 0) cur.latestKind = 'sale'
       }
-      if (cur.latestSaleGross == null && advance > 0) cur.latestSaleGross = advance
-      if (cur.latestChargebackGross == null && cbGross < 0) cur.latestChargebackGross = cbGross
+      if (cur.latestSaleGross == null && advance > 0) {
+        cur.latestSaleGross = advance
+        cur.latestSaleDate = String(row.date || '') || null
+      }
+      if (cur.latestChargebackGross == null && cbGross < 0) {
+        cur.latestChargebackGross = cbGross
+        cur.latestChargebackDate = String(row.date || '') || null
+      }
       latestSignalsByPolicy.set(key, cur)
       if (cbGross < 0) {
         const txDate = String(row.date || '')
@@ -704,6 +716,7 @@ async function batchFetchCommissionFacts(
     const current = latestSignalsByPolicy.get(key)
     if (!current) continue
     current.latestChargebackGross = gross
+    current.latestChargebackDate = latestChargebackDateByPolicy.get(key) ?? current.latestChargebackDate
     latestSignalsByPolicy.set(key, current)
   }
   return {
@@ -744,6 +757,10 @@ async function batchFetchLatestCommissionSignalByPolicy(
           latestKind: null,
           latestSaleGross: null,
           latestChargebackGross: null,
+          // Kept null here on purpose: this second copy feeds buildInvoiceDraft,
+          // which has no use for the statement dates. Only the shared type needs them.
+          latestSaleDate: null,
+          latestChargebackDate: null,
         }
       const advance = roundMoney(toNumber(row.advance_amount))
       const cbGross = roundMoney(normalizeChargeBack(toNumber(row.charge_back_amount)))
@@ -1418,6 +1435,17 @@ export type BpoInvoiceLine = {
   dealValue?: number | null
   /** Current GHL stage from deal_tracker — shown in audit popup. */
   ghlStage?: string | null
+  /**
+   * Date of the carrier commission statement this line's money came from
+   * (yyyy-mm-dd), or null when the amount is an estimate. This is NOT draftDate,
+   * which is a policy date. The escrow split keys off this to tell an earlier
+   * uninvoiced commission from a current one.
+   */
+  commissionDate?: string | null
+  /** Where leadValue came from. Escrow only ever acts on 'commission_statement'. */
+  amountBasis?: 'commission_statement' | 'prorated_estimate' | 'deal_value'
+  /** True when this line repays a prior chargeback, so escrow can exclude it. */
+  isRepay?: boolean
 }
 
 /** Per call-center (BPO) invoice: sales block on top, chargebacks below. */
@@ -2007,6 +2035,11 @@ export async function buildBpoInvoiceLines(
       effectiveDate: deal?.effective_date ?? null,
       agencyCarrierId: tx.agency_carrier_id,
       ghlStage: deal?.ghl_stage ?? null,
+      // The transaction query is bounded to [startDate, endDate], so a real line's
+      // commission date is always inside the cycle and it can never be an escrow deal.
+      commissionDate: tx.date ?? null,
+      amountBasis: 'commission_statement' as const,
+      isRepay: false,
     }
 
     const advance = toNumber(tx.advance_amount)
@@ -2118,6 +2151,21 @@ export async function buildBpoInvoiceLines(
           : gross
         const leadValue = roundMoney(repayGross * BPO_INVOICE_LEAD_VALUE_SHARE)
         if (leadValue === 0) continue
+        // Provenance for the escrow split. A catch-up line billed off a real past
+        // carrier statement is an earlier uninvoiced commission; one billed off the
+        // 9-month pro-rated estimate is not, and carries no commission date at all.
+        const isRepayLine = salesStatus === 'repay' || salesStatus === 'cb_repay'
+        const usedStatement = statementSaleGross != null && statementSaleGross > 0
+        const amountBasis = isRepayLine
+          ? ('commission_statement' as const)
+          : usedStatement
+            ? ('commission_statement' as const)
+            : ('prorated_estimate' as const)
+        const commissionDate = isRepayLine
+          ? (signal?.latestChargebackDate ?? null)
+          : usedStatement
+            ? (signal?.latestSaleDate ?? null)
+            : null
         const callCenter = normalizeCallCenterName(deal.call_center)
         const insuredName = (deal.ghl_name || deal.name || '—').trim() || '—'
         const ddfFinancial = await getDdfFinancial(
@@ -2137,6 +2185,9 @@ export async function buildBpoInvoiceLines(
           callCenter,
           {
             id: `cp-deal-${key}`,
+            commissionDate,
+            amountBasis,
+            isRepay: isRepayLine,
             insuredName,
             carrier: deal.carrier?.trim() || '—',
             product,
@@ -2225,6 +2276,9 @@ export async function buildBpoInvoiceLines(
       callCenter,
       {
         id: `stage-cb-${key}`,
+        commissionDate: null,
+        amountBasis: 'deal_value',
+        isRepay: false,
         insuredName,
         carrier: deal.carrier?.trim() || '—',
         product,
@@ -2310,6 +2364,9 @@ export async function buildBpoInvoiceLines(
           callCenter,
           {
             id: `stage-cb-${key}`,
+        commissionDate: null,
+        amountBasis: 'deal_value',
+        isRepay: false,
             insuredName: insuredDisplayName,
             carrier: deal.carrier?.trim() || '—',
             product,
@@ -2390,6 +2447,9 @@ export async function buildBpoInvoiceLines(
           callCenter,
           {
             id: `stage-repay-${key}`,
+            commissionDate: null,
+            amountBasis: 'deal_value',
+            isRepay: true,
             insuredName,
             carrier: deal.carrier?.trim() || '—',
             product,
