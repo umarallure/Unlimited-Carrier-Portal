@@ -22,6 +22,7 @@ import {
     ClipboardCheck,
     AlertTriangle,
     Landmark,
+    Vault,
     ScrollText,
     Sheet,
     Mail,
@@ -208,6 +209,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Invoicing"
           icon={FileText}
           active={navActive('/invoicing')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/escrow"
+          label="Escrow"
+          icon={Vault}
+          active={navActive('/escrow')}
           collapsed={collapsed}
         />
         <NavRow
