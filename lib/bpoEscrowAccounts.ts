@@ -48,7 +48,8 @@ export interface EscrowAccountRow {
   hold_rate_override: number | string | null
   opening_balance: number | string
   pre_draw_balance: number | string | null
-  negative_balance: number | string
+  /** 'preview' shows the split without withholding; 'live' actually reduces the payout. */
+  mode: 'preview' | 'live'
   status: 'active' | 'ended'
   start_date: string | null
   end_date: string | null
@@ -65,7 +66,6 @@ export interface EscrowBalanceRow {
   opening_balance: number | string
   ledger_movement: number | string
   balance: number | string
-  negative_balance: number | string
   pre_draw_balance: number | string | null
   exempt: boolean
   status: 'active' | 'ended'
@@ -190,8 +190,20 @@ export function settingsForCallCenter(context: EscrowContext, callCenter: string
   }
 }
 
-/** Current escrow position for one center. Zeroes when the center has no account. */
-export function accountStateForCallCenter(context: EscrowContext, callCenter: string): EscrowAccountState {
+/**
+ * Current escrow position for one center. Zeroes when the center has no account.
+ *
+ * `negativeBalance` is passed in rather than stored here on purpose. What a
+ * center owes us is invoicing_call_center_ledger.ending_chargeback_amount,
+ * carried forward onto the invoice screen where it can be edited; holding a
+ * second copy against the escrow account would be a double count waiting to
+ * happen.
+ */
+export function accountStateForCallCenter(
+  context: EscrowContext,
+  callCenter: string,
+  negativeBalance = 0
+): EscrowAccountState {
   const key = normalizeCallCenterName(callCenter)
   const account = context.accounts.get(key)
   const balance = context.balances.get(key)
@@ -199,8 +211,21 @@ export function accountStateForCallCenter(context: EscrowContext, callCenter: st
     balance: toNumber(balance?.balance, toNumber(account?.opening_balance, 0)),
     preDrawBalance:
       account?.pre_draw_balance == null ? null : toNumber(account.pre_draw_balance, 0),
-    negativeBalance: toNumber(account?.negative_balance, 0),
+    negativeBalance: Math.max(0, negativeBalance),
   }
+}
+
+/**
+ * Whether a center's holdback actually reduces what it is paid.
+ *
+ * A center with no account, or one still in preview, is paid in full and the
+ * split is shown for checking only. Nothing goes live by accident.
+ */
+export function escrowModeForCallCenter(context: EscrowContext, callCenter: string): 'preview' | 'live' {
+  if (!context.enabled) return 'preview'
+  const account = context.accounts.get(normalizeCallCenterName(callCenter))
+  if (!account || account.exempt || account.status === 'ended') return 'preview'
+  return account.mode === 'live' ? 'live' : 'preview'
 }
 
 /**
@@ -261,7 +286,7 @@ export async function saveEscrowAccount(input: {
   capAmountOverride: number | null
   holdRateOverride: number | null
   openingBalance: number
-  negativeBalance: number
+  mode: 'preview' | 'live'
   status: 'active' | 'ended'
   notes: string | null
 }): Promise<void> {
@@ -277,7 +302,7 @@ export async function saveEscrowAccount(input: {
       cap_amount_override: input.capAmountOverride,
       hold_rate_override: input.holdRateOverride,
       opening_balance: input.openingBalance,
-      negative_balance: input.negativeBalance,
+      mode: input.mode,
       status: input.status,
       notes: input.notes,
       created_by_email: auth?.user?.email ?? null,
