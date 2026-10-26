@@ -123,6 +123,65 @@ test('a zero-value line takes no part in the split', () => {
   assert.equal(classifyEscrowLine(sale('a', 0), CYCLE_START, CYCLE_END).klass, 'ineligible')
 })
 
+// ───────────── sending a deal to escrow by hand (spec F12) ─────────────
+
+test('a deal forced to escrow is held even though the rules would not', () => {
+  // Commissioned inside the cycle, so the rules call it current.
+  const forced: EscrowInputLine = { ...sale('a', 500, '2026-10-02'), forcedToEscrow: true }
+  const { klass, warning } = classifyEscrowLine(forced, CYCLE_START, CYCLE_END)
+  assert.equal(klass, 'escrow_deal')
+  assert.match(String(warning), /by hand/)
+})
+
+test('forcing works on a pro-rated estimate too, which the rules always refuse', () => {
+  const forced: EscrowInputLine = {
+    id: 'cp-deal-x', leadValue: 400, kind: 'sale', isRepay: false,
+    commissionDate: null, amountBasis: 'prorated_estimate', forcedToEscrow: true,
+  }
+  assert.equal(classifyEscrowLine(forced, CYCLE_START, CYCLE_END).klass, 'escrow_deal')
+})
+
+test('a chargeback cannot be forced into escrow', () => {
+  const forced: EscrowInputLine = { ...chargeback('a', 300), forcedToEscrow: true }
+  assert.equal(classifyEscrowLine(forced, CYCLE_START, CYCLE_END).klass, 'chargeback')
+})
+
+test('a zero-value line cannot be forced into escrow', () => {
+  const forced: EscrowInputLine = { ...sale('a', 0), forcedToEscrow: true }
+  assert.equal(classifyEscrowLine(forced, CYCLE_START, CYCLE_END).klass, 'ineligible')
+})
+
+test('a forced deal moves out of the payout and into escrow, and still balances', () => {
+  const plain = run([sale('a', 1000), sale('b', 4000)])
+  assert.equal(plain.escrowDealsToEscrow, 0)
+  assert.equal(plain.hold, 1000, '20% of 5,000')
+  assert.equal(plain.payout, 4000)
+
+  const forced = run([{ ...sale('a', 1000), forcedToEscrow: true }, sale('b', 4000)])
+  assert.equal(forced.escrowDealsToEscrow, 1000, 'the forced deal goes to escrow whole')
+  assert.equal(forced.currentCommissions, 4000, 'and leaves the payout pool')
+  assert.equal(forced.hold, 800, 'the holdback is now 20% of what is left')
+  assert.equal(forced.payout, 3200)
+  assert.equal(forced.closingBalance, 1800)
+  assert.equal(forced.reconciles, true)
+  assert.equal(round2(forced.payout + forced.closingBalance), forced.draftCenterShare)
+})
+
+test('forcing past the cap pays the excess rather than losing it', () => {
+  const r = run([{ ...sale('a', 3000), forcedToEscrow: true }], { balance: 9000 })
+  assert.equal(r.escrowDealsToEscrow, 1000, 'only the room under the cap')
+  assert.equal(r.escrowDealsExcessToPayout, 2000)
+  assert.equal(r.payout, 2000)
+  assert.equal(r.closingBalance, 10000)
+  assert.equal(r.reconciles, true)
+})
+
+test('forcing is reported in the warnings so it is never silent', () => {
+  const r = run([{ ...sale('a', 1000), forcedToEscrow: true }, sale('b', 500)])
+  assert.equal(r.warnings.length, 1)
+  assert.match(r.warnings[0], /by hand/)
+})
+
 // ───────────────── worked examples from the specification ─────────────────
 
 test('example 1 — normal cycle: net 6,000, no debt, escrow 0', () => {
