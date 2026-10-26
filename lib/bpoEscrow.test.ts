@@ -258,6 +258,38 @@ test('a debt larger than the cycle is only partly paid down', () => {
   assert.equal(r.reconciles, true)
 })
 
+test('the parts account for every cent, which is what the posting function re-checks', () => {
+  // post_invoice_with_escrow recomputes exactly this before writing anything and
+  // aborts the whole transaction if it does not hold, so a UI bug cannot quietly
+  // post a wrong liability. Keep the two in step.
+  const cases = [
+    run([escrowDeal('a', 950.16, '2026-09-24'), sale('b', 7595.11)]),
+    run([sale('a', 5000)], { negativeBalance: 2000 }),
+    run([sale('a', 6000)], { balance: 9500 }),
+    run([escrowDeal('a', 14000, '2026-09-10')]),
+    run([sale('a', 1000), chargeback('b', 1500)]),
+    run([sale('a', 1234.57), chargeback('b', 99.99)], { balance: 123.45, negativeBalance: 50 }),
+  ]
+  for (const r of cases) {
+    const accounted = round2(
+      r.payout + r.hold + r.escrowDealsToEscrow + r.negativeBalanceApplied - r.shortfall
+    )
+    assert.equal(accounted, r.draftCenterShare, `split does not balance: ${JSON.stringify(r)}`)
+    assert.equal(r.reconciles, true)
+  }
+})
+
+test('shortfall is non-zero only when the cycle itself went backwards', () => {
+  assert.equal(run([sale('a', 1000)]).shortfall, 0)
+  assert.equal(run([sale('a', 1000), chargeback('b', 1500)]).shortfall, 500)
+  assert.equal(run([chargeback('a', 300)], { negativeBalance: 700 }).shortfall, 300)
+})
+
+test('the closing balance is the opening balance plus everything that went in', () => {
+  const r = run([escrowDeal('a', 400, '2026-09-15'), sale('b', 5000)], { balance: 1000 })
+  assert.equal(round2(r.openingBalance + r.escrowDealsToEscrow + r.hold), r.closingBalance)
+})
+
 test('chargebacks net against current commissions before the hold', () => {
   const r = run([sale('a', 5000), chargeback('b', 1000)])
   assert.equal(r.netCommissions, 4000)

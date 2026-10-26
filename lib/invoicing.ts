@@ -2497,136 +2497,215 @@ export async function buildBpoInvoiceLines(
   return { startDate, endDate, rangeLabel, groups }
 }
 
-function leadValueForStatusHistory(
-  policy: InvoicePolicyDraft,
-  leadValueByPolicyKey: Record<string, number> | undefined,
-): number {
-  const fromLines = leadValueByPolicyKey?.[policy.policyKey]
-  if (fromLines !== undefined && Number.isFinite(fromLines)) {
-    return roundMoney(fromLines)
-  }
-  return roundMoney(policy.grossNet * BPO_INVOICE_LEAD_VALUE_SHARE)
+/**
+ * True when PostgREST is telling us the function itself is not there, rather than
+ * that the call failed. Distinguishes "the migration has not been run" from a
+ * real posting error.
+ */
+function isMissingDatabaseFunction(error: { code?: string; message?: string }): boolean {
+  if (error?.code === 'PGRST202' || error?.code === '42883') return true
+  const message = String(error?.message ?? '').toLowerCase()
+  return message.includes('could not find the function') || message.includes('does not exist')
 }
 
+/** One policy on a posted invoice. Amounts are the center's 50% share. */
+export type PostInvoicePolicy = {
+  agencyCarrierId: string | null
+  policyNumber: string
+  carrier: string
+  /** The center share actually invoiced, after screen edits. */
+  leadValue: number
+  /** The same figure before any edit, kept so the two can be compared later. */
+  baseLeadValue: number
+  status: InvoicingStatus
+}
+
+/** The escrow figures a live center is posting, exactly as the invoice showed them. */
+export type PostInvoiceEscrow = {
+  mode: 'preview' | 'live'
+  balanceBefore: number
+  openingTransfer: number
+  hold: number
+  holdRatePct: number
+  negativeBalanceApplied: number
+  negativeBalanceRemaining: number
+  shortfall: number
+  payout: number
+  balanceAfter: number
+}
+
+export type PostInvoiceGroup = {
+  callCenter: string
+  /** Sum of the invoiced center share — what the invoice printed. */
+  baseAmount: number
+  /** Gross equivalent, i.e. twice the center share. */
+  grossAmount: number
+  /** What the center owed us coming in, from the previous cycle. */
+  previousChargeback: number
+  escrow: PostInvoiceEscrow | null
+  policies: PostInvoicePolicy[]
+}
+
+/**
+ * Post an invoice batch, and any escrow it holds, in ONE transaction.
+ *
+ * Two deliberate differences from how this used to work.
+ *
+ * It is atomic. The old version ran four separate inserts from the browser, so a
+ * failure part-way left a batch with no policy lines, or no ledger row, and
+ * nothing to say it had happened. PostgREST gives every insert its own
+ * transaction, so the only way to make a batch and its escrow entries succeed or
+ * fail together is to do the work inside the database. Hence the RPC.
+ *
+ * It records what the invoice printed. The ledger used to be built from
+ * buildInvoiceDraft's ccNet while the invoice printed buildBpoInvoiceLines'
+ * leadValue, with per-line edits and exclusions never reaching the ledger at all.
+ * The caller now passes the figures from the screen, so the ledger and the PDF
+ * the center signs finally agree. Batches already paid are untouched.
+ *
+ * The database does NOT recompute the escrow split — it cannot, because the split
+ * depends on which lines were excluded or edited on screen. It verifies instead:
+ * the parts must sum to the center's total, and the balance the screen started
+ * from must still be the balance in the ledger. Either check failing aborts
+ * everything.
+ */
 export async function markInvoiceBatchPaid(input: {
   startDate: string
   endDate: string
-  groups: InvoiceCallCenterGroup[]
-  overridesByPolicyKey: Record<string, number>
-  previousChargebackByCallCenter: Record<string, number>
+  groups: PostInvoiceGroup[]
   paidByEmail?: string | null
-  /** Totals from BPO invoice lines (after UI edits). Keys are `policyKey`. Falls back to 50% of policy gross when omitted. */
-  leadValueByPolicyKey?: Record<string, number>
 }): Promise<{ batchId: string }> {
-  const weekOfRangeLabel = formatInvoiceRangeLabel(input.startDate, input.endDate)
-  const allPolicies = input.groups.flatMap((group) => group.policies)
-  const grossTotal = roundMoney(allPolicies.reduce((sum, p) => sum + p.grossNet, 0))
-  const ccTotalsByCallCenter = new Map<string, number>()
-  for (const group of input.groups) {
-    const groupBase = roundMoney(
-      group.policies.reduce((sum, p) => {
-        const override = input.overridesByPolicyKey[p.policyKey]
-        return sum + (Number.isFinite(override) ? override : p.ccNet)
-      }, 0),
-    )
-    ccTotalsByCallCenter.set(group.callCenter, groupBase)
-  }
-  const ccTotal = roundMoney(
-    input.groups.reduce((sum, group) => {
-      const base = ccTotalsByCallCenter.get(group.callCenter) || 0
-      const previousChargeback = input.previousChargebackByCallCenter[group.callCenter] || 0
-      const net = roundMoney(base - previousChargeback)
-      return sum + (net > 0 ? net : 0)
-    }, 0),
-  )
-
-  const { data: batchInsert, error: batchError } = await supabase
-    .from('invoicing_batches')
-    .insert({
-      start_date: input.startDate,
-      end_date: input.endDate,
-      gross_total: grossTotal,
-      cc_total: ccTotal,
-      paid_at: new Date().toISOString(),
-      paid_by_email: input.paidByEmail || null,
-    })
-    .select('id')
-    .single()
-
-  if (batchError || !batchInsert?.id) {
-    throw new Error(batchError?.message || 'Failed to create invoice batch')
+  if (!input.groups.length) {
+    throw new Error('There is nothing to mark as paid.')
   }
 
-  const batchId = String(batchInsert.id)
-  const lines: Record<string, unknown>[] = []
-  const statuses: Record<string, unknown>[] = []
-  const ledgers: Record<string, unknown>[] = []
-
-  for (const group of input.groups) {
-    const baseByCenter = ccTotalsByCallCenter.get(group.callCenter) || 0
-    const previousChargeback = roundMoney(input.previousChargebackByCallCenter[group.callCenter] || 0)
-    const netAfterPrevious = roundMoney(baseByCenter - previousChargeback)
-    const payableAmount = netAfterPrevious > 0 ? netAfterPrevious : 0
-    const endingChargebackAmount = netAfterPrevious < 0 ? Math.abs(netAfterPrevious) : 0
-
-    ledgers.push({
-      batch_id: batchId,
-      call_center: group.callCenter,
-      previous_chargeback_amount: previousChargeback,
-      current_cycle_base_amount: baseByCenter,
-      payable_amount: payableAmount,
-      ending_chargeback_amount: endingChargebackAmount,
-    })
-
-    for (const policy of group.policies) {
-      const override = input.overridesByPolicyKey[policy.policyKey]
-      const finalCcAmount = Number.isFinite(override) ? roundMoney(override) : policy.ccNet
-      lines.push({
-        batch_id: batchId,
-        agency_carrier_id: policy.agencyCarrierId,
+  const payload = {
+    startDate: input.startDate,
+    endDate: input.endDate,
+    weekOf: formatInvoiceRangeLabel(input.startDate, input.endDate),
+    paidByEmail: input.paidByEmail || null,
+    groups: input.groups.map((group) => ({
+      callCenter: group.callCenter,
+      baseAmount: roundMoney(group.baseAmount),
+      grossAmount: roundMoney(group.grossAmount),
+      previousChargeback: roundMoney(group.previousChargeback),
+      escrow: group.escrow,
+      policies: group.policies.map((policy) => ({
+        agencyCarrierId: policy.agencyCarrierId,
+        policyNumber: policy.policyNumber,
         carrier: policy.carrier,
-        policy_number: policy.policyNumber,
-        call_center: group.callCenter,
-        gross_amount: policy.grossNet,
-        base_cc_amount: policy.ccNet,
-        final_cc_amount: finalCcAmount,
-        latest_invoicing_status: policy.latestInvoicingStatus,
-      })
-      statuses.push({
-        batch_id: batchId,
-        agency_carrier_id: policy.agencyCarrierId,
-        carrier: policy.carrier,
-        policy_number: policy.policyNumber,
-        invoicing_status: policy.latestInvoicingStatus,
-        effective_date: input.endDate,
-        week_of: weekOfRangeLabel,
-        lead_value: leadValueForStatusHistory(policy, input.leadValueByPolicyKey),
-      })
-    }
+        leadValue: roundMoney(policy.leadValue),
+        baseLeadValue: roundMoney(policy.baseLeadValue),
+        status: policy.status,
+      })),
+    })),
   }
 
-  if (lines.length) {
-    const { error: lineError } = await supabase.from('invoicing_policy_lines').insert(lines)
-    if (lineError) {
-      throw new Error(lineError.message)
-    }
-  }
+  const { data, error } = await supabase.rpc('post_invoice_with_escrow', { payload })
 
-  if (statuses.length) {
-    const { error: statusError } = await supabase.from('invoicing_status_history').insert(statuses)
-    if (statusError) {
-      throw new Error(statusError.message)
+  if (error) {
+    // The posting function lives in the database, so the SQL has to be applied
+    // before this code is deployed. Say so plainly rather than surfacing
+    // PostgREST's "Could not find the function" to whoever is paying invoices.
+    if (isMissingDatabaseFunction(error)) {
+      throw new Error(
+        'Invoices cannot be posted because the database is not set up for it yet: ' +
+          'post_invoice_with_escrow is missing. Run bpo_escrow.sql and bpo_escrow_phase2.sql ' +
+          'in the Supabase SQL editor, then try again. Nothing was saved.',
+      )
     }
+    throw new Error(error.message)
   }
-  if (ledgers.length) {
-    const { error: ledgerError } = await supabase.from('invoicing_call_center_ledger').insert(ledgers)
-    if (ledgerError) {
-      throw new Error(ledgerError.message)
-    }
+  const batchId = typeof data === 'string' ? data : String((data as { id?: string } | null)?.id ?? '')
+  if (!batchId) {
+    throw new Error('The invoice was posted but no batch id came back.')
   }
-
   return { batchId }
 }
+
+/**
+ * Mark a paid batch unpaid again.
+ *
+ * Everything removed is copied into invoicing_unpaid_backups first, including the
+ * escrow entries. Escrow itself is cancelled with reversal rows rather than
+ * deletions, because the escrow ledger is append-only — what was held, and later
+ * un-held, both stay on the record. The batch is then deleted and its policy
+ * lines, status history and call-center ledger go with it.
+ *
+ * Saved drafts are left alone, so the period reverts to an unpaid draft.
+ */
+export async function unpostInvoiceBatch(input: {
+  batchId: string
+  reason?: string | null
+}): Promise<void> {
+  const { error } = await supabase.rpc('unpost_invoice_batch', {
+    p_batch_id: input.batchId,
+    p_reason: input.reason || null,
+  })
+  if (error) {
+    if (isMissingDatabaseFunction(error)) {
+      throw new Error(
+        'This invoice cannot be un-paid from here yet: unpost_invoice_batch is missing. ' +
+          'Run bpo_escrow_phase2.sql in the Supabase SQL editor. Nothing was changed.',
+      )
+    }
+    throw new Error(error.message)
+  }
+}
+
+/** Paid batches overlapping a period, so a cycle can be un-paid from the screen. */
+export type PaidBatchSummary = {
+  batchId: string
+  startDate: string
+  endDate: string
+  paidAt: string | null
+  paidByEmail: string | null
+  callCenters: string[]
+  ccTotal: number
+}
+
+export async function getPaidBatchesForPeriod(startDate: string, endDate: string): Promise<PaidBatchSummary[]> {
+  const { data, error } = await supabase
+    .from('invoicing_batches')
+    .select('id, start_date, end_date, paid_at, paid_by_email, cc_total')
+    .eq('start_date', startDate)
+    .eq('end_date', endDate)
+    .order('paid_at', { ascending: false })
+  if (error) throw new Error(error.message)
+
+  const batches = (data || []) as Array<{
+    id: string
+    start_date: string
+    end_date: string
+    paid_at: string | null
+    paid_by_email: string | null
+    cc_total: number | null
+  }>
+  if (!batches.length) return []
+
+  const { data: ledgerRows } = await supabase
+    .from('invoicing_call_center_ledger')
+    .select('batch_id, call_center')
+    .in('batch_id', batches.map((b) => b.id))
+
+  const centersByBatch = new Map<string, string[]>()
+  for (const row of (ledgerRows || []) as Array<{ batch_id: string; call_center: string }>) {
+    const list = centersByBatch.get(row.batch_id) || []
+    list.push(row.call_center)
+    centersByBatch.set(row.batch_id, list)
+  }
+
+  return batches.map((b) => ({
+    batchId: b.id,
+    startDate: b.start_date,
+    endDate: b.end_date,
+    paidAt: b.paid_at,
+    paidByEmail: b.paid_by_email,
+    callCenters: (centersByBatch.get(b.id) || []).sort(),
+    ccTotal: toNumber(b.cc_total),
+  }))
+}
+
 
 export async function saveInvoiceDraftSnapshot(input: {
   startDate: string
