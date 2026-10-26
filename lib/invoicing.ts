@@ -1479,6 +1479,11 @@ export type InvoiceDraftSnapshot = {
   excludedLineIds: Record<string, true>
   lineEdits: Record<string, Partial<BpoInvoiceLine>>
   pdfExportedByCenter: Record<string, true>
+  /**
+   * Deals sent to escrow by hand (spec F12), line id -> reason. Optional, so a
+   * draft saved before the override existed still loads.
+   */
+  forcedEscrowLines?: Record<string, string>
   savedAt: string
 }
 
