@@ -60,7 +60,24 @@ function formatMoney(value: number): string {
 
 type AuditCommRow = { date: string; advance_amount: number | null; charge_back_amount: number | null; carrier: string }
 type AuditInvHistRow = { invoicing_status: string; effective_date: string; week_of: string | null; lead_value: number | null }
-type AuditDetails = { loading: boolean; commHistory: AuditCommRow[]; invHistory: AuditInvHistRow[] }
+/** One time this policy's money was put into, or taken out of, escrow. */
+type AuditEscrowRow = {
+  source: 'work_chest' | 'ledger'
+  callCenter: string
+  cycleStart: string | null
+  cycleEnd: string | null
+  amount: number
+  /** 'held' while the money is still in escrow, otherwise when it came out. */
+  releasedAt: string | null
+  note: string | null
+}
+
+type AuditDetails = {
+  loading: boolean
+  commHistory: AuditCommRow[]
+  invHistory: AuditInvHistRow[]
+  escrowHistory: AuditEscrowRow[]
+}
 
 function auditStatusMeta(status: InvoicingStatus): { headline: string; isChargeback: boolean } {
   switch (status) {
@@ -200,10 +217,10 @@ export default function InvoicingPage() {
   useEffect(() => {
     if (!auditLine) { setAuditDetails(null); return }
     const seq = ++auditFetchRef.current
-    setAuditDetails({ loading: true, commHistory: [], invHistory: [] })
+    setAuditDetails({ loading: true, commHistory: [], invHistory: [], escrowHistory: [] })
     const candidates = policyLookupCandidates(auditLine.policyNumber)
     ;(async () => {
-      const [commRes, histRes] = await Promise.all([
+      const [commRes, histRes, chestRes, escrowRes] = await Promise.all([
         supabase.from('commission_tracker')
           .select('date, advance_amount, charge_back_amount, carrier')
           .in('policy_number', candidates)
@@ -214,12 +231,44 @@ export default function InvoicingPage() {
           .in('policy_number', candidates)
           .order('effective_date', { ascending: false })
           .limit(30),
+        // Deals held individually: the work chest, and any per-policy escrow
+        // entry. A percentage holdback has no per-policy amount, so it cannot
+        // appear here - it is a share of a whole cycle, not of one policy.
+        supabase.from('invoicing_work_chest_deals')
+          .select('call_center, center_amount, released_at, note, created_at, policy_number')
+          .in('policy_number', candidates),
+        supabase.from('bpo_escrow_ledger')
+          .select('call_center, entry_type, amount, cycle_start_date, cycle_end_date, memo, created_at, source_line_id')
+          .in('source_line_id', candidates),
       ])
       if (seq !== auditFetchRef.current) return
+
+      const escrowHistory: AuditEscrowRow[] = [
+        ...((chestRes.data || []) as Array<{ call_center: string; center_amount: number | string; released_at: string | null; note: string | null; created_at: string }>).map((row) => ({
+          source: 'work_chest' as const,
+          callCenter: row.call_center,
+          cycleStart: null,
+          cycleEnd: null,
+          amount: Number(row.center_amount) || 0,
+          releasedAt: row.released_at,
+          note: row.note,
+        })),
+        ...((escrowRes.data || []) as Array<{ call_center: string; entry_type: string; amount: number | string; cycle_start_date: string | null; cycle_end_date: string | null; memo: string | null }>).map((row) => ({
+          source: 'ledger' as const,
+          callCenter: row.call_center,
+          cycleStart: row.cycle_start_date,
+          cycleEnd: row.cycle_end_date,
+          amount: Number(row.amount) || 0,
+          releasedAt: null,
+          note: row.memo ?? row.entry_type,
+        })),
+      ]
+
       setAuditDetails({
         loading: false,
         commHistory: (commRes.data || []) as AuditCommRow[],
         invHistory: (histRes.data || []) as AuditInvHistRow[],
+        escrowHistory,
       })
     })().catch(() => {
       if (seq !== auditFetchRef.current) return
@@ -1740,6 +1789,81 @@ export default function InvoicingPage() {
                         </table>
                       ) : null}
                     </HistTable>
+
+                    <Divider />
+
+                    {/* Whether this policy's money is sitting in escrow. The point
+                        is to catch a policy being invoiced while it is still held,
+                        which would pay for it twice. */}
+                    {SH('Escrow History')}
+                    {(() => {
+                      const rows = auditDetails?.escrowHistory ?? []
+                      // Whether the money is still in escrow is decided by the
+                      // LEDGER, not by work_chest_deals.released_at. That field was
+                      // stamped when the work chest was migrated into the ledger, so
+                      // it means "moved", not "paid back out" - reading it as a
+                      // release would show money as returned while it is still held.
+                      const hasBeenReleased = rows.some(
+                        (r) => r.source === 'ledger' && /release/i.test(r.note ?? ''),
+                      )
+                      const stillHeld = hasBeenReleased
+                        ? []
+                        : rows.filter((r) => r.source === 'work_chest')
+                      const heldTotal = round2(stillHeld.reduce((sum, r) => sum + r.amount, 0))
+                      return (
+                        <>
+                          {stillHeld.length > 0 && (
+                            <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400/50 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-900 dark:text-amber-200">
+                              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                              <span>
+                                <strong>${formatMoney(heldTotal)} is still held in escrow</strong> for this policy. If it
+                                is being invoiced again as a sale, it would be paid twice — check before marking paid.
+                              </span>
+                            </div>
+                          )}
+                          <HistTable loading={auditDetails?.loading} empty={rows.length === 0}>
+                            {rows.length ? (
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="bg-slate-50 dark:bg-slate-900/60">
+                                    <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Call center</th>
+                                    <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Cycle</th>
+                                    <th className="px-2 py-1.5 text-right font-semibold text-slate-500">Amount</th>
+                                    <th className="px-2 py-1.5 text-left font-semibold text-slate-500">State</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                  {rows.map((row, i) => (
+                                    <tr key={i} className="hover:bg-slate-50/50">
+                                      <td className="px-2 py-1.5 text-slate-600 dark:text-slate-400">{row.callCenter}</td>
+                                      <td className="px-2 py-1.5 font-mono text-slate-600 dark:text-slate-400">
+                                        {row.cycleStart && row.cycleEnd ? `${row.cycleStart} → ${row.cycleEnd}` : '—'}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right font-mono font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                                        ${formatMoney(Math.abs(row.amount))}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-slate-600 dark:text-slate-400">
+                                        {row.source === 'work_chest'
+                                          ? hasBeenReleased
+                                            ? 'Released from escrow'
+                                            : 'Held in escrow'
+                                          : row.note || 'In escrow'}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            ) : null}
+                          </HistTable>
+                          {rows.length === 0 && !auditDetails?.loading && (
+                            <p className="mt-1 text-[11px] leading-relaxed text-slate-400 dark:text-slate-500">
+                              Never held individually. A percentage holdback is a share of a whole cycle rather than of
+                              one policy, so it does not appear here.
+                            </p>
+                          )}
+                        </>
+                      )
+                    })()}
                   </div>
 
                 </div>
