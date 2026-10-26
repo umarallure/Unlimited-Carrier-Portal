@@ -21,6 +21,7 @@ import {
     Moon,
     ClipboardCheck,
     AlertTriangle,
+    Landmark,
     ScrollText,
     Sheet,
     Mail,
@@ -207,6 +208,13 @@ const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
           label="Invoicing"
           icon={FileText}
           active={navActive('/invoicing')}
+          collapsed={collapsed}
+        />
+        <NavRow
+          href="/escrow-settings"
+          label="Escrow Settings"
+          icon={Landmark}
+          active={navActive('/escrow-settings')}
           collapsed={collapsed}
         />
         <NavRow
