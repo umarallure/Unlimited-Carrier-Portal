@@ -10,6 +10,7 @@ import {
   round2,
   type EscrowAccountState,
   type EscrowInputLine,
+  type EscrowRelease,
   type EscrowSettings,
 } from './bpoEscrow'
 
@@ -363,6 +364,115 @@ test('the hold is rounded and the payout derived, so the parts sum to the whole'
   assert.equal(r.hold, 1519.02)
   assert.equal(r.payout, 6076.09)
   assert.equal(round2(r.hold + r.payout), 7595.11)
+})
+
+// ───────── releasing a held deal that has charged back ─────────
+
+function release(lineId: string, policyNumber: string, amount: number): EscrowRelease {
+  return { lineId, policyNumber, amount, reason: 'Held deal charged back' }
+}
+
+function runWithRelease(
+  lines: EscrowInputLine[],
+  releases: EscrowRelease[],
+  account: Partial<EscrowAccountState> = {}
+) {
+  return computeEscrow({
+    lines,
+    releases,
+    cycleStart: CYCLE_START,
+    cycleEnd: CYCLE_END,
+    settings: SETTINGS,
+    account: { ...FRESH, ...account },
+  })
+}
+
+test('a released deal is paid out and leaves escrow', () => {
+  // The center was never paid for this deal, so the chargeback cannot simply be
+  // deducted - the held amount is returned first.
+  const r = runWithRelease([chargeback('cb1', 279.25)], [release('cb1', 'TER6596198', 837.77)], { balance: 2000 })
+  assert.equal(r.releasedFromEscrow, 837.77)
+  assert.equal(r.releasedCount, 1)
+  assert.equal(r.closingBalance, 1162.23, '2,000 less the released 837.77')
+  // Paid the release, less the chargeback it came with.
+  assert.equal(r.payout, 558.52)
+  assert.equal(r.reconciles, true)
+})
+
+test('a chargeback equal to what was held nets to nothing', () => {
+  const r = runWithRelease([chargeback('cb1', 368.19)], [release('cb1', 'AMH6355368', 368.19)], { balance: 2000 })
+  assert.equal(r.payout, 0, 'nothing to pay')
+  assert.equal(r.closingBalance, 1631.81, 'and nothing left held for it')
+  assert.equal(r.reconciles, true)
+})
+
+test('releasing frees cap room that the same cycle can refill', () => {
+  // This is the ordering decision: the cap limits the balance, so money leaving
+  // this cycle lowers the balance the cap is measured against.
+  const r = runWithRelease(
+    [escrowDeal('a', 5000, '2026-09-20'), sale('b', 1000)],
+    [release('cb1', 'P1', 1500)],
+    { balance: 9000 },
+  )
+  assert.equal(r.releasedFromEscrow, 1500)
+  assert.equal(r.escrowDealsToEscrow, 2500, 'cap room is 10,000 - (9,000 - 1,500)')
+  assert.equal(r.escrowDealsExcessToPayout, 2500)
+  assert.equal(r.closingBalance, 10000)
+  assert.equal(r.reconciles, true)
+})
+
+test('escrow cannot pay out more than it holds', () => {
+  const r = runWithRelease([chargeback('cb1', 100)], [release('cb1', 'P1', 5000)], { balance: 800 })
+  assert.equal(r.releasedFromEscrow, 800, 'only what is actually there')
+  assert.equal(r.releaseShortfall, 4200)
+  assert.equal(r.closingBalance, 0)
+  assert.match(r.warnings.join(' '), /holds less than/)
+  assert.equal(r.reconciles, true)
+})
+
+test('a chargeback larger than the amount held leaves the excess as a normal chargeback', () => {
+  const r = runWithRelease([sale('s1', 1000), chargeback('cb1', 500)], [release('cb1', 'P1', 200)], { balance: 2000 })
+  assert.equal(r.releasedFromEscrow, 200)
+  // 1,000 earned less the 500 chargeback = 500; 20% held; plus the 200 released.
+  assert.equal(r.netCommissions, 500)
+  assert.equal(r.hold, 100)
+  assert.equal(r.payout, 600)
+  assert.equal(r.reconciles, true)
+})
+
+test('the released money is not held again on the way out', () => {
+  const r = runWithRelease([chargeback('cb1', 0.01)], [release('cb1', 'P1', 1000)], { balance: 5000 })
+  assert.equal(r.hold, 0, 'nothing positive remains from the cycle itself to hold')
+  assert.equal(r.payout, 999.99, 'the release passes straight through')
+})
+
+test('Orbit IQ, Oct 14-27 2026: the three charged-back held deals', () => {
+  // Held last cycle: Caldwell 368.19, Jones 255.87, White 837.77 = 1,461.83.
+  const r = computeEscrow({
+    lines: [
+      // Commissioned before the cycle opened, so an escrow deal.
+      sale('earlier', 5317.72, '2026-09-28'),
+      // Commissioned inside it, so ordinary current business.
+      sale('current', 10981.84, '2026-10-20'),
+      chargeback('cb-all', 3409.69),
+    ],
+    releases: [
+      release('cb1', 'AMH6355368', 368.19),
+      release('cb2', 'AMH6354867', 255.87),
+      release('cb3', 'TER6596198', 837.77),
+    ],
+    cycleStart: '2026-10-14',
+    cycleEnd: '2026-10-27',
+    settings: SETTINGS,
+    account: { balance: 8528.55, preDrawBalance: null, negativeBalance: 0 },
+  })
+  assert.equal(r.releasedFromEscrow, 1461.83)
+  assert.equal(r.escrowDealsToEscrow, 2933.28, 'the freed cap room is refilled')
+  assert.equal(r.escrowDealsExcessToPayout, 2384.44)
+  assert.equal(r.hold, 0, 'the cap is full again')
+  assert.equal(r.payout, 11418.42)
+  assert.equal(r.closingBalance, 10000)
+  assert.equal(r.reconciles, true)
 })
 
 // ─────────────────────────── the switch ───────────────────────────

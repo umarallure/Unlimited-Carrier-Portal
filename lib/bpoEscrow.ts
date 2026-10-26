@@ -73,6 +73,24 @@ export type EscrowInputLine = {
   forcedToEscrow?: boolean
 }
 
+/**
+ * Money coming back OUT of escrow because the deal it was held against has
+ * charged back.
+ *
+ * A center is never paid for a deal that is held - the money sits in escrow. So
+ * charging that deal back would claw back something the center never received.
+ * Instead the held amount is released and paid, and the chargeback then applies
+ * normally, which nets to what the center is genuinely owed.
+ */
+export type EscrowRelease = {
+  /** The chargeback line that triggered it. */
+  lineId: string
+  policyNumber: string
+  /** Positive: how much comes out of escrow. */
+  amount: number
+  reason?: string
+}
+
 export type EscrowClassifiedLine = {
   id: string
   klass: EscrowLineClass
@@ -87,6 +105,12 @@ export type EscrowComputation = {
   capAmount: number
   holdRateUsed: number
   openingBalance: number
+
+  /** Taken back out because a held deal charged back. */
+  releasedFromEscrow: number
+  releasedCount: number
+  /** Asked for but not available, because escrow did not hold that much. */
+  releaseShortfall: number
 
   // Steps 1-2 — earlier unpaid commissions (R5)
   escrowDealsCenterShare: number
@@ -204,6 +228,9 @@ function emptyComputation(
     capAmount: settings.capAmount,
     holdRateUsed: 0,
     openingBalance: account.balance,
+    releasedFromEscrow: 0,
+    releasedCount: 0,
+    releaseShortfall: 0,
     escrowDealsCenterShare: 0,
     escrowDealsToEscrow: 0,
     escrowDealsExcessToPayout: 0,
@@ -240,8 +267,10 @@ export function computeEscrow(input: {
   cycleEnd: string
   settings: EscrowSettings
   account: EscrowAccountState
+  /** Held deals that charged back this cycle and are being paid out. */
+  releases?: EscrowRelease[]
 }): EscrowComputation {
-  const { lines, cycleStart, cycleEnd, settings, account } = input
+  const { lines, cycleStart, cycleEnd, settings, account, releases = [] } = input
 
   if (!settings.enabled) return emptyComputation('disabled', settings, account)
   if (settings.exempt) return emptyComputation('exempt', settings, account)
@@ -270,8 +299,24 @@ export function computeEscrow(input: {
   const openingBalance = round2(account.balance)
   const capAmount = round2(settings.capAmount)
 
+  // ─── Step 1b: money leaves escrow before anything else is worked out ───
+  // Ordering matters and is deliberate. The cap limits the BALANCE, and the
+  // specification's formula reads `cap - balance` at the moment of holding, so a
+  // release that happens this cycle genuinely lowers the balance the cap is
+  // measured against. Releasing first therefore reopens cap room that this
+  // cycle can refill, which keeps the cushion at its target instead of leaving
+  // it short. Releasing last would pay the center more now and leave escrow
+  // under-filled.
+  //
+  // Escrow cannot pay out more than it holds, so an over-large release is
+  // trimmed and the shortfall reported rather than driving the balance negative.
+  const requestedRelease = round2(releases.reduce((sum, r) => sum + clampAtZero(r.amount), 0))
+  const releasedFromEscrow = round2(Math.min(requestedRelease, clampAtZero(openingBalance)))
+  const releaseShortfall = round2(requestedRelease - releasedFromEscrow)
+  const balanceAfterRelease = round2(openingBalance - releasedFromEscrow)
+
   // ─── Step 2: earlier unpaid amounts go to escrow, up to the cap (R2, R5) ───
-  const capRoomForDeals = clampAtZero(round2(capAmount - openingBalance))
+  const capRoomForDeals = clampAtZero(round2(capAmount - balanceAfterRelease))
   const escrowDealsToEscrow = round2(Math.min(clampAtZero(escrowDealsCenterShare), capRoomForDeals))
   // Anything over the cap is paid now, and is NOT subjected to the hold.
   const escrowDealsExcessToPayout = round2(escrowDealsCenterShare - escrowDealsToEscrow)
@@ -284,13 +329,19 @@ export function computeEscrow(input: {
   const negativeBalanceApplied = round2(Math.min(clampAtZero(netCommissions), negativeBalanceOpening))
   const remainderAfterNegative = round2(netCommissions - negativeBalanceApplied)
 
-  // A cycle that is itself negative grows the debt and carries it forward, as today.
-  const shortfall = round2(clampAtZero(-remainderAfterNegative))
+  // A cycle that is itself negative grows the debt and carries it forward - but
+  // not before any released money has absorbed it. Releasing 837.77 for a deal
+  // that charged back 279.25 pays the center 558.52; it must not instead pay the
+  // whole 837.77 and carry 279.25 forward as a debt, which would be the same
+  // clawback the release exists to prevent, merely deferred.
+  const grossShortfall = round2(clampAtZero(-remainderAfterNegative))
+  const shortfallCoveredByRelease = round2(Math.min(grossShortfall, releasedFromEscrow))
+  const shortfall = round2(grossShortfall - shortfallCoveredByRelease)
   const negativeBalanceRemaining = round2(negativeBalanceOpening - negativeBalanceApplied + shortfall)
   const positiveRemainder = round2(clampAtZero(remainderAfterNegative))
 
   // ─── Step 5: hold, never past the cap (R1, R2, R9) ───
-  const balanceAfterDeals = round2(openingBalance + escrowDealsToEscrow)
+  const balanceAfterDeals = round2(balanceAfterRelease + escrowDealsToEscrow)
   const holdRateUsed =
     account.preDrawBalance != null && account.balance < account.preDrawBalance
       ? settings.postDrawHoldRate
@@ -299,17 +350,29 @@ export function computeEscrow(input: {
   const hold = round2(clampAtZero(Math.min(holdRateUsed * positiveRemainder, capRoomForHold)))
 
   // ─── Step 6: the rest is the payout ───
-  const payout = round2(clampAtZero(round2(positiveRemainder - hold) + escrowDealsExcessToPayout))
+  // The released money joins the payout, less whatever of it covered a shortfall.
+  const payout = round2(
+    clampAtZero(round2(positiveRemainder - hold) + escrowDealsExcessToPayout) +
+      round2(releasedFromEscrow - shortfallCoveredByRelease),
+  )
 
   // ─── Step 7: the new balance ───
   const closingBalance = round2(balanceAfterDeals + hold)
   const capRemaining = round2(clampAtZero(capAmount - closingBalance))
 
   const draftCenterShare = round2(escrowDealsCenterShare + netCommissions)
+  // The release is money from a previous cycle, not from this one's share, so it
+  // is subtracted back out before the parts are compared to the total.
   const accountedFor = round2(
-    payout + hold + escrowDealsToEscrow + negativeBalanceApplied - shortfall
+    payout + hold + escrowDealsToEscrow + negativeBalanceApplied - shortfall - releasedFromEscrow
   )
   const reconciles = Math.abs(accountedFor - draftCenterShare) < 0.005
+
+  if (releaseShortfall > 0) {
+    warnings.push(
+      `Escrow holds less than the ${requestedRelease.toFixed(2)} being released for charged-back deals; only ${releasedFromEscrow.toFixed(2)} could be paid out.`
+    )
+  }
 
   if (!reconciles) {
     warnings.push(
@@ -324,6 +387,9 @@ export function computeEscrow(input: {
     capAmount,
     holdRateUsed,
     openingBalance,
+    releasedFromEscrow,
+    releasedCount: releases.length,
+    releaseShortfall,
     escrowDealsCenterShare,
     escrowDealsToEscrow,
     escrowDealsExcessToPayout,
