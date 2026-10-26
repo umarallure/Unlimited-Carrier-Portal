@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { supabase } from '@/lib/supabaseClient'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -37,6 +38,7 @@ import {
   type EscrowLedgerEntry,
 } from '@/lib/escrowLedgerReport'
 import { ESCROW_LEDGER_TABLE } from '@/lib/bpoEscrowAccounts'
+import { cycleRouteKey } from '@/lib/escrowCycleDetail'
 
 function money(value: number): string {
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -224,6 +226,7 @@ export default function EscrowPage() {
                     <TableHead className={cn(adminThPlain, 'text-right')}>Reversed</TableHead>
                     <TableHead className={cn(adminThPlain, 'text-right')}>Net</TableHead>
                     <TableHead className={cn(adminThPlain, 'text-right')}>Held after</TableHead>
+                    <TableHead className={cn(adminThPlain, 'text-right')} />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -258,6 +261,21 @@ export default function EscrowPage() {
                           <TableCell className={cn('text-right font-semibold tabular-nums', adminTdStrong)}>
                             ${money(cycle.runningTotal)}
                           </TableCell>
+                          <TableCell className="text-right">
+                            {/* stopPropagation so following the link does not also
+                                toggle the row open behind it */}
+                            <Button
+                              asChild
+                              size="sm"
+                              variant="outline"
+                              className={adminOutlineBtn}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <Link href={`/escrow/${cycleRouteKey(cycle.cycleStart, cycle.cycleEnd)}`}>
+                                View details
+                              </Link>
+                            </Button>
+                          </TableCell>
                         </TableRow>
                         {open &&
                           cycle.centers.map((center) => (
@@ -269,6 +287,7 @@ export default function EscrowPage() {
                               <TableCell className="text-right text-sm"><Amount value={center.outflow} tone="out" /></TableCell>
                               <TableCell className="text-right text-sm"><Amount value={center.reversed} tone="out" /></TableCell>
                               <TableCell className="text-right text-sm"><Amount value={center.net} /></TableCell>
+                              <TableCell />
                               <TableCell />
                             </TableRow>
                           ))}
