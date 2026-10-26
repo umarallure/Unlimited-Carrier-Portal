@@ -64,6 +64,13 @@ export type EscrowInputLine = {
   /** Date of the carrier statement this money came from; null when estimated. */
   commissionDate: string | null
   amountBasis: EscrowAmountBasis | null
+  /**
+   * Set by hand on the invoice screen to hold this deal regardless of what the
+   * rules would decide (spec F12). It only ever moves a deal INTO escrow; there
+   * is deliberately no way to force one out, because the rules exist to stop
+   * money being released by accident.
+   */
+  forcedToEscrow?: boolean
 }
 
 export type EscrowClassifiedLine = {
@@ -156,6 +163,16 @@ export function classifyEscrowLine(
   if (line.kind === 'chargeback') return { klass: 'chargeback' }
   if (!Number.isFinite(line.leadValue) || line.leadValue === 0) return { klass: 'ineligible' }
   if (line.leadValue < 0) return { klass: 'chargeback' }
+
+  // A deliberate override beats the rules, but only for a real positive sale -
+  // the checks above still stand, so a chargeback or an empty line cannot be
+  // forced into escrow.
+  if (line.forcedToEscrow) {
+    return {
+      klass: 'escrow_deal',
+      warning: `Line ${line.id} was sent to escrow by hand, not by the rules.`,
+    }
+  }
 
   if (line.isRepay) return { klass: 'current' }
   if (line.amountBasis !== 'commission_statement') return { klass: 'current' }

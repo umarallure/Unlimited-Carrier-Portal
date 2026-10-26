@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Calendar, ChevronLeft, ChevronRight, ClipboardList, Loader2, Shield } from 'lucide-react'
+import { AlertTriangle, Calendar, ChevronLeft, ChevronRight, ClipboardList, Landmark, Loader2, Shield } from 'lucide-react'
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import * as XLSX from 'xlsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -170,6 +170,11 @@ export default function InvoicingPage() {
   // read can never block an invoice from being generated.
   const [escrowContext, setEscrowContext] = useState<EscrowContext>(DISABLED_ESCROW_CONTEXT)
   /** Paid batches for the period on screen, so a cycle can be un-paid. */
+  /**
+   * Deals sent to escrow by hand (spec F12), keyed by line id, with the reason.
+   * Saved with the draft so the override and why it was made survive a reload.
+   */
+  const [forcedEscrowLines, setForcedEscrowLines] = useState<Record<string, string>>({})
   const [paidBatches, setPaidBatches] = useState<PaidBatchSummary[]>([])
   const [unpayingBatchId, setUnpayingBatchId] = useState<string | null>(null)
   const [auditLine, setAuditLine] = useState<BpoInvoiceLine | null>(null)
@@ -432,6 +437,7 @@ export default function InvoicingPage() {
       setPreviousChargebackByCallCenter(previousText)
       setExcludedPolicyKeys({})
       setExcludedLineIds({})
+      setForcedEscrowLines({})
       setLineEdits({})
       setPdfExportedByCenter({})
       setDraftSavedAt(null)
@@ -462,6 +468,7 @@ export default function InvoicingPage() {
       previousChargebackByCallCenter,
       excludedPolicyKeys,
       excludedLineIds,
+      forcedEscrowLines,
       lineEdits,
       pdfExportedByCenter,
       savedAt: new Date().toISOString(),
@@ -512,6 +519,7 @@ export default function InvoicingPage() {
       setPreviousChargebackByCallCenter(saved.previousChargebackByCallCenter || {})
       setExcludedPolicyKeys(saved.excludedPolicyKeys || {})
       setExcludedLineIds(saved.excludedLineIds || {})
+      setForcedEscrowLines(saved.forcedEscrowLines || {})
       setLineEdits(saved.lineEdits || {})
       setPdfExportedByCenter(saved.pdfExportedByCenter || {})
       setDraftSavedAt(record.updated_at || saved.savedAt || null)
@@ -858,6 +866,7 @@ export default function InvoicingPage() {
           isRepay: Boolean(line.isRepay),
           commissionDate: line.commissionDate ?? null,
           amountBasis: line.amountBasis ?? null,
+          forcedToEscrow: forcedEscrowLines[line.id] != null,
         })),
         ...group.chargebackLines.map((line) => ({
           id: line.id,
@@ -969,6 +978,42 @@ export default function InvoicingPage() {
     )
     if (!confirmed) return
     setExcludedPolicyKeys((prev) => ({ ...prev, [policyKey]: true }))
+  }
+
+  /**
+   * Hold this deal in escrow whatever the rules say, or release it back.
+   *
+   * Only ever applies to a positive sale: a chargeback or an empty row is
+   * rejected by the calculation anyway, so the button is not offered for them.
+   * Takes effect when the invoice is marked paid, and only for a center that is
+   * live - on a center in preview it changes the preview and nothing else.
+   */
+  const toggleForcedEscrow = (line: BpoInvoiceLine, callCenter: string) => {
+    if (forcedEscrowLines[line.id] != null) {
+      setForcedEscrowLines((prev) => {
+        const next = { ...prev }
+        delete next[line.id]
+        return next
+      })
+      return
+    }
+    if (line.leadValue <= 0) {
+      alert('Only a sale with a positive amount can be sent to escrow.')
+      return
+    }
+    const live = isEscrowLive(callCenter)
+    const reason = window.prompt(
+      [
+        `Send ${line.insuredName || line.policyNumber} ($${formatMoney(line.leadValue)}) to escrow for ${callCenter}?`,
+        live
+          ? 'This amount will be withheld from the payout and posted to the escrow ledger when the invoice is marked paid.'
+          : `${callCenter} is in preview, so this changes the preview only — nothing is withheld until the center is set to live.`,
+        'Reason (recorded with the draft):',
+      ].join('\n\n'),
+      '',
+    )
+    if (reason === null) return
+    setForcedEscrowLines((prev) => ({ ...prev, [line.id]: reason.trim() || 'No reason given' }))
   }
 
   const confirmAndExcludeLine = (lineId: string) => {
@@ -2425,17 +2470,42 @@ export default function InvoicingPage() {
                               </select>
                             </TableCell>
                             <TableCell className={cn(invoiceCell, 'print:hidden text-right')}>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => {
-                                  const policyKey = policyKeyByLineId.get(line.id) ?? resolvePolicyKey(group.callCenter, line.policyNumber)
-                                  if (policyKey) confirmAndExcludePolicy(policyKey)
-                                  else confirmAndExcludeLine(line.id)
-                                }}
-                              >
-                                Remove
-                              </Button>
+                              <div className="flex items-center justify-end gap-1.5">
+                                {/* Only offered for a real sale: the calculation
+                                    refuses to hold a chargeback or an empty row. */}
+                                {line.leadValue > 0 && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    title={
+                                      forcedEscrowLines[line.id] != null
+                                        ? `Sent to escrow by hand — ${forcedEscrowLines[line.id]}. Click to put it back in the payout.`
+                                        : 'Hold this deal in escrow regardless of the rules'
+                                    }
+                                    className={cn(
+                                      forcedEscrowLines[line.id] != null &&
+                                        'border-amber-500/60 bg-amber-500/20 text-amber-900 hover:bg-amber-500/30 dark:text-amber-100',
+                                    )}
+                                    onClick={() => toggleForcedEscrow(line, group.callCenter)}
+                                  >
+                                    <Landmark className="h-3.5 w-3.5" />
+                                    <span className="ml-1.5">
+                                      {forcedEscrowLines[line.id] != null ? 'In escrow' : 'Escrow'}
+                                    </span>
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => {
+                                    const policyKey = policyKeyByLineId.get(line.id) ?? resolvePolicyKey(group.callCenter, line.policyNumber)
+                                    if (policyKey) confirmAndExcludePolicy(policyKey)
+                                    else confirmAndExcludeLine(line.id)
+                                  }}
+                                >
+                                  Remove
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))
