@@ -2759,6 +2759,24 @@ export default function InvoicingPage() {
                     placeholder="0.00"
                   />
                 </div>
+                {/* What Balance due used to show: new business, less charge-backs, less
+                    last week's negative balance. Once a center's escrow is live, Balance
+                    due below becomes the payout after the holdback, so this keeps the
+                    figure before it visible. Shown only then, because otherwise the two
+                    rows would be identical. */}
+                {isEscrowLive(group.callCenter) && (
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-slate-300 bg-slate-100 px-3 py-2 dark:border-slate-600 dark:bg-slate-800/70">
+                    <span className="text-slate-800 dark:text-slate-100">
+                      Invoice total before holdback
+                      <span className="block text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                        new business − charge-backs − negative balance
+                      </span>
+                    </span>
+                    <span className="font-semibold tabular-nums text-slate-900 dark:text-white">
+                      ${formatMoney(balanceDueForBpo(group.callCenter, group.subtotal))}
+                    </span>
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-4 rounded-md bg-slate-900 px-3 py-2.5 text-white dark:bg-black">
                   <span className="font-medium">
                     Balance due
