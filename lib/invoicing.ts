@@ -122,6 +122,50 @@ const CANONICAL_CALL_CENTER_ALIASES: Array<{ canonical: string; aliases: string[
   { canonical: 'Winnerz limited', aliases: ['Winnerz limited', 'Winnerz Limited', 'Winnerz', 'Winners', 'Winners Limited'] },
   { canonical: 'Alternative', aliases: ['Alternative', 'Alternative BPO'] },
   { canonical: 'INB', aliases: ['INB', 'INB BPO'] },
+
+  // Active centres from bpo_centers_region_country.csv (as of 2026-10-29) that were not
+  // listed above. Being listed matters in three places, not just for folding spellings:
+  //   - the "All call centers" preset expands to ONLY the names in this list, so a centre
+  //     missing from it is never invoiced unless someone selects it by hand;
+  //   - escrow accounts are keyed by the canonical name;
+  //   - the invoice screen warns about any name that is not here.
+  // Inactive centres are left out on purpose, so "All" does not pull them in. That includes
+  // "Vize BPO": it is a different centre from "Vize" and must never fold into it. Insurvas
+  // Test Account is also left out so a test account never joins a real run.
+  // The canonical name is the spelling already used in deal_tracker and the escrow ledger,
+  // so adding an entry changes nothing for a centre that is already being invoiced.
+  { canonical: 'AEQ', aliases: ['AEQ'] },
+  { canonical: 'AES', aliases: ['AES'] },
+  { canonical: 'AJ BPO', aliases: ['AJ BPO'] }, // no deals under this name today
+  { canonical: 'Axeon', aliases: ['Axeon'] }, // no deals under this name today
+  { canonical: 'Boomerang', aliases: ['Boomerang'] },
+  { canonical: 'Brix Consultancy', aliases: ['Brix Consultancy'] }, // no deals under this name today
+  { canonical: 'Caliber Technologies', aliases: ['Caliber Technologies'] },
+  { canonical: 'CN2', aliases: ['CN2'] }, // no deals under this name today
+  { canonical: 'Connect X', aliases: ['Connect X'] },
+  { canonical: 'CSS', aliases: ['CSS'] }, // no deals under this name today
+  { canonical: 'Cutting Edge Solutions', aliases: ['Cutting Edge Solutions'] }, // no deals under this name today
+  { canonical: 'Demo BPO', aliases: ['Demo BPO'] }, // no deals under this name today
+  { canonical: 'Dot BPO', aliases: ['Dot BPO'] }, // no deals under this name today
+  { canonical: 'Enigma Global Solutions', aliases: ['Enigma Global Solutions'] },
+  { canonical: 'Flex BPO', aliases: ['Flex BPO'] },
+  { canonical: 'H&A', aliases: ['H&A'] },
+  { canonical: 'Index Global Solutions', aliases: ['Index Global Solutions'] },
+  { canonical: 'JPS GLOBAL SOLUTIONS', aliases: ['JPS GLOBAL SOLUTIONS'] },
+  { canonical: 'LA Referral BPO', aliases: ['LA Referral BPO'] },
+  { canonical: 'Next Era BPO', aliases: ['Next Era BPO'] },
+  { canonical: 'Ominix BPO', aliases: ['Ominix BPO'] },
+  { canonical: 'Orbit IQ', aliases: ['Orbit IQ'] },
+  { canonical: 'Prime Bridge', aliases: ['Prime Bridge'] },
+  { canonical: 'Procure BPO', aliases: ['Procure BPO'] },
+  { canonical: 'Progressive BPO', aliases: ['Progressive BPO'] },
+  { canonical: 'Retention BPO', aliases: ['Retention BPO'] },
+  { canonical: 'RevoXa Solutions', aliases: ['RevoXa Solutions'] },
+  { canonical: 'SmartTel Solutions', aliases: ['SmartTel Solutions'] }, // no deals under this name today
+  { canonical: 'Telecom BPO', aliases: ['Telecom BPO'] },
+  { canonical: 'TIC Service', aliases: ['TIC Service'] },
+  { canonical: 'V Talks', aliases: ['V Talks'] },
+  { canonical: 'Vize', aliases: ['Vize'] },
 ]
 
 const CALL_CENTER_ALIAS_TO_CANONICAL = new Map<string, string>(
@@ -142,6 +186,13 @@ function isPresetAllCallCentersFilter(value: string | string[] | null | undefine
 function hasCallCenterScope(filterCallCenter: string | string[] | null | undefined): boolean {
   if (Array.isArray(filterCallCenter)) return filterCallCenter.some((v) => String(v ?? '').trim().length > 0)
   return String(filterCallCenter ?? '').trim().length > 0
+}
+
+/** True when the name (in any spelling that folds to a listed alias) is in the canonical list. */
+export function isKnownCallCenter(callCenter: string | null | undefined): boolean {
+  const raw = String(callCenter ?? '').trim()
+  if (!raw) return false
+  return CALL_CENTER_ALIAS_TO_CANONICAL.has(callCenterKey(raw))
 }
 
 export function normalizeCallCenterName(callCenter: string | null | undefined): string {

@@ -16,7 +16,7 @@
  */
 
 import { supabase } from './supabaseClient'
-import { normalizeCallCenterName } from './invoicing'
+import { isKnownCallCenter, normalizeCallCenterName } from './invoicing'
 import {
   ESCROW_DEFAULT_CAP,
   ESCROW_DEFAULT_HOLD_RATE,
@@ -232,11 +232,14 @@ export function escrowModeForCallCenter(context: EscrowContext, callCenter: stri
  * True when a center's name is not in the canonical alias list, so it is being
  * used verbatim. Two spellings of the same center would then get two accounts,
  * two caps and twice the money held, which is worth warning about on screen.
+ *
+ * Tests list membership, not "did the name change": a center already spelled
+ * canonically (Nexpoint, INB) maps to itself and is still listed.
  */
 export function isUnrecognisedCallCenter(callCenter: string): boolean {
   const raw = String(callCenter ?? '').trim()
   if (!raw || raw === 'Unassigned') return false
-  return normalizeCallCenterName(raw) === raw
+  return !isKnownCallCenter(raw)
 }
 
 // --- Management (Escrow Settings page) ---------------------------------------
